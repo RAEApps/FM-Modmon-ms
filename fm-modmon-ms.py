@@ -1,0 +1,5383 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# FM-Modmon-ms: FM broadcast monitor for the SDRplay RSP1A (GNU Radio 3.10).
+# Copyright (C) 2026 RAE Apps
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option)
+# any later version. It is distributed WITHOUT ANY WARRANTY; without even the
+# implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License (LICENSE) for more details.
+"""
+FM-Modmon-ms: FM broadcast monitor for the SDRplay RSP1A (GNU Radio 3.10).
+
+On startup the RSP1A sweeps 88-108 MHz (about 3 s) and opens one receiver
+on the strongest station it finds. "Add receiver" opens more, up to four,
+each on the strongest station not yet open that still fits; each receiver
+has a dropdown of the stations found and a button to remove it. The 9.6 MS/s
+SDR window re-centres on the receivers' stations, so a station is only
+offered when it fits within 7.2 MHz of the others. Each receiver gets its own
+channel filter, stereo WBFM demodulator, RDS decoder and measurement blocks,
+and its own "radio" panel. Each panel has a Play button; one station plays
+at a time (stereo, 75 us de-emphasis; falls back to mono without a pilot).
+
+Run with radioconda's Python:
+    C:\\ProgramData\\radioconda\\python.exe fm-modmon-ms.py
+    C:\\ProgramData\\radioconda\\python.exe fm-modmon-ms.py --lna 2 --ifgr 35
+    C:\\ProgramData\\radioconda\\python.exe fm-modmon-ms.py --freqs 94.5 101.7
+    C:\\ProgramData\\radioconda\\python.exe fm-modmon-ms.py --no-scan --web-port 0
+
+Each panel's audio source can be analog FM, SCA audio from the 67 or 92
+kHz subcarrier, or IBOC (MPS, SPS1-SPS3). IBOC is decoded by nrsc5 (--nrsc5;
+default: nrsc5 on the PATH, else a build in a sibling folder such as
+../nrsc5/build/src/nrsc5.exe), which plays it on the default
+sound device; its status, station name, title, artist, bit rate, MER and BER
+show on the panel's IBOC line, the station logo and the song's album art
+beside it, its programme service data (artist, title,
+album, genre, comment) on the PSD line and its station information (name,
+slogan, message) on the SIS line. IBOC emergency alerts raise an alarm and
+their text goes to the event log.
+
+RadioDNS (ETSI TS 103 270): each station is looked up from its frequency,
+PI and GCC (ECC, or derived from --country) and, while IBOC plays, its IBOC
+station ID. Where the station's RadioDNS service information (SPI) can be
+read, its name and logo show on the panel's RadioDNS line; where it has a
+RadioDNS slideshow (RadioVIS, ETSI TS 101 499, over STOMP), its current
+slide (usually the album art) shows as the album art (after IBOC's own), and
+its text in the slide's tooltip. The RadioDNS line shows only while RadioDNS
+works for the station; the logo is used
+when no IBOC logo is on air. Some providers need a client identifier: set
+RADIODNS_CLIENT_ID (or --radiodns-client-id). Images and service information
+are cached for the session only (a %TEMP% folder deleted on exit).
+
+Each receiver has a settings button (name, de-emphasis, stereo/mono, play
+volume, PTY names, expected PI, RDS feed, alarms and their thresholds). The
+open receivers, their stations and settings are saved to fm-modmon-ms_config.json
+whenever they change, and restored at the next start (--freqs overrides).
+
+The web version of the app is served on http://<this-pc>:8765/ (unless
+--web-port 0): the same receiver panels, drawn in the browser and updated 10x
+per second, with the same controls, and each receiver's audio as a stream
+in the listener's choice of MP3, AAC, Opus or FLAC (/audio/1.mp3, .aac,
+.opus, .flac ... /audio/4.*; encoded by ffmpeg, --ffmpeg and --web-audio)
+for the page's player or any media player. Anyone who can reach the port
+can watch and listen; the controls need --web-password (or FM_MODMON_WEB_PASSWORD), or,
+when no password is set, a browser on this PC (http://localhost:8765/).
+
+Each receiver also serves its raw RDS groups over TCP (receiver 1 on port
+7711, 2 on 7712, 3 on 7713, 4 on 7714 by default, or the port set in the
+receiver's settings; --rds-port 0 turns them off) as hex text, one
+group per line, the format of an Inovonics INOmini 633 or RDS Spy, so RDS
+software that reads one of those over TCP (address <this-pc>:7711) can
+decode the groups itself. The feed follows whatever station its receiver
+is tuned to, and closes when the receiver is removed. Alarms and station changes go to
+the event log in the window, the web view and logs/fm-modmon-ms_events_YYYY-MM-DD.log.
+
+Notifications: "Settings" (in the window) sends alarms raised and cleared,
+SDR lost and recovered, and start / stop by email (SMTP; the password comes
+from the FM_MODMON_SMTP_PASSWORD environment variable, never the settings
+file) and / or a webhook (generic JSON, Slack, Microsoft Teams workflow or
+Discord). Events within NOTIFY_BATCH_S of each other go out as one message;
+failed sends are retried, and failures go to the event log.
+
+SDR watchdog: when no samples arrive from the RSP1A for SDR_STALL_S (USB
+dropout, driver fault), "SDR lost" is logged and notified, alarms pause, and
+the RSP1A is reopened until samples flow again; the meters then restart.
+Settings can also start FM-Modmon-ms when you sign in to Windows.
+
+Gain: at start-up (unless --lna or --ifgr is given) the RSP1A's LNA state
+and IF gain reduction are calibrated for the stations being received: for
+each LNA state the IF gain is set to keep the ADC's peaks CAL_PEAK_DBFS below
+full scale, and the state that gives the open stations the best average
+S/N over the noise floor is kept: the least gain within CAL_TOLERANCE_DB of
+the best (once antenna noise dominates, more gain only costs headroom). Gain then stays fixed, so RF
+levels are comparable. "Recalibrate gain" repeats it on the running receivers
+(for example after the SDR window has moved); their meters restart afterwards.
+
+Measurements (refreshed 10x per second):
+  RDS
+    PI, PS, RT, PTY, flags, AF      from gr-rds' parser
+    RT+, PTYN, ECC, ODA list, CT    decoded here from the raw groups (CT as
+                                    local time, with its offset from UTC)
+    Groups/s, group loss            error-free groups; 11.4/s = no loss
+    Group types                     share of each group type received
+  Signal (each receiver passes +/-150 kHz of the FM signal, as a modulation
+  monitor's wide IF does, so subcarriers and L-R aren't cut)
+    RF level        channel power, dBFS (uncalibrated, depends on gain)
+    MPX S/N         unweighted, no de-emphasis: 100% mod tone vs. receiver
+                    noise in 0-15 kHz, estimated from the 16-18.3 kHz guard
+                    band (FM noise rises as f^2; the estimate allows for it)
+    Carrier offset  DC of demodulated MPX (station + SDR tuning error)
+    AM / multipath  envelope ripple of the carrier, RMS, as % of 100% AM
+                    (10% sine AM reads 10%; 0% = clean reception)
+    Pilot           19 kHz injection, % of 75 kHz (>3% = stereo), and its
+                    frequency from the stereo PLL (spec 19 kHz +/- 2 Hz)
+    RDS injection   57 kHz subcarrier peak deviation, % of 75 kHz (as
+                    encoders are set: 2 kHz = 2.7%), noise removed
+    SCA 67/92 kHz   subcarrier injection, % of 75 kHz, when one stands
+                    10 dB above the empty 77-82 kHz gap; else 'none'. What it
+                    carries, from its demodulated signal over ~6 s: AUDIO
+                    (programme: level and spectrum keep changing), DATA
+                    (steady and stationary; with the symbol rate when it is
+                    NRZ FSK), TONE, or IDLE (no modulation). SCA data services
+                    are proprietary, so data is identified, not decoded
+    IBOC signal     IBOC sidebands found by the start-up scan, in dBc
+  Modulation (100% = 75 kHz deviation)
+    Peak + / -      1 s peak of positive and negative excursions
+    Peak deviation  1 s peak of the 99.9th percentile of |MPX|
+    Over 100/110%   excursions above 100% / 110% in the last minute
+    L, R, L+R, L-R  1 s peak modulation of each, as transmitted
+    MPX power       ITU-R BS.412, 60 s, dBr (0 dBr = +/-19 kHz sine)
+    MPX spectrum    0-100 kHz, 500 Hz resolution, dB re 100% modulation
+  Loudness (ITU-R BS.1770 / EBU R128; 0 dBFS = 75 kHz deviation)
+    Momentary 400 ms, short-term 3 s, integrated (gated, since start/reset),
+    true peak per channel (4x oversampled, 1 s hold)
+  Stereo image (300 ms window)
+    L/R RMS level, balance, correlation (+1 mono, 0 wide, <0 out of phase),
+    width (side/mid energy ratio), goniometer
+  Alarms (raise/clear after holding 3-30 s)
+    carrier low/lost, audio silence, over-modulation, pilot lost, RDS
+    lost, wrong PI, IBOC emergency alert (while IBOC plays), and the
+    technical rules of the receiver's rule set (ISED for --country CA,
+    else FCC), every limit adjustable per receiver (changing one makes
+    the receiver's rules custom):
+      over-modulation  above 100% + 0.5% per 1% of subcarrier injection
+                       (RDS + SCA), never above 110% (FCC 47 CFR
+                       73.1570(b)(2); ISED BETS-6 A.2.2.4.4, BPR-3 3.13.2)
+      pilot            stereo pilot outside 8-10% or 19 kHz +/-2 Hz
+                       (FCC 73.322; ISED BETS-6 A.2.2.2)
+      subcarriers      total injection over 20%, or over 10% above 75/76 kHz
+                       (FCC 73.319(d)(2); ISED BETS-6 A.2.2.4.3, BPR-3 3.13.2)
+      carrier freq.    off by more than 2 kHz (FCC 73.1545(b)) / 1 kHz (ISED
+                       BETS-6 7.2.3, the transmitter stability standard);
+                       the reading includes the SDR's own tuning error
+"""
+
+import argparse
+import glob
+import concurrent.futures
+import contextlib
+import ctypes
+import gc
+import datetime
+import hmac
+import json
+import math
+import os
+import queue
+import re
+import secrets
+import shutil
+import smtplib
+import ssl
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from collections import Counter, deque
+from dataclasses import asdict, dataclass, field, fields
+from email.message import EmailMessage
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import numpy as np
+import pmt
+from PyQt5 import QtCore, QtGui, QtWidgets
+from scipy import signal as sps
+from gnuradio import analog, audio, blocks, digital, filter, gr
+from gnuradio.filter import firdes
+
+import rds  # gr-rds (radioconda package gnuradio-rds)
+
+DEFAULT_FREQS_MHZ = (94.5, 100.9, 101.7)
+SAMP_RATE = 9.6e6          # RSP1A rate; 8 MHz IF filter covers +/-3.7 MHz cleanly
+CHAN_DECIM = 25            # 9.6 MS/s -> 384 kS/s per station: room for the
+QUAD_RATE = SAMP_RATE / CHAN_DECIM  # +/-150 kHz an FM signal with SCA occupies
+AUDIO_DECIM = 8            # 384 kS/s -> 48 kS/s
+CHAN_PASS_HZ = 150e3       # channel filter: flat to +/-150 kHz, stop by +/-185 kHz
+AUDIO_RATE = int(QUAD_RATE / AUDIO_DECIM)
+MAX_DEV = 75e3             # FM broadcast 100% deviation
+MAX_SPAN = 7.2e6           # widest station spread that fits the 8 MHz IF filter
+PLAY_GAIN = 0.7
+UPDATE_HZ = 10             # measurement and display rate
+MAX_RECEIVERS = 4          # receivers the app runs at once
+FM_BATCH = 2048            # Python meters get samples in batches (~8.5 ms),
+AUDIO_BATCH = 512          # so they are called ~100x/s, not ~900x/s; powers
+                           # of two keep GNU Radio buffers aligned
+SRC_BUFFER = 1 << 18       # SDR output buffer, samples (~27 ms). GNU Radio's default
+                           # (4096) makes every block downstream run on ~100-sample
+                           # scraps thousands of times a second: 4x the CPU.
+CHAN_CHUNK = 512           # channel filters wait for this many outputs (~2 ms), so the
+                           # whole station runs in chunks of this size whatever the
+                           # SDR delivers per read
+RDS_CREST = 1.443          # IEC 62106 RDS waveform: peak / RMS (random data)
+GUARD_TO_AUDIO = (15e3 ** 3 / 3) / ((18.3e3 ** 3 - 16e3 ** 3) / 3 / 2.3e3)  # f^2 noise: 0-15 kHz power
+                           # per (Hz of guard-band noise density)
+RTPLUS_LEAD_S = 3.0        # RT+ tags may come this far before or after the RadioText they tag
+SDR_STALL_S = 3.0          # no samples from the SDR for this long: it is lost, reopen it
+SDR_RETRY_S = (2, 5, 10, 30)  # waits between reopening attempts (the last repeats)
+NOTIFY_BATCH_S = 5.0       # notifications this close together go out as one message
+NOTIFY_RETRY_S = (10, 60)  # waits before re-sending a failed notification
+STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs',
+                           'Startup', 'fm-modmon-ms.lnk')  # "start when I sign in to Windows"
+CAL_PEAK_DBFS = -10.0      # gain calibration: ADC peaks (99.99th percentile) held here
+CAL_TOLERANCE_DB = 1.5     # ...the least gain whose stations' S/N is this close to the best
+CAL_CLIP = 0.9            # ...and any sample at this fraction of full scale means overload
+CAL_LNA_STATES = range(9, -1, -1)  # tried from least gain to most
+CAL_DEFAULT = (4, 40)      # LNA state, IF gain reduction when not calibrated
+IQ_TAP_BATCH = 65536       # live calibration reads the SDR in batches this big
+SETTLE_UPDATES = 5         # meters ignore over-modulation this long after a (re)start
+SCA_CLASSIFY_DB = 15.0     # below this (above the gap) demodulated noise hides what an SCA carries
+SCA_BATCH = 4096           # the SCA analyser gets its signal in 85 ms batches
+SCA_MIN_DB = 10.0          # SCA must be this far above the 77-82 kHz gap
+DYNAMIC_PS_S = 30          # a PS that changes 3+ times in this long is dynamic
+PS_NAME_STABLE_S = 10      # a PS names the station once it has held this long
+OVERMOD_WINDOW_S = 0.001   # over-modulation is counted per 1 ms window
+OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes)
+MPX_POWER_S = 60           # ITU-R BS.412 MPX power integration time
+IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor
+WEB_PORT = 8765            # web view; 0 turns it off
+WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fm-modmon-ms-web.html')
+# Browser audio formats, encoded by ffmpeg from 48 kHz 16-bit stereo; offered when
+# ffmpeg has the encoder ('encoder') and the browser can play the type ('canplay').
+WEB_FORMATS = {
+    'mp3': {'label': 'MP3 128k', 'mime': 'audio/mpeg', 'canplay': 'audio/mpeg', 'encoder': 'libmp3lame',
+            'args': ['-c:a', 'libmp3lame', '-b:a', '128k', '-f', 'mp3']},
+    'aac': {'label': 'AAC 128k', 'mime': 'audio/aac', 'canplay': 'audio/aac', 'encoder': 'aac',
+            'args': ['-c:a', 'aac', '-b:a', '128k', '-f', 'adts']},
+    'opus': {'label': 'Opus 96k', 'mime': 'audio/ogg', 'canplay': 'audio/ogg; codecs="opus"', 'encoder': 'libopus',
+             'args': ['-c:a', 'libopus', '-b:a', '96k', '-f', 'ogg', '-page_duration', '100000']},
+    'flac': {'label': 'FLAC', 'mime': 'audio/flac', 'canplay': 'audio/flac', 'encoder': 'flac',
+             'args': ['-c:a', 'flac', '-compression_level', '5', '-f', 'flac']},
+}
+WEB_MAX_LISTENERS = 8     # browser audio streams at once, all receivers together
+WEB_BATCH = 4096           # browser audio reaches Python in 85 ms batches (it is buffered anyway)
+WEB_SOURCES = {'analog': 0, 'sca67': 1, 'sca92': 2}  # audio sources the browser can play
+RDS_TCP_PORT = 7711        # default RDS feed ports 7711-7714 (receiver 1-4); each is settable
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+APP_NAME = 'FM-Modmon-ms'
+APP_ID = 'fm-modmon-ms.monitor'   # Windows taskbar identity, so it shows our icon, not Python's
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fm-modmon-ms.ico')
+ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fm-modmon-ms_config.json')
+
+# Audio sources a receiver can play.
+AUDIO_SOURCES = (('analog', 'Analog FM'), ('sca67', 'SCA 67 kHz'), ('sca92', 'SCA 92 kHz'),
+                 ('iboc0', 'IBOC MPS'), ('iboc1', 'IBOC SPS1'), ('iboc2', 'IBOC SPS2'),
+                 ('iboc3', 'IBOC SPS3'))
+SCA_DEV = 6e3              # SCA subcarrier deviation taken as full scale
+SCA_DEEMPH_S = 150e-6      # SCA audio de-emphasis
+SCA_LEVEL = 0.5            # SCA play level relative to analog
+# IBOC is decoded by nrsc5 (https://github.com/theori-io/nrsc5), fed cs16 IQ on stdin.
+NRSC5_PATH = (shutil.which('nrsc5') or next(iter(sorted(glob.glob(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'nrsc5*', 'build', 'src',
+    'nrsc5.exe' if os.name == 'nt' else 'nrsc5')))), 'nrsc5'))
+IBOC_RATE = 744187.5       # nrsc5's cs16 input rate (NRSC5_SAMPLE_RATE_NATIVE_FM)
+IBOC_DECIM = 8             # 9.6 MS/s -> 1.2 MS/s before the fractional resampler
+IBOC_BATCH = 16384         # shorts per write to nrsc5 (~11 ms)
+MIME_PRIMARY_IMAGE = 0xBE4B7536   # nrsc5: LOT component carrying album art
+MIME_STATION_LOGO = 0xD9C72536    # nrsc5: LOT component carrying the station logo
+IMAGE_KEEP_S = 1800        # cached IBOC images not in use are pruned after this
+CACHE_PREFIX = 'fm-modmon-ms_cache_'  # session cache folder in %TEMP%, deleted on exit
+RADIODNS_RETRY_S = 300     # retry a failed RadioDNS lookup after this
+
+# PTY names: RBDS (North America, NRSC-4-B) and RDS (IEC 62106 / EN 50067).
+PTY_RBDS = ('None', 'News', 'Information', 'Sports', 'Talk', 'Rock', 'Classic Rock', 'Adult Hits',
+            'Soft Rock', 'Top 40', 'Country', 'Oldies', 'Soft', 'Nostalgia', 'Jazz', 'Classical',
+            'Rhythm and Blues', 'Soft Rhythm and Blues', 'Language', 'Religious Music',
+            'Religious Talk', 'Personality', 'Public', 'College', 'Spanish Talk', 'Spanish Music',
+            'Hip Hop', 'Unassigned', 'Unassigned', 'Weather', 'Emergency Test', 'Emergency')
+PTY_RDS = ('None', 'News', 'Current Affairs', 'Information', 'Sport', 'Education', 'Drama', 'Culture',
+           'Science', 'Varied', 'Pop Music', 'Rock Music', 'Easy Listening', 'Light Classical',
+           'Serious Classical', 'Other Music', 'Weather', 'Finance', "Children's Programmes",
+           'Social Affairs', 'Religion', 'Phone-in', 'Travel', 'Leisure', 'Jazz Music',
+           'Country Music', 'National Music', 'Oldies Music', 'Folk Music', 'Documentary',
+           'Alarm Test', 'Alarm')
+
+# RDS Open Data Application IDs and RT+ content types worth naming.
+ODA_NAMES = {0x4BD7: 'RT+', 0x6552: 'eRT', 0xCD46: 'TMC', 0xCD47: 'TMC', 0xC3B0: 'iTunes tagging'}
+RTPLUS_TYPES = {1: 'Title', 2: 'Album', 3: 'Track', 4: 'Artist', 5: 'Composition',
+                7: 'Conductor', 8: 'Composer', 9: 'Band', 10: 'Comment', 11: 'Genre',
+                12: 'News', 31: 'Programme', 32: 'Next programme'}
+
+# Band scan: North American 200 kHz raster (88.1 ... 107.9 MHz), in tenths of MHz.
+CHANNELS_MHZ10 = range(881, 1080, 2)
+SCAN_CENTERS = (91.0e6, 97.0e6, 103.0e6, 109.0e6)  # even tenths: DC never on a channel
+SCAN_HALF_WIDTH = 3.0e6    # use only the flat middle of each 8 MHz window
+SCAN_MIN_SNR = 10.0        # dB above the window's noise floor
+SCAN_SPLATTER_DB = 20.0    # ignore channels this far below a 200 kHz neighbour
+
+# SoapySDRPlay3 module (radioconda has none: the SDRplay API is closed source, so it is
+# built locally); used from ../soapysdrplay3-build/modules if there. SOAPY_SDR_PLUGIN_PATH overrides.
+DEFAULT_PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  '..', 'soapysdrplay3-build', 'modules')
+SDRPLAY_API_DIR = r'C:\Program Files\SDRplay\API\x64'
+
+
+def _soapy_env():
+    if not os.environ.get('SOAPY_SDR_PLUGIN_PATH') and os.path.isdir(DEFAULT_PLUGIN_DIR):
+        os.environ['SOAPY_SDR_PLUGIN_PATH'] = os.path.normpath(DEFAULT_PLUGIN_DIR)
+    # SDRplay API DLL, plus radioconda's DLLs so the other Soapy modules load
+    # quietly when this runs without `conda activate`.
+    if os.name == 'nt' and SDRPLAY_API_DIR not in os.environ.get('PATH', ''):
+        os.environ['PATH'] = os.pathsep.join([SDRPLAY_API_DIR, os.path.join(sys.prefix, 'Library', 'bin'),
+                                              os.environ.get('PATH', '')])
+
+
+def _retry(open_device, attempts=5):
+    """The SDRplay service can take a moment to free the RSP1A after a close."""
+    for i in range(attempts):
+        try:
+            return open_device()
+        except RuntimeError:
+            if i == attempts - 1:
+                raise
+            time.sleep(1.0)
+
+
+def pick_initial(found, n=3):
+    """Strongest n stations that fit together in one SDR window, sorted by frequency."""
+    best = []
+    for f0, _ in found:
+        group = sorted((s for s in found if f0 <= s[0] <= f0 + MAX_SPAN + 1),
+                       key=lambda s: -s[1])[:n]
+        if (len(group), sum(s for _, s in group)) > (len(best), sum(s for _, s in best)):
+            best = group
+    return sorted(f for f, _ in best)
+
+
+def band_scan(lna_state, if_gain_reduction, verbose=False):
+    """Sweep 88-108 MHz once. Returns (found, iboc_scan):
+    found = [(freq_hz, snr_db), ...] of stations; iboc_scan = {freq_hz: info} where
+    info is the IBOC digital-to-analog power ratio in dBc, None (no IBOC
+    sidebands), or 'adjacent' (a neighbour 200 kHz away hides the sidebands).
+
+    Steps the RSP1A through SCAN_CENTERS, averages a spectrum at each, and
+    measures every channel on the North American 200 kHz raster. A channel
+    counts as a station when it stands SCAN_MIN_SNR dB above the noise floor
+    and isn't just the sideband splatter of a much stronger neighbour. IBOC
+    shows up as flat sidebands 129-199 kHz either side of the carrier,
+    outside the receivers' channel filters, so it is detected here.
+    """
+    with _rsp1a_direct(lna_state, if_gain_reduction) as rsp:
+        return _scan(rsp, verbose)
+
+
+def _scan(rsp, verbose):
+    nfft = 4096
+    win = np.hanning(nfft).astype(np.float32)
+    bin_hz = SAMP_RATE / nfft
+    power = {}  # channel MHz*10 -> (density dB, floor dB, analog power, LSB dB, USB dB, IBOC power)
+    sb_lo, sb_hi = int(129.4e3 / bin_hz), int(198.4e3 / bin_hz)
+    an_half = int(100e3 / bin_hz)
+    for center in SCAN_CENTERS:
+        rsp.tune(center)
+        rsp.capture(int(SAMP_RATE * 0.1))                 # let the tuner settle
+        x = rsp.capture(int(SAMP_RATE * 0.25))
+        frames = x[:len(x) // nfft * nfft].reshape(-1, nfft) * win
+        psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(frames, axis=1)) ** 2, axis=0))
+        psd_db = 10 * np.log10(psd + 1e-20)
+        floor = float(np.percentile(psd_db, 20))
+        for ch in CHANNELS_MHZ10:
+            off = ch * 1e5 - center
+            if abs(off) > SCAN_HALF_WIDTH:
+                continue
+            k = int(round(off / bin_hz)) + nfft // 2
+            half = int(60e3 / bin_hz)
+            lsb, usb = psd[k - sb_hi:k - sb_lo + 1], psd[k + sb_lo:k + sb_hi + 1]
+            power[ch] = (10 * math.log10(np.mean(psd[k - half:k + half + 1])), floor,
+                         float(np.sum(psd[k - an_half:k + an_half + 1])),
+                         10 * math.log10(np.mean(lsb)), 10 * math.log10(np.mean(usb)),
+                         float(np.sum(lsb) + np.sum(usb)))
+
+    found, iboc_scan = [], {}
+    for ch, (p, floor, an, lsb_db, usb_db, sb) in sorted(power.items()):
+        snr = p - floor
+        neighbours = [power[n][0] for n in (ch - 2, ch + 2) if n in power]
+        splatter = neighbours and p < max(neighbours) - SCAN_SPLATTER_DB
+        if snr >= SCAN_MIN_SNR and not splatter:
+            found.append((ch * 100000, snr))
+    stations = {f // 100000 for f, _ in found}
+    for f, _ in found:
+        ch = f // 100000
+        _, floor, an, lsb_db, usb_db, sb = power[ch]
+        if stations & {ch - 2, ch + 2}:
+            iboc_scan[f] = 'adjacent'
+        elif min(lsb_db, usb_db) - floor >= IBOC_MIN_DB:
+            iboc_scan[f] = 10 * math.log10(sb / an)
+        else:
+            iboc_scan[f] = None
+    if verbose:
+        for ch, (p, floor, *_rest) in sorted(power.items()):
+            f = ch * 100000
+            print(f'{ch / 10:6.1f}  {p - floor:5.1f} dB  {"STATION" if f in iboc_scan else ""}  '
+                  f'{"IBOC " + str(iboc_scan[f]) if f in iboc_scan and iboc_scan[f] is not None else ""}')
+    return found, iboc_scan
+
+
+class _Rsp:
+    """What the band scan and gain calibration need from the SDR: tune(hz),
+    set_gain(lna_state, if_gain_reduction) and capture(n) -> complex64 IQ."""
+
+    def __init__(self, tune, set_gain, capture):
+        self.tune, self.set_gain, self.capture = tune, set_gain, capture
+
+
+@contextlib.contextmanager
+def _rsp1a_direct(lna_state, if_gain_reduction, center_hz=None):
+    """The RSP1A opened directly through SoapySDR (no flowgraph) and streaming;
+    released on exit so the receiver can open it."""
+    _soapy_env()
+    import SoapySDR
+    from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32
+
+    dev = _retry(lambda: SoapySDR.Device('driver=sdrplay'))
+    dev.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE)
+    dev.setBandwidth(SOAPY_SDR_RX, 0, 8e6)
+    dev.setGainMode(SOAPY_SDR_RX, 0, False)
+
+    def set_gain(lna, ifgr):
+        dev.setGain(SOAPY_SDR_RX, 0, 'IFGR', min(max(ifgr, 20), 59))
+        dev.setGain(SOAPY_SDR_RX, 0, 'RFGR', min(max(lna, 0), 9))
+
+    set_gain(lna_state, if_gain_reduction)
+    if center_hz:
+        dev.setFrequency(SOAPY_SDR_RX, 0, center_hz)
+    for key in ('rfnotch_ctrl', 'dabnotch_ctrl'):
+        try:
+            dev.writeSetting(key, 'false')
+        except Exception:
+            pass
+    stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+    dev.activateStream(stream)
+    buf = np.empty(65536, np.complex64)
+
+    def capture(n):
+        out, got = np.empty(n, np.complex64), 0
+        while got < n:
+            sr = dev.readStream(stream, [buf], min(len(buf), n - got), timeoutUs=1000000)
+            if sr.ret > 0:
+                out[got:got + sr.ret] = buf[:sr.ret]
+                got += sr.ret
+        return out
+
+    try:
+        yield _Rsp(lambda hz: dev.setFrequency(SOAPY_SDR_RX, 0, hz), set_gain, capture)
+    finally:
+        dev.deactivateStream(stream)
+        dev.closeStream(stream)
+        dev.close()  # release the RSP1A before the receiver opens it
+
+
+def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
+    """Choose the LNA state and IF gain reduction for receiving freqs_hz with
+    the SDR centred on center_hz. rsp is an _Rsp already tuned there.
+
+    For each LNA state (least gain first) the IF gain reduction is set so the
+    ADC's peaks sit at CAL_PEAK_DBFS, then each station's level over the noise
+    floor is measured. Returns (lna, ifgr, report): the state giving the
+    stations the best average S/N without overload (the least gain within
+    CAL_TOLERANCE_DB of the best, since past the point where antenna noise
+    dominates more gain only costs headroom), its IF gain reduction, and a
+    one-line report."""
+    nfft = 4096
+    win = np.hanning(nfft).astype(np.float32)
+    bin_hz = SAMP_RATE / nfft
+    flat = slice(int(nfft / 2 - 3.6e6 / bin_hz), int(nfft / 2 + 3.6e6 / bin_hz))  # inside the IF filter
+
+    def measure():
+        rsp.capture(int(SAMP_RATE * 0.05))       # samples from before the gain change
+        x = rsp.capture(int(SAMP_RATE * 0.2))
+        mag = np.abs(x)
+        peak_db = 20 * math.log10(float(np.percentile(mag, 99.99)) + 1e-12)
+        clipped = bool(np.max(mag) >= CAL_CLIP)
+        frames = x[:len(x) // nfft * nfft].reshape(-1, nfft) * win
+        psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(frames, axis=1)) ** 2, axis=0))
+        psd_db = 10 * np.log10(psd + 1e-20)
+        floor = float(np.percentile(psd_db[flat], 20))
+        snrs = []
+        for f in freqs_hz:
+            k = int(round((f - center_hz) / bin_hz)) + nfft // 2
+            half = int(60e3 / bin_hz)
+            snrs.append(10 * math.log10(float(np.mean(psd[k - half:k + half + 1]))) - floor)
+        return peak_db, clipped, float(np.mean(snrs)), min(snrs)
+
+    tried = []
+    ifgr = 40
+    for lna in CAL_LNA_STATES:
+        rsp.set_gain(lna, ifgr)
+        peak_db, clipped, snr, worst = measure()
+        for _ in range(3):  # bring the ADC peaks to CAL_PEAK_DBFS (IF gain is about 1 dB per dB)
+            new = int(round(min(max(ifgr + peak_db - CAL_PEAK_DBFS, 20), 59)))
+            if new == ifgr:
+                break
+            ifgr = new
+            rsp.set_gain(lna, ifgr)
+            peak_db, clipped, snr, worst = measure()
+            if abs(peak_db - CAL_PEAK_DBFS) <= 1.5:
+                break
+        tried.append((lna, ifgr, peak_db, clipped, snr, worst))
+        if progress:
+            progress(f'LNA {lna}: S/N {snr:.1f} dB (weakest {worst:.1f})' + (' (overload)' if clipped else ''))
+        good = [t for t in tried if not t[3]]
+        if good and snr < max(t[4] for t in good) - 6:
+            break                                # past the best: more gain only adds overload
+        last = [t[4] for t in tried[-3:]]
+        if len(good) >= 4 and len(last) == 3 and max(last) - min(last) < 1.0:
+            break                                # S/N has levelled off: antenna noise dominates
+    good = [t for t in tried if not t[3]] or tried
+    best = max(t[4] for t in good)
+    lna, ifgr, peak_db, _, snr, worst = next(t for t in good if t[4] >= best - CAL_TOLERANCE_DB)
+    report = (f'LNA {lna} \u00b7 IFGR {ifgr} dB: stations {snr:.0f} dB over the floor on average '
+              f'(weakest {worst:.0f} dB), '
+              f'ADC peaks {peak_db:.0f} dBFS ({len(tried)} LNA states tried)')
+    return lna, ifgr, report
+
+
+def calibrate_startup(receivers_hz, lna, ifgr, progress=None):
+    """Gain calibration on the RSP1A before the receiver opens it."""
+    center = _centre(receivers_hz)
+    with _rsp1a_direct(lna, ifgr, center) as rsp:
+        rsp.capture(int(SAMP_RATE * 0.1))  # let the tuner settle
+        return calibrate_gain(rsp, center, list(receivers_hz), progress)
+
+
+class IqTap(gr.sync_block):
+    """Hands the SDR's IQ to grab() while one is waiting (live gain calibration)."""
+
+    def __init__(self):
+        gr.sync_block.__init__(self, name='iq_tap', in_sig=[(np.complex64, IQ_TAP_BATCH)], out_sig=None)
+        self._want = 0
+        self._chunks = []
+        self._done = threading.Event()
+
+    def grab(self, n, timeout=5.0):
+        self._chunks = []
+        self._done.clear()
+        self._want = n
+        if not self._done.wait(timeout):
+            self._want = 0
+            raise RuntimeError('no samples from the SDR')
+        return np.concatenate(self._chunks)[:n]
+
+    def work(self, input_items, output_items):
+        if self._want > 0:
+            for v in input_items[0]:
+                self._chunks.append(v.copy())
+                self._want -= len(v)
+                if self._want <= 0:
+                    self._done.set()
+                    break
+        return len(input_items[0])
+
+
+def make_rsp1a(center_hz, lna_state, if_gain_reduction):
+    """Open the RSP1A through SoapySDR with fixed gain and the FM notch off."""
+    _soapy_env()
+    from gnuradio import soapy
+
+    src = _retry(lambda: soapy.source('driver=sdrplay', 'fc32', 1, '', '', [''], ['']))
+    src.set_sample_rate(0, SAMP_RATE)
+    src.set_bandwidth(0, 8e6)
+    src.set_frequency(0, center_hz)
+    src.set_gain_mode(0, False)
+    src.set_gain(0, 'IFGR', min(max(if_gain_reduction, 20), 59))
+    src.set_gain(0, 'RFGR', min(max(lna_state, 0), 9))
+    # The RSP1A has a switchable FM broadcast notch; it must be off for this.
+    for key in ('rfnotch_ctrl', 'dabnotch_ctrl'):
+        try:
+            src.write_setting(key, False)
+        except Exception as e:
+            print(f'could not set {key}: {e}')
+    return src
+
+
+def _db(power):
+    return 10 * math.log10(power) if power > 1e-20 else -math.inf
+
+
+class FmMeter(gr.sync_block):
+    """Measures a station from its channel IQ and MPX (both at QUAD_RATE).
+
+    Results land in self.stats (a dict, replaced atomically) UPDATE_HZ times
+    a second; on_stats(stats) is called with each result.
+    MPX is scaled so 1.0 == 75 kHz deviation.
+    """
+
+    NFFT = int(QUAD_RATE / 50)  # 50 Hz bins
+
+    def __init__(self, on_stats=None):
+        gr.sync_block.__init__(self, name='fm_meter',
+                               in_sig=[(np.complex64, FM_BATCH), (np.float32, FM_BATCH)], out_sig=None)
+        self.stats = None
+        self.last_update = None   # time.monotonic() of the last measurement: samples are flowing
+        self._on_stats = on_stats
+        self._period = int(QUAD_RATE / UPDATE_HZ)
+        self._chunks = []
+        self._count = 0
+        self._iq_energy = 0.0
+        self._win = np.hanning(self.NFFT).astype(np.float32)
+        self._dc_win = np.hanning(self._period)
+        self._freqs = np.fft.rfftfreq(self.NFFT, 1.0 / QUAD_RATE)
+        # The quadrature demodulator's phase-difference output rolls off as
+        # sinc(f/fs): -0.8 dB at 57 kHz, -2.2 dB at 92 kHz. Undo it.
+        self._demod_comp = 1.0 / np.sinc(self._freqs / QUAD_RATE) ** 2
+        self._psd = None
+        self._rf = None
+        self._offset = None
+        self._peaks = deque(maxlen=UPDATE_HZ)  # 1 s peak hold
+        self._pos = deque(maxlen=UPDATE_HZ)    # +/- peaks, 1 s hold
+        self._neg = deque(maxlen=UPDATE_HZ)
+        self._over = deque(maxlen=60 * UPDATE_HZ)          # over-mod excursions per update, 60 s
+        self._over_prev = np.zeros(2, bool)                # was the last 1 ms window over 100/110%?
+        self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
+        self._am = None
+        self._env_sum = 0.0
+        self._settle = SETTLE_UPDATES
+        self._reset = False
+
+    def reset(self):
+        """Start fresh (new station). Takes effect in the flowgraph thread."""
+        self._reset = True
+        self.stats = None
+
+    def work(self, input_items, output_items):
+        iq, mpx = (a.reshape(-1) for a in input_items)  # batches -> samples
+        if self._reset:
+            self._reset = False
+            self._chunks, self._count, self._iq_energy = [], 0, 0.0
+            self._psd = self._rf = self._offset = self._am = None
+            self._env_sum = 0.0
+            for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms):
+                d.clear()
+            self._over_prev = np.zeros(2, bool)
+            self._settle = SETTLE_UPDATES
+            self.stats = None
+        self._iq_energy += float(np.vdot(iq, iq).real)
+        self._env_sum += float(np.sum(np.abs(iq)))
+        self._chunks.append(mpx.copy())
+        self._count += len(mpx)
+        if self._count >= self._period:
+            self.last_update = time.monotonic()
+            self.stats = self._measure(np.concatenate(self._chunks),
+                                       self._iq_energy / self._count, self._env_sum / self._count)
+            self._chunks, self._count, self._iq_energy, self._env_sum = [], 0, 0.0, 0.0
+            if self._on_stats:
+                self._on_stats(self.stats)
+        return len(input_items[0])
+
+    @staticmethod
+    def _smooth(old, new, alpha):
+        return new if old is None else old + alpha * (new - old)
+
+    @staticmethod
+    def _sca(band, lo, hi):
+        """SCA subcarrier injection (% of 75 kHz), or None if absent.
+
+        The 77-82 kHz gap between the two SCA slots is empty on every
+        station, so it is the noise reference; a subcarrier must stand
+        SCA_MIN_DB above it.
+        """
+        floor = band(77e3, 82e3) / 5e3 * (hi - lo)
+        power = band(lo, hi)
+        if power < floor * 10 ** (SCA_MIN_DB / 10):
+            return None
+        return math.sqrt(2 * (power - floor)) * 100, _db(power / floor)
+
+    def _measure(self, x, iq_power, env_mean):
+        # Carrier offset = DC of the MPX; Hann-weighted so bass leaks less,
+        # then smoothed over a few seconds.
+        if len(x) != len(self._dc_win):
+            self._dc_win = np.hanning(len(x))
+        w = self._dc_win
+        mean = float(np.dot(w, x) / np.sum(w))
+        self._offset = self._smooth(self._offset, mean, 0.03)
+        self._rf = self._smooth(self._rf, iq_power, 0.3)
+        x = x - mean
+        frames = x[:len(x) // self.NFFT * self.NFFT].reshape(-1, self.NFFT) * self._win
+        # One-sided power per bin, so summing a band gives that band's variance.
+        psd = np.mean(np.abs(np.fft.rfft(frames, axis=1)) ** 2, axis=0)
+        psd *= 2.0 / (self.NFFT * np.sum(self._win ** 2)) * self._demod_comp
+        self._psd = self._smooth(self._psd, psd, 0.25)
+        ax = np.abs(x)
+        self._peaks.append(float(np.percentile(ax, 99.9)))
+        # Modulation-monitor style: +/- peaks (relative to the carrier's rest
+        # frequency), 1 ms windows over 100%/110%, and BS.412 MPX power.
+        neg, pos = np.percentile(x, (0.05, 99.95))
+        self._pos.append(float(pos))
+        self._neg.append(float(-neg))
+        # Count excursions (runs of 1 ms windows over the limit), like a
+        # monitor's peak counter, so one long burst counts once.
+        win = int(QUAD_RATE * OVERMOD_WINDOW_S)
+        sustained = ax
+        for k in range(1, max(1, round(QUAD_RATE * OVERMOD_MIN_S))):
+            sustained = np.minimum(sustained, np.roll(ax, k))
+        wmax = sustained[:len(x) // win * win].reshape(-1, win).max(axis=1)
+        counts = []
+        for i, limit in enumerate((1.0, 1.1)):
+            over = wmax > limit
+            starts = np.count_nonzero(over[1:] & ~over[:-1]) + int(bool(over[0]) and not self._over_prev[i])
+            self._over_prev[i] = bool(over[-1])
+            counts.append(starts)
+        if self._settle:  # filters still settling after a (re)start: their transients aren't programme
+            self._settle -= 1
+        else:
+            self._over.append(counts)
+            self._mpx_ms.append(float(np.mean(x * x)))
+        # A clean FM carrier has constant amplitude; envelope ripple is
+        # multipath / synchronous AM (plus noise on weak signals).
+        if env_mean > 0:
+            # RMS ripple x sqrt(2): the % of a sine AM with the same RMS
+            self._am = self._smooth(self._am, math.sqrt(2 * max(iq_power - env_mean ** 2, 0.0)) / env_mean, 0.3)
+        over = np.sum(self._over, axis=0) if self._over else np.zeros(2)
+
+        def band(lo, hi):
+            return float(np.sum(self._psd[(self._freqs >= lo) & (self._freqs <= hi)])) + 1e-20
+
+        noise_per_hz = band(16e3, 18.3e3) / 2.3e3
+        # FM noise density rises with f^2; remove the expected noise from the RDS band.
+        # The guard band and RDS band got different demod corrections; apply the ratio.
+        rds_noise = (noise_per_hz * (57e3 / 17.15e3) ** 2 * 4.8e3
+                     * (np.sinc(17.15e3 / QUAD_RATE) / np.sinc(57e3 / QUAD_RATE)) ** 2)
+        return {
+            'rf_dbfs': _db(self._rf),
+            'snr_db': _db(0.5 / (noise_per_hz * GUARD_TO_AUDIO)),
+            'offset_hz': self._offset * MAX_DEV,
+            'peak_dev_khz': max(self._peaks) * MAX_DEV / 1e3,
+            'pos_pct': max(self._pos) * 100,
+            'neg_pct': max(self._neg) * 100,
+            'over100_min': int(over[0]),
+            'over110_min': int(over[1]),
+            # BS.412: 0 dBr = power of a sine at +/-19 kHz deviation.
+            'mpx_dbr': _db(np.mean(self._mpx_ms) * MAX_DEV ** 2 / (19e3 ** 2 / 2)) if self._mpx_ms else -math.inf,
+            'mpx_window_s': len(self._mpx_ms) / UPDATE_HZ,
+            'am_pct': (self._am or 0.0) * 100,
+            'pilot_pct': math.sqrt(2 * band(18.9e3, 19.1e3)) * 100,
+            # Report RDS only when it stands 3 dB above the expected noise.
+            'rds_pct': (math.sqrt(2 * (band(54.6e3, 59.4e3) - rds_noise)) * RDS_CREST * 100
+                        if band(54.6e3, 59.4e3) > 2 * rds_noise else 0.0),
+            **{f'sca{khz}_{key}': v for khz, lo, hi in ((67, 60e3, 74e3), (92, 85e3, 99e3))
+               for key, v in zip(('pct', 'db'), self._sca(band, lo, hi) or (None, None))},
+            # 500 Hz buckets centred on 0.5, 1.0 ... 100 kHz (so 19/38/57 kHz sit
+            # mid-bucket), in dB re a 100% (75 kHz) sine: 9% pilot reads -21 dB.
+            'mpx_db': 10 * np.log10(np.add.reduceat(self._psd[:2005], range(5, 2005, 10)) / 0.5 + 1e-12),
+        }
+
+
+# ITU-R BS.1770 K-weighting at 48 kHz: high shelf, then high-pass.
+K_FILTERS = (([1.53512485958697, -2.69169618940638, 1.19839281085285],
+              [1.0, -1.69065929318241, 0.73248077421585]),
+             ([1.0, -2.0, 1.0],
+              [1.0, -1.99004745483398, 0.99007225036621]))
+
+
+class ScaMeter(gr.sync_block):
+    """What each SCA subcarrier carries, from its FM-demodulated signal
+    (inputs: 67 and 92 kHz, AUDIO_RATE, 1.0 = SCA_DEV). Every 2 s each is
+    judged audio, data, tone or idle; self.kinds[67 | 92] is the majority of
+    the last three judgements with, for data, the symbol rate if one was
+    seen: (kind, baud or None), or None until there is a judgement.
+
+    Programme audio keeps changing level and spectrum; data is steady and
+    its spectrum stationary, and NRZ FSK data shows its symbol rate as a
+    spectral line in |d/dt| of the demodulated signal."""
+
+    WINDOW = 2 * AUDIO_RATE
+
+    def __init__(self):
+        gr.sync_block.__init__(self, name='sca_meter', in_sig=[(np.float32, SCA_BATCH)] * 2, out_sig=None)
+        self.kinds = {67: None, 92: None}
+        self._buf = {67: [], 92: []}
+        self._verdicts = {67: deque(maxlen=3), 92: deque(maxlen=3)}
+        self._reset = False
+
+    def reset(self):
+        """New station. Takes effect in the flowgraph thread."""
+        self._reset = True
+        self.kinds = {67: None, 92: None}
+
+    def work(self, input_items, output_items):
+        if self._reset:
+            self._reset = False
+            for khz in (67, 92):
+                self._buf[khz].clear()
+                self._verdicts[khz].clear()
+        for khz, x in zip((67, 92), input_items):
+            buf = self._buf[khz]
+            buf.append(x.reshape(-1).copy())
+            if sum(len(b) for b in buf) >= self.WINDOW:
+                verdicts = self._verdicts[khz]
+                verdicts.append(self.judge(np.concatenate(buf)[:self.WINDOW].astype(np.float64)))
+                buf.clear()
+                kinds = [k for k, _ in verdicts]
+                kind = max(set(kinds), key=kinds.count)
+                bauds = [b for k, b in verdicts if k == 'data' and b]
+                self.kinds = {**self.kinds, khz: (kind, float(np.median(bauds)) if bauds else None)}
+        return len(input_items[0])
+
+    @staticmethod
+    def judge(x):
+        """(kind, baud or None) for 2 s of demodulated subcarrier."""
+        x = x - np.mean(x)
+        if np.sqrt(np.mean(x * x)) < 0.02:                  # < ~120 Hz RMS deviation
+            return 'idle', None
+        # 20 ms frame levels: programme varies, data doesn't
+        frames = x[:len(x) // 960 * 960].reshape(-1, 960)
+        level = 10 * np.log10(np.mean(frames * frames, axis=1) + 1e-12)
+        level_sd = float(np.std(level[level > level.max() - 40]))
+        # 200 ms spectra in 16 log bands: how much they change frame to frame
+        n = 9600
+        spec = np.abs(np.fft.rfft(x[:len(x) // n * n].reshape(-1, n) * np.hanning(n), axis=1)) ** 2
+        f = np.fft.rfftfreq(n, 1 / AUDIO_RATE)
+        edges = np.geomspace(300, 15000, 17)
+        bands = np.stack([spec[:, (f >= lo) & (f < hi)].sum(axis=1) for lo, hi in zip(edges, edges[1:])], axis=1)
+        flux = float(np.mean(np.abs(np.diff(10 * np.log10(bands + 1e-12), axis=0))))
+        # symbol-rate line in |d/dt| (the transitions of NRZ data)
+        d = np.abs(np.diff(x))
+        line = np.abs(np.fft.rfft((d - d.mean()) * np.hanning(len(d)))) ** 2
+        fd = np.fft.rfftfreq(len(d), 1 / AUDIO_RATE)
+        band = (fd > 150) & (fd < 16000)
+        k = int(np.argmax(line[band]))
+        line_db = 10 * math.log10(line[band][k] / (np.median(line[band]) + 1e-20) + 1e-20)
+        if line_db > 80:                                    # a single steady tone
+            return 'tone', None
+        baud = float(fd[band][k]) if line_db > 35 else None
+        if baud or (level_sd < 1.5 and flux < 1.6):
+            return 'data', baud
+        return 'audio', None
+
+
+class AudioMeter(gr.sync_block):
+    """Loudness (BS.1770) and stereo image from de-emphasised L/R, plus L, R,
+    L+R and L-R modulation from the pre-de-emphasis matrix, all at AUDIO_RATE.
+
+    Inputs: L, R (de-emphasised), M = (L+R)/2 and S = (L-R)/2 as transmitted
+    (MPX units, 1.0 = 75 kHz). Results land in self.stats every 100 ms;
+    self.scope holds recent L/R samples for the goniometer.
+    """
+
+    def __init__(self):
+        gr.sync_block.__init__(self, name='audio_meter',
+                               in_sig=[(np.float32, AUDIO_BATCH)] * 4, out_sig=None)
+        self.stats = None
+        self.scope = None
+        self._hop = AUDIO_RATE // UPDATE_HZ
+        self._chunks = ([], [], [], [])
+        self._count = 0
+        self._zi = [[np.zeros(2) for _ in K_FILTERS] for _ in range(2)]
+        self._kpow = deque(maxlen=30)      # per-hop K-weighted (sum, n): 3 s
+        self._sums = deque(maxlen=3)       # per-hop stereo sums: 300 ms
+        self._tpk = deque(maxlen=UPDATE_HZ)  # per-hop true peaks: 1 s hold
+        self._tp_tail = [np.zeros(self.TP_TAIL), np.zeros(self.TP_TAIL)]
+        self._mod = deque(maxlen=UPDATE_HZ)  # per-hop L/R/M/S peaks: 1 s hold
+        self._gated = []                   # 400 ms block powers > -70 LUFS
+        self._reset = False
+        self._reset_all = False
+
+    def reset_integrated(self):
+        self._reset = True
+
+    def reset(self):
+        """Start fresh (new station). Takes effect in the flowgraph thread."""
+        self._reset_all = True
+        self.stats = self.scope = None
+
+    def work(self, input_items, output_items):
+        ins = [a.reshape(-1) for a in input_items]  # batches -> samples
+        if self._reset_all:
+            self._reset_all = False
+            self._chunks, self._count = ([], [], [], []), 0
+            self._tp_tail = [np.zeros(self.TP_TAIL), np.zeros(self.TP_TAIL)]
+            for d in (self._kpow, self._sums, self._tpk, self._mod):
+                d.clear()
+            self._gated = []
+            self.stats = self.scope = None
+        for chunk, x in zip(self._chunks, ins):
+            chunk.append(x.copy())
+        self._count += len(ins[0])
+        if self._count >= self._hop:
+            self._process(*(np.concatenate(c) for c in self._chunks))
+            self._chunks = ([], [], [], [])
+            self._count = 0
+        return len(input_items[0])
+
+    def _kweight(self, ch, x):
+        for i, (b, a) in enumerate(K_FILTERS):
+            x, self._zi[ch][i] = sps.lfilter(b, a, x, zi=self._zi[ch][i])
+        return x
+
+    TP_TAIL = 32  # input samples carried between hops for true-peak oversampling
+
+    def _true_peak(self, ch, x):
+        """4x-oversampled peak. Each hop is overlapped with the previous hop's
+        tail and the filter's edge ringing is discarded, so block boundaries
+        don't inflate the reading."""
+        y = sps.resample_poly(np.concatenate((self._tp_tail[ch], x)), 4, 1)
+        self._tp_tail[ch] = x[-self.TP_TAIL:]
+        half = 4 * self.TP_TAIL // 2
+        return float(np.max(np.abs(y[half:-half])))
+
+    def _process(self, l, r, mid, side):
+        l64, r64 = l.astype(np.float64), r.astype(np.float64)
+        n = len(l)
+        kl, kr = self._kweight(0, l64), self._kweight(1, r64)
+        self._kpow.append((np.dot(kl, kl) + np.dot(kr, kr), n))
+        s, m = l64 - r64, l64 + r64
+        self._sums.append(np.array([np.dot(l64, l64), np.dot(r64, r64), np.dot(l64, r64),
+                                    np.dot(s, s), np.dot(m, m), n]))
+        self._tpk.append([self._true_peak(0, l64), self._true_peak(1, r64)])
+        self.scope = (l[-960:].copy(), r[-960:].copy())   # 20 ms; the small goniometer draws the last 400
+        self._mod.append([np.max(np.abs(mid + side)), np.max(np.abs(mid - side)),
+                          np.max(np.abs(mid)), np.max(np.abs(side))])
+
+        def lufs(blocks_):
+            e = sum(b[0] for b in blocks_)
+            cnt = sum(b[1] for b in blocks_)
+            return -0.691 + _db(e / cnt), e / cnt
+
+        momentary, m_pow = lufs(list(self._kpow)[-4:])
+        short_term, _ = lufs(self._kpow)
+        if self._reset:
+            self._gated, self._reset = [], False
+        if len(self._kpow) >= 4 and momentary > -70:
+            self._gated.append(m_pow)
+        integrated = -math.inf
+        if self._gated:
+            g = np.array(self._gated)
+            rel_gate = -0.691 + _db(float(np.mean(g))) - 10
+            above = g[-0.691 + 10 * np.log10(g) > rel_gate]
+            if len(above):
+                integrated = -0.691 + _db(float(np.mean(above)))
+
+        ll, rr, lr, ss, mm, cnt = np.sum(self._sums, axis=0)
+        tp = np.max(self._tpk, axis=0)
+        mod = np.max(self._mod, axis=0) * 100
+        self.stats = {
+            'mod_l': mod[0], 'mod_r': mod[1], 'mod_m': mod[2], 'mod_s': mod[3],
+            'momentary': momentary,
+            'short_term': short_term,
+            'integrated': integrated,
+            'tp_l': 20 * math.log10(tp[0] + 1e-10),
+            'tp_r': 20 * math.log10(tp[1] + 1e-10),
+            'rms_l': _db(ll / cnt),
+            'rms_r': _db(rr / cnt),
+            'correlation': lr / math.sqrt(ll * rr) if ll * rr > 1e-20 else 0.0,
+            'width_db': _db(ss / mm) if mm > 1e-20 else -math.inf,
+        }
+
+
+class RdsState(gr.sync_block):
+    """Collects gr-rds parser output into a dict, counts decoded groups, and
+    decodes the raw groups for what the parser doesn't report: group-type
+    statistics, ECC (1A), ODA announcements (3A), PTYN (10A) and RT+ tags."""
+
+    def __init__(self):
+        gr.sync_block.__init__(self, name='rds_state', in_sig=None, out_sig=None)
+        self.fields = {}
+        self.groups = 0
+        self._lock = threading.Lock()
+        self._raw = self._fresh_raw()
+        self.group_sink = None  # called with (a, b, c, d) for each error-free group
+        for port, handler in (('groups', self._on_group), ('parsed', self._on_parsed)):
+            self.message_port_register_in(pmt.intern(port))
+            self.set_msg_handler(pmt.intern(port), handler)
+
+    def reset(self, on_release, hold_s=1.5):
+        """New station: drop the old station's groups still in the pipeline
+        for hold_s, then call on_release (resets the parser) and start fresh."""
+        self.fields = {}
+        with self._lock:
+            self._raw = self._fresh_raw()
+        self._on_release = on_release
+        self._hold_until = time.monotonic() + hold_s
+
+    @staticmethod
+    def _fresh_raw():
+        return {'types': Counter(), 'ecc': None, 'oda': {}, 'ptyn': [' '] * 8, 'ptyn_ab': None,
+                'rtplus': {}, 'rtplus_toggle': None, 'rtplus_at': 0.0, 'rtplus_for': None,
+                'rt': '', 'rt_ab': None, 'rt_seg': {}, 'rt_flip_at': 0.0, 'pty': None, 'ct': None,
+                'ps': '', 'ps_buf': [' '] * 8, 'ps_mask': 0, 'ps_changes': deque(), 'ps_at': 0.0}
+
+    def snapshot(self):
+        """Thread-safe copy of the raw-group decode for the GUI."""
+        with self._lock:
+            r = self._raw
+            return {'types': dict(r['types']), 'ecc': r['ecc'], 'oda': dict(r['oda']),
+                    'ptyn': ''.join(r['ptyn']).strip() if r['ptyn_ab'] is not None else '',
+                    'rtplus': self._rtplus_items(r), 'pty': r['pty'], 'ps': r['ps'], 'ct': r['ct'],
+                    'ps_dynamic': self._ps_dynamic(r), 'ps_age': time.monotonic() - r['ps_at']}
+
+    @staticmethod
+    def _rtplus_items(raw):
+        """RT+ items as [(content type, text)], only for the RadioText they belong
+        to and only once that text is complete; [] otherwise."""
+        rt = raw['rt']
+        if not raw['rtplus'] or not rt:
+            return []
+        if raw['rtplus_for'] is None:  # waiting for its text; a station that never flips A/B: take the current one
+            if time.monotonic() - raw['rtplus_at'] <= RTPLUS_LEAD_S:
+                return []
+        elif raw['rtplus_for'] != raw['rt_ab']:
+            return []
+        return [(ct, rt[s:s + n + 1].strip()) for ct, (s, n) in raw['rtplus'].items()
+                if s + n < len(rt) and rt[s:s + n + 1].strip()]
+
+    @staticmethod
+    def _ps_dynamic(raw):
+        """Scrolling or block PS: the complete PS changed 3+ times in DYNAMIC_PS_S."""
+        changes = raw['ps_changes']
+        while changes and time.monotonic() - changes[0] > DYNAMIC_PS_S:
+            changes.popleft()
+        return len(changes) >= 3
+
+    def _held(self):
+        until = getattr(self, '_hold_until', None)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            self._hold_until = None
+            self._on_release()
+            self.fields = {}
+        return True  # also drop the message that ends the hold
+
+    def _on_group(self, msg):
+        if self._held():
+            return
+        self.groups += 1
+        # gr-rds sends (nil . u8vector): blocks A-D big-endian, then offset letters.
+        data = pmt.u8vector_elements(pmt.cdr(msg))
+        if len(data) >= 8:
+            group = tuple((data[i] << 8) | data[i + 1] for i in range(0, 8, 2))
+            with self._lock:
+                self._decode(*group)
+            if self.group_sink:
+                self.group_sink(*group)
+
+    def _decode(self, a, b, c, d):
+        raw = self._raw
+        gtype = b >> 11                      # group type * 2 + version (A=0, B=1)
+        raw['types'][f'{gtype >> 1}{"AB"[gtype & 1]}'] += 1
+        raw['pty'] = (b >> 5) & 0x1F
+        if gtype in (0, 1):                                  # 0A/0B: PS, two characters per group
+            # Take a PS only when segments 0-3 arrive in order within one cycle,
+            # so a scrolling or block PS is shown a whole frame at a time.
+            addr = b & 3
+            if addr == 0:
+                raw['ps_mask'] = 0
+            if raw['ps_mask'] == (1 << addr) - 1:
+                raw['ps_buf'][addr * 2:addr * 2 + 2] = bytes([d >> 8, d & 0xFF]).decode('latin-1')
+                raw['ps_mask'] |= 1 << addr
+                if raw['ps_mask'] == 0xF:
+                    ps = ''.join(raw['ps_buf'])
+                    if ps != raw['ps']:
+                        if raw['ps']:
+                            raw['ps_changes'].append(time.monotonic())
+                        raw['ps'] = ps
+                        raw['ps_at'] = time.monotonic()
+                    raw['ps_mask'] = 0
+            else:
+                raw['ps_mask'] = 0                           # a segment was missed: wait for the next 0
+        if gtype == 2 and (c >> 12) & 7 == 0:              # 1A variant 0: ECC
+            raw['ecc'] = c & 0xFF
+        elif gtype == 6:                                     # 3A: ODA announcement
+            raw['oda'][d] = b & 0x1F
+        elif gtype == 8:                                     # 4A: clock time (UTC + local offset)
+            mjd = ((b & 3) << 15) | (c >> 1)
+            hour, minute = ((c & 1) << 4) | (d >> 12), (d >> 6) & 0x3F
+            offset = (d & 0x1F) * (-30 if d & 0x20 else 30)  # minutes
+            if hour < 24 and minute < 60 and mjd > 15079:   # 15079 = 1900-03-01
+                utc = datetime.datetime(1858, 11, 17) + datetime.timedelta(days=mjd, hours=hour, minutes=minute)
+                raw['ct'] = (utc + datetime.timedelta(minutes=offset), offset)
+        elif gtype == 20:                                    # 10A: PTYN
+            ab = (b >> 4) & 1
+            if raw['ptyn_ab'] is not None and ab != raw['ptyn_ab']:
+                raw['ptyn'] = [' '] * 8
+            raw['ptyn_ab'] = ab
+            seg = (b & 1) * 4
+            raw['ptyn'][seg:seg + 4] = bytes([c >> 8, c & 0xFF, d >> 8, d & 0xFF]).decode('latin-1')
+        elif gtype == 4:                                     # 2A: RadioText, kept here to match RT+ against
+            ab, now = (b >> 4) & 1, time.monotonic()
+            if ab != raw['rt_ab']:                           # a new text
+                if raw['rt_ab'] is not None:
+                    # RT+ sent just before it is for it; anything older was for the old text
+                    if now - raw['rtplus_at'] <= RTPLUS_LEAD_S:
+                        raw['rtplus_for'] = ab
+                    else:
+                        raw['rtplus'], raw['rtplus_for'] = {}, None
+                raw['rt_ab'], raw['rt_seg'], raw['rt'], raw['rt_flip_at'] = ab, {}, '', now
+            raw['rt_seg'][b & 0xF] = bytes([c >> 8, c & 0xFF, d >> 8, d & 0xFF]).decode('latin-1')
+            text = ''.join(raw['rt_seg'].get(i, '\0' * 4) for i in range(16))
+            body = text.split('\r', 1)[0]
+            if '\0' not in body:                             # every segment up to the end is in
+                raw['rt'] = body.rstrip()
+        if gtype == raw['oda'].get(0x4BD7) and gtype not in (0, 6):  # RT+ tags
+            toggle, now = (b >> 4) & 1, time.monotonic()
+            if toggle != raw['rtplus_toggle']:               # a new item
+                # for the text that has just changed (tags sent after it), else for the next one
+                recent_flip = now - raw['rt_flip_at'] <= RTPLUS_LEAD_S
+                raw['rtplus_for'] = raw['rt_ab'] if raw['rtplus_toggle'] is None or recent_flip else None
+                raw['rtplus'], raw['rtplus_toggle'], raw['rtplus_at'] = {}, toggle, now
+            tags = {ctype: (start, length) for ctype, start, length in (
+                (((b & 7) << 3) | (c >> 13), (c >> 7) & 0x3F, (c >> 1) & 0x3F),
+                (((c & 1) << 5) | (d >> 11), (d >> 5) & 0x3F, d & 0x1F)) if ctype}
+            if tags:
+                raw['rtplus'].update(tags)
+            else:
+                raw['rtplus'] = {}                           # "no tags": nothing is tagged now
+
+    def _on_parsed(self, msg):
+        if self._held():
+            return
+        if pmt.is_tuple(msg):
+            kind = pmt.to_long(pmt.tuple_ref(msg, 0))
+            self.fields[kind] = pmt.symbol_to_string(pmt.tuple_ref(msg, 1))
+
+
+class RdsGroupServer:
+    """TCP server streaming one receiver's error-free RDS groups as hex text:
+    one group per line, four blocks of four hex digits, CR LF
+    (`C6B200C8E0CD4349`), as an Inovonics INOmini 633 or RDS Spy sends them.
+
+    While no group has gone out for a second, an all-errored line
+    (`---- ---- ---- ----`) is sent each second: the receiver is alive but
+    decodes no RDS, so a client can tell "no RDS off air" from "monitor
+    silent". Clients only listen; anything they send is ignored.
+    """
+
+    HEARTBEAT_S = 1.0
+    SEND_TIMEOUT_S = 2.0  # a client that can't take a line in this long is dropped
+
+    def __init__(self, bind, port):
+        self.port = port
+        self._clients = []
+        self._lock = threading.Lock()
+        self._last = 0.0
+        self._closed = False
+        self._sock = socket.create_server((bind, port))
+        threading.Thread(target=self._accept, daemon=True).start()
+        threading.Thread(target=self._heartbeat, daemon=True).start()
+
+    @property
+    def clients(self):
+        with self._lock:
+            return len(self._clients)
+
+    def send_group(self, a, b, c, d):
+        self._last = time.monotonic()
+        self._send(f'{a:04X}{b:04X}{c:04X}{d:04X}\r\n'.encode())
+
+    def _accept(self):
+        # On Windows, closing a listening socket from another thread while
+        # accept() blocks on it doesn't reliably stop it listening, so this
+        # thread polls for close() and closes the socket itself.
+        self._sock.settimeout(0.5)
+        while not self._closed:
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            conn.settimeout(self.SEND_TIMEOUT_S)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            with self._lock:
+                if self._closed:
+                    conn.close()
+                else:
+                    self._clients.append(conn)
+        self._sock.close()
+
+    def close(self):
+        """Stop listening (within half a second) and drop every client."""
+        self._closed = True
+        with self._lock:
+            for conn in self._clients:
+                conn.close()
+            self._clients.clear()
+
+    def _heartbeat(self):
+        while not self._closed:
+            time.sleep(self.HEARTBEAT_S)
+            if time.monotonic() - self._last >= self.HEARTBEAT_S:
+                self._send(b'---- ---- ---- ----\r\n')
+
+    def _send(self, data):
+        with self._lock:
+            for conn in list(self._clients):
+                try:
+                    conn.sendall(data)
+                except OSError:
+                    self._clients.remove(conn)
+                    conn.close()
+
+
+_cache_root = None
+
+
+def cache_dir():
+    """This session's cache folder (images, service information), made on first use."""
+    global _cache_root
+    if _cache_root is None:
+        _cache_root = tempfile.mkdtemp(prefix=CACHE_PREFIX)
+    return _cache_root
+
+
+def clear_cache(stale=False):
+    """Delete this session's cache, or (stale=True) ones left by a session that crashed."""
+    global _cache_root
+    if stale:
+        tmp = tempfile.gettempdir()
+        for name in os.listdir(tmp):
+            if name.startswith(CACHE_PREFIX) and os.path.join(tmp, name) != _cache_root:
+                shutil.rmtree(os.path.join(tmp, name), ignore_errors=True)
+    elif _cache_root:
+        shutil.rmtree(_cache_root, ignore_errors=True)
+        _cache_root = None
+
+
+class _DnsRecord(ctypes.Structure):
+    """The part of Windows' DNS_RECORDW this needs (CNAME and SRV data)."""
+
+
+_DnsRecord._fields_ = [
+    ('pNext', ctypes.POINTER(_DnsRecord)), ('pName', ctypes.c_wchar_p),
+    ('wType', ctypes.c_ushort), ('wDataLength', ctypes.c_ushort), ('Flags', ctypes.c_ulong),
+    ('dwTtl', ctypes.c_ulong), ('dwReserved', ctypes.c_ulong),
+    ('pNameTarget', ctypes.c_wchar_p),   # CNAME: pNameHost; SRV: pNameTarget
+    ('wPriority', ctypes.c_ushort), ('wWeight', ctypes.c_ushort), ('wPort', ctypes.c_ushort),
+    ('Pad', ctypes.c_ushort)]
+DNS_TYPE_CNAME, DNS_TYPE_SRV = 5, 33
+
+
+def dns_query(name, rtype):
+    """CNAME targets or SRV (priority, weight, port, target) for name, through
+    Windows' own resolver (no extra packages). [] when there are none (or
+    off Windows, where no resolver is wired up)."""
+    if os.name != 'nt':
+        return []
+    dnsapi = ctypes.windll.dnsapi
+    dnsapi.DnsQuery_W.argtypes = [ctypes.c_wchar_p, ctypes.c_ushort, ctypes.c_ulong, ctypes.c_void_p,
+                                  ctypes.POINTER(ctypes.POINTER(_DnsRecord)), ctypes.c_void_p]
+    dnsapi.DnsQuery_W.restype = ctypes.c_long
+    result = ctypes.POINTER(_DnsRecord)()
+    status = dnsapi.DnsQuery_W(name, rtype, 0, None, ctypes.byref(result), None)
+    if status in (9003, 9501):  # name does not exist, no records of this type
+        return []
+    if status:
+        raise OSError(f'DNS query for {name} failed ({status})')
+    out, rec = [], result
+    try:
+        while rec:
+            r = rec.contents
+            if r.wType == rtype:
+                out.append(r.pNameTarget if rtype == DNS_TYPE_CNAME
+                           else (r.wPriority, r.wWeight, r.wPort, r.pNameTarget))
+            rec = r.pNext
+    finally:
+        dnsapi.DnsRecordListFree(result, 1)
+    return out
+
+
+def radiodns_fm(pi, freq_hz, ecc, country):
+    """(RadioDNS FQDN, bearerURI) of an FM service, or None when the GCC can't
+    be known. GCC = PI country nibble + ECC; without an ECC it is derived from
+    the receiver's country (TS 103 270 Annex A; in North America RBDS PIs C
+    and B2-B7 are Canada (ECC A1), 1-9, A, B1, B8-BF, D and E the US (A0))."""
+    pi = pi.lower()
+    if len(pi) != 4:
+        return None
+    if not ecc and country in ('CA', 'US'):
+        if pi[0] == 'c' or (pi[0] == 'b' and pi[1] in '234567'):
+            ecc = 0xA1
+        elif pi[0] in '123456789ade' or (pi[0] == 'b' and pi[1] in '189abcdef'):
+            ecc = 0xA0
+    if not ecc:
+        return None
+    gcc = f'{pi[0]}{ecc:02x}'
+    freq = f'{int(round(freq_hz / 1e4)):05d}'  # 10 kHz units: 95.8 MHz -> 09580 (spec table 2)
+    return f'{freq}.{pi}.{gcc}.fm.radiodns.org', f'fm:{gcc}.{pi}.{freq}'
+
+
+def radiodns_iboc(country, facility, program):
+    """(RadioDNS FQDN, bearerURI) of an IBOC service from nrsc5's country and
+    facility ID: tx is the ID in 5 hex digits, cc the country letters packed
+    5 bits each (A=0; US -> 292), mId 2, 3, ... for SPS1, SPS2, ... (TS 103 270 5.1.5)."""
+    country = (country or '').upper()
+    if len(country) != 2 or not country.isalpha() or facility is None:
+        return None
+    cc = f'{((ord(country[0]) - 65) << 5) | (ord(country[1]) - 65):03x}'
+    tx = f'{facility:05x}'
+    mid = f'{program + 1}.' if program else ''
+    return f'{mid}{tx}.{cc}.hd.radiodns.org', f'hd:{cc}.{tx}' + (f'.{program + 1}' if program else '')
+
+
+def _tag(el):
+    return el.tag.rsplit('}', 1)[-1]
+
+
+def parse_si(xml_bytes):
+    """Services in an SPI service information file: bearers, names, description, logos."""
+    services = []
+    for svc in ET.fromstring(xml_bytes).iter():
+        if _tag(svc) != 'service':
+            continue
+        info = {'bearers': [], 'names': {}, 'description': '', 'logos': []}
+        for child in svc:
+            tag = _tag(child)
+            if tag == 'bearer' and child.get('id'):
+                info['bearers'].append(child.get('id').lower())
+            elif tag in ('shortName', 'mediumName', 'longName'):
+                info['names'][tag] = (child.text or '').strip()
+            elif tag == 'mediaDescription':
+                for media in child:
+                    if _tag(media) in ('shortDescription', 'longDescription') and not info['description']:
+                        info['description'] = (media.text or '').strip()
+                    elif _tag(media) == 'multimedia' and media.get('url'):
+                        info['logos'].append((int(media.get('width') or 0), int(media.get('height') or 0),
+                                              media.get('url')))
+        services.append(info)
+    return services
+
+
+def pick_logo(logos):
+    """The smallest square logo of at least 256 px, else the largest logo."""
+    square = sorted(l for l in logos if l[0] == l[1] and l[0] >= 256)
+    if square:
+        return square[0][2]
+    return max(logos, key=lambda l: l[0] * l[1])[2] if logos else None
+
+
+class RadioDns:
+    """RadioDNS lookups (ETSI TS 103 270) in a background thread, each FQDN
+    once per session. A result is a dict with 'state' (looking up, not
+    registered, needs client identifier, client identifier rejected, no
+    service information, not listed, found, error) and, as far as it got,
+    'target', 'spi', 'name', 'description', 'logo' (a cached file)."""
+
+    USER_AGENT = f'{APP_NAME}/1.0'
+
+    def __init__(self, client_id=None):
+        self.client_id = client_id
+        self.results = {}
+        self._vis = {}     # FQDN -> RadioVis (the slideshow subscription)
+        self._si = {}      # SPI host -> parsed services (or an error state)
+        self._logos = {}   # logo URL -> cached file
+        self._queue = queue.Queue()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def lookup(self, fqdn, bearer):
+        """The result so far for fqdn; queues the lookup the first time (and
+        again RADIODNS_RETRY_S after an error)."""
+        r = self.results.get(fqdn)
+        if r is None or (r['state'] == 'error' and time.monotonic() - r['at'] > RADIODNS_RETRY_S):
+            r = self.results[fqdn] = {'state': 'looking up', 'at': time.monotonic()}
+            self._queue.put((fqdn, bearer))
+        return r
+
+    def _worker(self):
+        while True:
+            fqdn, bearer = self._queue.get()
+            try:
+                result = self._resolve(fqdn, bearer)
+            except (OSError, ET.ParseError, ValueError) as e:
+                result = {'state': 'error', 'error': str(e)}
+            result['at'] = time.monotonic()
+            self.results[fqdn] = result
+
+    def vis(self, fqdn):
+        """The station's slideshow subscription, or None if it has no RadioVIS.
+        Asking keeps it alive; it disconnects RadioVis.IDLE_S after the last ask."""
+        result = self.results.get(fqdn) or {}
+        if not result.get('vis'):
+            return None
+        sub = self._vis.get(fqdn)
+        if sub is None or sub.stopped:
+            host, port = result['vis']
+            topic = '/topic/' + '/'.join(reversed(fqdn.split('.radiodns.org')[0].split('.')))
+            sub = self._vis[fqdn] = RadioVis(host, port, topic, self._logo)
+        sub.want()
+        return sub
+
+    def _resolve(self, fqdn, bearer):
+        result = self._resolve_spi(fqdn, bearer)
+        if result.get('target'):  # the slideshow is found the same way as the service information
+            try:
+                vis = sorted(dns_query(f'_radiovis._tcp.{result["target"]}', DNS_TYPE_SRV))
+            except OSError:
+                vis = []
+            if vis:
+                result['vis'] = (vis[0][3].rstrip('.'), vis[0][2])
+        return result
+
+    def _resolve_spi(self, fqdn, bearer):
+        targets = dns_query(fqdn, DNS_TYPE_CNAME)
+        if not targets:
+            return {'state': 'not registered'}
+        target = targets[0].rstrip('.')
+        srv = sorted(dns_query(f'_radiospi._tcp.{target}', DNS_TYPE_SRV))
+        if not srv:
+            return {'state': 'no service information', 'target': target}
+        _, _, port, host = srv[0]
+        host = host.rstrip('.')
+        spi = host if port == 443 else f'{host}:{port}'
+        services = self._service_info(spi)
+        if isinstance(services, str):
+            return {'state': services, 'target': target, 'spi': spi}
+        base = bearer.rsplit('.', 1)[0] + '.*' if bearer.startswith('fm:') else None
+        for svc in services:
+            if bearer in svc['bearers'] or (base and base in svc['bearers']):
+                names = svc['names']
+                logo_url = pick_logo(svc['logos'])
+                return {'state': 'found', 'target': target, 'spi': spi,
+                        'name': names.get('mediumName') or names.get('longName') or names.get('shortName', ''),
+                        'description': svc['description'],
+                        'logo': self._logo(logo_url) if logo_url else None}
+        return {'state': 'not listed', 'target': target, 'spi': spi}
+
+    def _service_info(self, spi):
+        """Parsed services from https://<spi>/radiodns/spi/3.1/SI.xml, fetched
+        once per session, or the state why not."""
+        if spi not in self._si:
+            headers = {'User-Agent': self.USER_AGENT}
+            if self.client_id:
+                headers['Authorization'] = f'ClientIdentifier {self.client_id}'
+            req = urllib.request.Request(f'https://{spi}/radiodns/spi/3.1/SI.xml', headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    self._si[spi] = parse_si(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    return 'needs client identifier'
+                if e.code == 403:
+                    return 'client identifier rejected'
+                raise OSError(f'service information: HTTP {e.code}') from e
+        return self._si[spi]
+
+    def _logo(self, url):
+        """The image at url, downloaded to the session cache once."""
+        if url not in self._logos:
+            ext = os.path.splitext(url.split('?', 1)[0])[1][:5] or '.img'
+            path = os.path.join(cache_dir(), f'radiodns_{len(self._logos)}{ext}')
+            req = urllib.request.Request(url, headers={'User-Agent': self.USER_AGENT})
+            with urllib.request.urlopen(req, timeout=20) as resp, open(path, 'wb') as fh:
+                fh.write(resp.read())
+            self._logos[url] = path
+        return self._logos[url]
+
+
+class RadioVis:
+    """A RadioDNS slideshow (RadioVIS, ETSI TS 101 499) over STOMP 1.0: the
+    current slide image (downloaded with fetch(url) -> file), its link, and
+    the station's RadioVIS text, from <topic>/image and <topic>/text. Runs
+    while want() is called; reconnects after a dropped connection."""
+
+    IDLE_S = 60
+
+    def __init__(self, host, port, topic, fetch):
+        self.host, self.port, self.topic, self.fetch = host, port, topic, fetch
+        self.state = 'connecting'
+        self.image = self.link = None
+        self.text = ''
+        self.stopped = False
+        self._wanted = time.monotonic()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def want(self):
+        self._wanted = time.monotonic()
+
+    def _idle(self):
+        return time.monotonic() - self._wanted > self.IDLE_S
+
+    def _run(self):
+        wait = 5
+        while not self._idle():
+            try:
+                self._session()
+                wait = 5
+            except (OSError, ValueError) as e:
+                self.state = f'error: {e}'
+                time.sleep(wait)
+                wait = min(wait * 2, 120)
+        self.stopped = True
+
+    def _session(self):
+        with socket.create_connection((self.host, self.port), timeout=15) as sock:
+            send = lambda frame: sock.sendall(frame.encode() + b'\0')  # noqa: E731
+            send(f'CONNECT\naccept-version:1.0\nhost:{self.host}\n\n')
+            for i, kind in enumerate(('image', 'text')):
+                send(f'SUBSCRIBE\nid:{i}\ndestination:{self.topic}/{kind}\nack:auto\n\n')
+            sock.settimeout(5)
+            buf = b''
+            while not self._idle():
+                try:
+                    data = sock.recv(65536)
+                except socket.timeout:
+                    continue
+                if not data:
+                    raise OSError('the slideshow server closed the connection')
+                buf += data
+                while b'\0' in buf:
+                    frame, buf = buf.split(b'\0', 1)
+                    self._frame(frame.lstrip(b'\r\n').decode('utf-8', errors='replace'))
+
+    def _frame(self, frame):
+        head, _, body = frame.partition('\n\n')
+        lines = head.splitlines()
+        if not lines:
+            return
+        if lines[0] == 'CONNECTED':
+            self.state = 'connected'
+        elif lines[0] == 'ERROR':
+            raise ValueError(dict(line.split(':', 1) for line in lines[1:] if ':' in line).get('message', 'refused'))
+        elif lines[0] == 'MESSAGE':
+            headers = dict(line.split(':', 1) for line in lines[1:] if ':' in line)
+            body = body.strip()
+            if body.startswith('SHOW '):
+                url = body[5:].strip()
+                if re.match(r'https?://', url):
+                    self.image = self.fetch(url)
+                    self.link = headers.get('link')
+                    self.state = 'showing'
+            elif body.startswith('TEXT '):
+                self.text = body[5:].strip()
+
+
+class IbocPipe(gr.sync_block):
+    """Hands cs16 IQ to nrsc5's stdin from a writer thread. If nrsc5 falls
+    behind, blocks are dropped (and counted) rather than stalling the SDR,
+    which would hold up every receiver."""
+
+    def __init__(self, stdin):
+        gr.sync_block.__init__(self, name='iboc_pipe', in_sig=[(np.int16, IBOC_BATCH)], out_sig=None)
+        self.dropped = 0
+        self._q = queue.Queue(maxsize=64)
+        threading.Thread(target=self._writer, args=(stdin,), daemon=True).start()
+
+    def work(self, input_items, output_items):
+        for batch in input_items[0]:
+            try:
+                self._q.put_nowait(batch.tobytes())
+            except queue.Full:
+                self.dropped += 1
+        return len(input_items[0])
+
+    def close(self):
+        while True:  # make room for the stop marker
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
+        self._q.put(None)
+
+    def _writer(self, stdin):
+        while (data := self._q.get()) is not None:
+            try:
+                stdin.write(data)
+            except (OSError, ValueError):
+                break
+        try:
+            stdin.close()
+        except OSError:
+            pass
+
+
+class IbocDecoder:
+    """Decodes one station's IBOC with nrsc5. Cuts a +/-280 kHz channel (the
+    IBOC sidebands sit 129-199 kHz either side of the carrier) out of the
+    wideband stream, resamples it to IBOC_RATE and pipes it to nrsc5, which
+    plays the chosen programme itself. nrsc5's log is parsed into status."""
+
+    LOG = re.compile(r'^(?:\d\d:\d\d:\d\d )?(.*)$')
+
+    def __init__(self, nrsc5, offset_hz, program):
+        self.program = program
+        self.status = {'synced': False, 'name': '', 'slogan': '', 'message': '',
+                       'title': '', 'artist': '', 'album': '', 'genre': '', 'comment': '',
+                       'alert': None, 'kbps': None, 'mer': None, 'ber': None, 'services': {},
+                       'country': None, 'facility': None}
+        # LOT files (images) land in a cache folder of this decoder's own, deleted in stop().
+        self.cache = tempfile.mkdtemp(prefix='iboc_', dir=cache_dir())
+        self._lock = threading.Lock()
+        self._ports = {}         # LOT port -> (SIG audio service number or None, component MIME)
+        self._lots = []          # (port, lot, path, received at)
+        self._xhdr_lot = None    # album art LOT the current song's XHDR names
+        self._sig = None
+        self.proc = subprocess.Popen(self.command(nrsc5, program, self.cache), stdin=subprocess.PIPE,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        rate = SAMP_RATE / IBOC_DECIM
+        self.xlate = filter.freq_xlating_fir_filter_ccf(
+            IBOC_DECIM, firdes.low_pass(1.0, SAMP_RATE, 280e3, 150e3), offset_hz, SAMP_RATE)
+        resamp = filter.pfb.arb_resampler_ccf(IBOC_RATE / rate, flt_size=32)
+        agc = analog.agc_cc(1e-4, 0.3, 1.0)  # constant-envelope FM: keep cs16 well scaled
+        agc.set_max_gain(65536)
+        to_s16 = blocks.complex_to_interleaved_short(False, 32767.0)
+        self.pipe = IbocPipe(self.proc.stdin)
+        self.blocks = (self.xlate, resamp, agc, to_s16, _batch(gr.sizeof_short, IBOC_BATCH), self.pipe)
+        threading.Thread(target=self._read_log, daemon=True).start()
+
+    @staticmethod
+    def command(nrsc5, program, cache):
+        return [nrsc5, '-r', '-', '--iq-input-format', 'cs16', '--dump-aas-files', cache, str(program)]
+
+    def set_offset(self, offset_hz):
+        self.xlate.set_center_freq(offset_hz)
+
+    def stop(self):
+        self.pipe.close()
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            self.proc.kill()
+        shutil.rmtree(self.cache, ignore_errors=True)
+
+    def images(self):
+        """(station logo, album art): cached files, or None.
+
+        The logo is the newest file on a station-logo component, the art the
+        file the current song's XHDR names on an album-art component. Files on
+        this programme's SIG service are preferred (SIG audio service N is
+        taken as programme N-1); without SIG information any will do."""
+        with self._lock:
+            def pick(mime, lot=None):
+                files = [(port, n, path, at) for port, n, path, at in self._lots
+                         if self._ports.get(port, (None, None))[1] == mime and (lot is None or n == lot)]
+                ours = [f for f in files if self._ports[f[0]][0] == self.program + 1]
+                files = ours or files
+                return max(files, key=lambda f: f[3])[2] if files else None
+            art = pick(MIME_PRIMARY_IMAGE, self._xhdr_lot) if self._xhdr_lot is not None else None
+            return pick(MIME_STATION_LOGO), art
+
+    def _add_lot(self, port, lot, name):
+        path = os.path.join(self.cache, f'{lot}_{name}')
+        now = time.monotonic()
+        with self._lock:
+            self._lots = [f for f in self._lots if f[2] != path] + [(port, lot, path, now)]
+        keep = set(self.images())
+        with self._lock:  # prune old images nothing shows
+            for f in [f for f in self._lots if now - f[3] > IMAGE_KEEP_S and f[2] not in keep]:
+                self._lots.remove(f)
+                try:
+                    os.remove(f[2])
+                except OSError:
+                    pass
+
+    def _read_log(self):
+        for raw in self.proc.stderr:
+            self.parse(raw.decode('utf-8', 'replace').strip())
+        self.status['synced'] = False
+
+    def parse(self, line):
+        """Update status from one line of nrsc5's log. ID3 (PSD) fields arrive
+        only for the programme being played, title first, so a new title
+        clears the last song's album, genre and comment."""
+        st = self.status
+        line = self.LOG.match(line).group(1)
+        if line == 'Synchronized':
+            st['synced'] = True
+        elif line == 'Lost synchronization':
+            st['synced'] = False
+        elif line.startswith('Station name: '):
+            st['name'] = line[14:].strip()
+        elif line.startswith('Slogan: '):
+            st['slogan'] = line[8:].strip()
+        elif line.startswith('Message: '):
+            st['message'] = line[9:].strip()
+        elif line.startswith('Title: '):
+            title = line[7:].strip()
+            if title != st['title']:
+                st['album'] = st['genre'] = st['comment'] = ''
+                self._xhdr_lot = None   # the new song's XHDR (if any) follows
+            st['title'] = title
+        elif line.startswith('Artist: '):
+            st['artist'] = line[8:].strip()
+        elif line.startswith('Album: '):
+            st['album'] = line[7:].strip()
+        elif line.startswith('Genre: '):
+            st['genre'] = line[7:].strip()
+        elif m := re.match(r'Comment: lang=\S* (.*)$', line):
+            st['comment'] = m.group(1).strip()
+        elif line == 'Alert ended':
+            st['alert'] = None
+        elif line.startswith('Alert: '):
+            st['alert'] = line[7:].strip()
+        elif m := re.match(r'Audio bit rate: ([\d.]+) kbps', line):
+            st['kbps'] = float(m.group(1))
+        elif m := re.match(r'MER: ([-\d.]+) dB \(lower\), ([-\d.]+) dB \(upper\)', line):
+            st['mer'] = (float(m.group(1)), float(m.group(2)))
+        elif m := re.match(r'BER: ([\d.]+)', line):
+            st['ber'] = float(m.group(1))
+        elif m := re.match(r'Audio service (\d+): (\w+), type: ([^,]+)', line):
+            st['services'] = {**st['services'], int(m.group(1)): m.group(3)}
+        elif m := re.match(r'Country: (\w+), FCC facility ID: (\d+)', line):
+            st['country'], st['facility'] = m.group(1), int(m.group(2))
+        elif m := re.match(r'\s*SIG Service: type=(\w+) number=(\d+)', line):
+            self._sig = int(m.group(2)) if m.group(1) == 'audio' else None
+        elif m := re.match(r'\s*Data component: id=\d+ port=([0-9A-Fa-f]+) .*mime=([0-9A-Fa-f]+)', line):
+            with self._lock:
+                self._ports[int(m.group(1), 16)] = (self._sig, int(m.group(2), 16))
+        elif m := re.match(r'LOT file: port=([0-9A-Fa-f]+) lot=(\d+) name=(.*?) size=\d+ mime=', line):
+            self._add_lot(int(m.group(1), 16), int(m.group(2)), m.group(3))
+        elif m := re.match(r'XHDR: (-?\d+) ([0-9A-Fa-f]+) (-?\d+)', line):
+            param, mime, lot = int(m.group(1)), int(m.group(2), 16), int(m.group(3))
+            if param == 0 and mime == MIME_PRIMARY_IMAGE:
+                self._xhdr_lot = lot       # show this LOT as the song's album art
+            elif param == 1:
+                self._xhdr_lot = None      # flush: no image for this song
+
+
+class PcmTap(gr.sync_block):
+    """A receiver's browser audio. Inputs: analog L, analog R, SCA 67 and
+    SCA 92 (mono). The chosen source (`source`: an index into WEB_SOURCES'
+    values) goes as interleaved 16-bit stereo at `gain` to every function in
+    `sinks` (one per listener); with no listeners nothing is done."""
+
+    def __init__(self):
+        gr.sync_block.__init__(self, name='pcm_tap', in_sig=[(np.float32, WEB_BATCH)] * 4, out_sig=None)
+        self.sinks = {}
+        self.source = 0
+        self.gain = 0.0
+
+    def work(self, input_items, output_items):
+        sinks = list(self.sinks.values())
+        if sinks:
+            ins = input_items
+            left, right = (ins[0], ins[1]) if self.source == 0 else (ins[self.source + 1],) * 2
+            left, right = left.reshape(-1), right.reshape(-1)
+            pcm = np.empty(2 * len(left), np.int16)
+            k = self.gain * 32767
+            pcm[0::2] = np.clip(left * k, -32768, 32767)
+            pcm[1::2] = np.clip(right * k, -32768, 32767)
+            data = pcm.tobytes()
+            for sink in sinks:
+                sink(data)
+        return len(input_items[0])
+
+
+def find_ffmpeg():
+    """ffmpeg on the PATH, else a WinGet install of it, else None."""
+    found = shutil.which('ffmpeg')
+    if found:
+        return found
+    pattern = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'WinGet', 'Packages',
+                           '*FFmpeg*', '**', 'bin', 'ffmpeg.exe')
+    matches = sorted(glob.glob(pattern, recursive=True))
+    return matches[-1] if matches else None
+
+
+def ffmpeg_formats(ffmpeg, wanted):
+    """The WEB_FORMATS keys in `wanted` (in its order) that this ffmpeg can encode."""
+    if not ffmpeg:
+        return []
+    try:
+        out = subprocess.run([ffmpeg, '-hide_banner', '-encoders'], capture_output=True, text=True, timeout=15,
+                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    encoders = {line.split()[1] for line in out.splitlines() if len(line.split()) > 1 and line.startswith(' A')}
+    return [f for f in wanted if f in WEB_FORMATS and WEB_FORMATS[f]['encoder'] in encoders]
+
+
+class AudioEncoder:
+    """One listener's browser audio: an ffmpeg encoding a receiver's PcmTap to
+    `fmt` (a WEB_FORMATS key) from the start of the stream, so formats with a
+    header (Ogg, FLAC) are whole. Audio is dropped, never queued without
+    limit, if ffmpeg falls behind, so the flowgraph is never held up."""
+
+    def __init__(self, ffmpeg, tap, fmt):
+        self.tap = tap
+        self.proc = subprocess.Popen(
+            [ffmpeg, '-hide_banner', '-loglevel', 'error', '-f', 's16le', '-ar', str(AUDIO_RATE), '-ac', '2',
+             '-i', 'pipe:0', *WEB_FORMATS[fmt]['args'], '-flush_packets', '1', 'pipe:1'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        self._pcm = queue.Queue(maxsize=64)
+        threading.Thread(target=self._write, daemon=True).start()
+        tap.sinks[id(self)] = self._feed
+
+    def _feed(self, data):
+        try:
+            self._pcm.put_nowait(data)
+        except queue.Full:  # ffmpeg stalled: drop audio rather than hold up the flowgraph
+            pass
+
+    def _write(self):
+        while (data := self._pcm.get()) is not None:
+            try:
+                self.proc.stdin.write(data)
+            except (OSError, ValueError):
+                break
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+
+    def chunks(self):
+        """The encoded stream, until it ends."""
+        while chunk := self.proc.stdout.read1(8192):
+            yield chunk
+
+    def close(self):
+        self.tap.sinks.pop(id(self), None)
+        while True:  # make room for the end marker
+            try:
+                self._pcm.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self._pcm.get_nowait()
+                except queue.Empty:
+                    pass
+        try:
+            self.proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+class WebAudio:
+    """A receiver's browser audio: its PcmTap and the encoders of its listeners."""
+
+    def __init__(self, ffmpeg, tap):
+        self.ffmpeg, self.tap = ffmpeg, tap
+        self._encoders = set()
+        self._lock = threading.Lock()
+
+    @property
+    def listeners(self):
+        return len(self._encoders)
+
+    def open(self, fmt):
+        enc = AudioEncoder(self.ffmpeg, self.tap, fmt)
+        with self._lock:
+            self._encoders.add(enc)
+        return enc
+
+    def close(self, enc):
+        with self._lock:
+            self._encoders.discard(enc)
+        enc.close()
+
+    def close_all(self):
+        """End every listener's stream (the receiver is going)."""
+        with self._lock:
+            encoders, self._encoders = list(self._encoders), set()
+        for enc in encoders:
+            self.tap.sinks.pop(id(enc), None)
+            enc.proc.kill()
+
+
+def _deemph_taps(tau, fs=AUDIO_RATE):
+    """De-emphasis IIR taps, computed as gnuradio.analog.fm_deemph does
+    (bilinear transform, pre-warped), so tau can change while running."""
+    w_ca = 2.0 * fs * math.tan(1.0 / tau / (2.0 * fs))
+    k = -w_ca / (2.0 * fs)
+    b0 = -k / (1.0 - k)
+    return [b0, b0], [1.0, -(1.0 + k) / (1.0 - k)]
+
+
+def _min_buffer(block, items):
+    """set_min_output_buffer without the info line GNU Radio logs for each call."""
+    log = gr.logging()
+    level = log.default_level()
+    log.set_default_level(gr.log_levels.warn)
+    block.set_min_output_buffer(items)
+    log.set_default_level(level)
+    return block
+
+
+def _batch(itemsize, n, buffers=64):
+    """stream_to_vector feeding a Python meter. GNU Radio sizes buffers in
+    bytes, so with big vectors the default holds only a couple of batches and a
+    brief Python stall would back up into the SDR (overflows); keep ~0.25 s."""
+    return _min_buffer(blocks.stream_to_vector(itemsize, n), buffers)
+
+
+class FmStation(gr.hier_block2):
+    """One station: channel select -> WBFM -> stereo audio, RDS and meters.
+
+    Input: complex wideband IQ at SAMP_RATE. Outputs: L and R audio at AUDIO_RATE.
+    """
+
+    def __init__(self, freq_hz, center_hz):
+        gr.hier_block2.__init__(self, f'fm_station_{freq_hz / 1e6:.1f}',
+                                gr.io_signature(1, 1, gr.sizeof_gr_complex),
+                                gr.io_signature(2, 2, gr.sizeof_float))
+        self.freq_hz = freq_hz
+        self.stereo = False      # decoding stereo now
+        self.pilot = False       # a 19 kHz pilot is present
+        self.force_mono = False
+        self.pilot_hz = None
+        self.volume = 1.0
+        self.playing = False
+        self.audio_source = 'analog'
+        self.iboc = None         # IbocDecoder while IBOC is playing
+
+        self.chan = chan = filter.freq_xlating_fir_filter_ccf(
+            # Wide and flat: an FM signal's sidebands reach well past +/-100 kHz,
+            # and cutting them distorts the MPX (L-R, RDS and SCA read low).
+            CHAN_DECIM, firdes.low_pass(1.0, SAMP_RATE, CHAN_PASS_HZ + 17.5e3, 35e3),
+            freq_hz - center_hz, SAMP_RATE)
+        chan.set_output_multiple(CHAN_CHUNK)
+        demod = analog.quadrature_demod_cf(QUAD_RATE / (2 * math.pi * MAX_DEV))
+
+        # Stereo decoder: lock a PLL to the 19 kHz pilot, double it to 38 kHz,
+        # and use it to bring L-R down to baseband (as in gr-rds' rds_rx example).
+        pilot_taps = firdes.complex_band_pass(1.0, QUAD_RATE, 18980, 19020, 4000)  # wide; the PLL does the tracking
+        pilot_bpf = filter.fir_filter_fcc(1, pilot_taps)
+        self.pll = pll = analog.pll_refout_cc(0.001, 2 * math.pi * 19020 / QUAD_RATE,
+                                   2 * math.pi * 18980 / QUAD_RATE)
+        square = blocks.multiply_cc()
+        ref38 = blocks.complex_to_imag()
+        delay = blocks.delay(gr.sizeof_float, (len(pilot_taps) - 1) // 2)
+        mix38 = blocks.multiply_ff()
+        audio_taps = firdes.low_pass(1.0, QUAD_RATE, 15e3, 2e3)
+        sum_lpf = filter.fir_filter_fff(AUDIO_DECIM, audio_taps)            # (L+R)/2
+        # The carrier offset is DC in L+R: block it, as a receiver's audio is AC-coupled
+        # (5 Hz high-pass), so it doesn't reach the audio, true peak or L/R meters.
+        pole = math.exp(-2 * math.pi * 5 / AUDIO_RATE)
+        sum_ac, diff_ac = (filter.iir_filter_ffd([(1 + pole) / 2, -(1 + pole) / 2], [1.0, -pole], False)
+                           for _ in range(2))  # the same on L-R, keeping L+R and L-R matched
+        # (L-R)/2; the quadrature demodulator's output is down by sinc(f/fs) at 38 kHz
+        diff_lpf = filter.fir_filter_fff(AUDIO_DECIM, [-2 / np.sinc(38e3 / QUAD_RATE) * t for t in audio_taps])
+        self.diff_gain = blocks.multiply_const_ff(0.0)  # 0 = mono until a pilot shows up
+        left, right = blocks.add_ff(), blocks.sub_ff()
+        self.deemph = deemph = [filter.iir_filter_ffd(*_deemph_taps(75e-6), False) for _ in range(2)]
+        self.play_gain = [blocks.multiply_const_ff(0.0) for _ in range(2)]
+        out_mix = [blocks.add_ff() for _ in range(2)]  # analog L/R + SCA 67 + SCA 92
+
+        # SCA audio: the 67 and 92 kHz FM subcarriers, mono, 5 kHz, 150 us.
+        self.sca_gain = {}
+        sca_out = {}
+        sca_demods = []
+        for k, khz in enumerate((67, 92)):
+            sca_bb = filter.freq_xlating_fir_filter_fcc(          # 384 -> 48 kS/s
+                AUDIO_DECIM, firdes.low_pass(1.0, QUAD_RATE, 8e3, 3e3), khz * 1e3, QUAD_RATE)
+            sca_demod = analog.quadrature_demod_cf(AUDIO_RATE / (2 * math.pi * SCA_DEV))
+            sca_lpf = filter.fir_filter_fff(1, firdes.low_pass(1.0, AUDIO_RATE, 5e3, 1e3))
+            sca_deemph = filter.iir_filter_ffd(*_deemph_taps(SCA_DEEMPH_S), False)
+            gain = self.sca_gain[khz] = blocks.multiply_const_ff(0.0)
+            self.connect(demod, sca_bb, sca_demod, sca_lpf, sca_deemph, gain)
+            sca_out[f'sca{khz}'] = sca_deemph
+            sca_demods.append(sca_demod)
+            for ch in range(2):
+                self.connect(gain, (out_mix[ch], 1 + k))
+
+        # RDS: same chain as gr-rds' rds_rx example.
+        rds_bb = filter.freq_xlating_fir_filter_fcc(            # 384 -> 24 kS/s
+            int(QUAD_RATE / 24e3), firdes.low_pass(1.0, QUAD_RATE, 7.5e3, 5e3), 57e3, QUAD_RATE)
+        resamp = filter.rational_resampler_ccc(19, 24)          # 24 kS/s -> 19 kS/s
+        rrc = firdes.root_raised_cosine(1, 19e3, 19e3 / 8, 1.0, 151)
+        manchester = filter.fir_filter_ccc(1, [rrc[n] - rrc[n + 8] for n in range(len(rrc) - 8)])
+        agc = analog.agc_cc(2e-3, 0.585, 53)
+        agc.set_max_gain(1000)
+        bpsk = digital.constellation_bpsk().base()
+        sync = digital.symbol_sync_cc(digital.TED_ZERO_CROSSING, 16, 0.01, 1.0, 1.0, 0.1, 1,
+                                      bpsk, digital.IR_MMSE_8TAP, 128, [])
+        costas = digital.constellation_receiver_cb(bpsk, 2 * math.pi / 100, -0.002, 0.002)
+        diff = digital.diff_decoder_bb(2, digital.DIFF_DIFFERENTIAL)
+        decoder = rds.decoder(False, False)
+        self.parser = parser = rds.parser(False, False, 1)  # 1 = North American RBDS PTY names
+
+        self.meter = FmMeter(on_stats=self._auto_stereo)
+        self.audio_meter = AudioMeter()
+        self.sca_meter = ScaMeter()
+        for k, sca_demod in enumerate(sca_demods):
+            self.connect(sca_demod, _batch(gr.sizeof_float, SCA_BATCH, 8), (self.sca_meter, k))
+        self.rds = RdsState()
+
+        self.connect(self, chan, demod)
+        self.connect(chan, _batch(gr.sizeof_gr_complex, FM_BATCH), (self.meter, 0))
+        self.connect(demod, _batch(gr.sizeof_float, FM_BATCH), (self.meter, 1))
+        # stereo
+        self.connect(demod, pilot_bpf, pll)
+        self.connect(pll, (square, 0))
+        self.connect(pll, (square, 1))
+        self.connect(square, ref38, (mix38, 1))
+        self.connect(demod, delay, sum_lpf, sum_ac)
+        self.connect(delay, (mix38, 0))
+        self.connect(mix38, diff_lpf, diff_ac, self.diff_gain)
+        self.connect(sum_ac, (left, 0))
+        self.connect(self.diff_gain, (left, 1))
+        self.connect(sum_ac, (right, 0))
+        self.connect(self.diff_gain, (right, 1))
+        for i, ch in enumerate((left, right)):
+            self.connect(ch, deemph[i], self.play_gain[i], (out_mix[i], 0))
+            self.connect(out_mix[i], (self, i))
+            self.connect(deemph[i], _batch(gr.sizeof_float, AUDIO_BATCH), (self.audio_meter, i))
+        # pre-de-emphasis M and S for the L/R/L+R/L-R modulation meters
+        self.connect(sum_ac, _batch(gr.sizeof_float, AUDIO_BATCH), (self.audio_meter, 2))
+        self.connect(self.diff_gain, _batch(gr.sizeof_float, AUDIO_BATCH), (self.audio_meter, 3))
+        # RDS
+        self.connect(demod, rds_bb, resamp, manchester, agc, sync, costas, diff, decoder)
+        self.msg_connect(decoder, 'out', parser, 'in')
+        self.msg_connect(decoder, 'out', self.rds, 'groups')
+        self.msg_connect(parser, 'out', self.rds, 'parsed')
+
+        # Browser audio: this receiver's audio source at a fixed level (the
+        # browser has its own volume), whether or not it plays on the PC.
+        self.web_tap = PcmTap()
+        for k, src in enumerate((deemph[0], deemph[1], sca_out['sca67'], sca_out['sca92'])):
+            self.connect(src, _batch(gr.sizeof_float, WEB_BATCH, 8), (self.web_tap, k))
+
+    def retune(self, freq_hz, center_hz):
+        """Follow a new SDR centre and/or switch to another station."""
+        self.chan.set_center_freq(freq_hz - center_hz)
+        if freq_hz != self.freq_hz:
+            self.freq_hz = freq_hz
+            self.stereo = self.pilot = False
+            self.pilot_hz = None
+            self.diff_gain.set_k(0.0)
+            self.parser.reset()
+            self.rds.reset(on_release=self.parser.reset)
+            self.meter.reset()
+            self.audio_meter.reset()
+            self.sca_meter.reset()
+
+    def apply_settings(self, settings):
+        """De-emphasis, stereo/mono and play volume from ReceiverSettings."""
+        b, a = _deemph_taps(settings.deemphasis_us * 1e-6)
+        for d in self.deemph:
+            d.set_taps(b, a)
+        self.force_mono = settings.stereo == 'mono'
+        self.volume = settings.volume_pct / 100
+        self.set_playing(self.playing)
+
+    def _auto_stereo(self, stats):
+        """Decode stereo only while a pilot is present (with hysteresis) and
+        mono isn't forced."""
+        self.pilot = stats['pilot_pct'] > (2.0 if self.pilot else 3.0)
+        on = self.pilot and not self.force_mono
+        if on != self.stereo:
+            self.stereo = on
+            self.diff_gain.set_k(1.0 if on else 0.0)
+        # Pilot frequency from the PLL that locks to it (spec: 19 kHz +/- 2 Hz).
+        if self.pilot:
+            hz = self.pll.get_frequency() * QUAD_RATE / (2 * math.pi)
+            self.pilot_hz = hz if self.pilot_hz is None else self.pilot_hz + 0.1 * (hz - self.pilot_hz)
+        else:
+            self.pilot_hz = None
+
+    def set_playing(self, on):
+        self.set_audio(self.audio_source, on)
+
+    def set_audio(self, source, on):
+        """Play `source` (an AUDIO_SOURCES key) through the app's audio, or
+        nothing. IBOC plays through nrsc5, so its keys mute this output."""
+        self.audio_source, self.playing = source, on
+        level = PLAY_GAIN * self.volume if on else 0.0
+        for g in self.play_gain:
+            g.set_k(level if source == 'analog' else 0.0)
+        for khz, g in self.sca_gain.items():
+            g.set_k(level * SCA_LEVEL if source == f'sca{khz}' else 0.0)
+        web = WEB_SOURCES.get(source)  # browser audio: the same source (IBOC: silence)
+        self.web_tap.source = web or 0
+        self.web_tap.gain = 0.0 if web is None else PLAY_GAIN * (SCA_LEVEL if web else 1.0)
+
+
+def _centre(freqs_hz):
+    freqs_hz = list(freqs_hz)
+    return (min(freqs_hz) + max(freqs_hz)) / 2
+
+
+class FmMonitor(gr.top_block):
+    """The RSP1A and up to MAX_RECEIVERS receivers, added and removed while
+    running. Each receiver has a fixed slot (receiver 1-4): its input on the
+    audio mixer and its RDS feed port. An empty slot feeds the mixer silence.
+    The SDR re-centres on the receivers' stations whenever they change."""
+
+    def __init__(self, receivers, lna_state, if_gain_reduction, source=None, source_factory=None):
+        """receivers: {slot: freq_hz}, or a list of freqs for slots 0, 1, ..."""
+        gr.top_block.__init__(self, APP_NAME)
+        receivers = dict(enumerate(receivers)) if isinstance(receivers, (list, tuple)) else dict(receivers)
+        self.center_hz = _centre(receivers.values())
+        self.lna, self.ifgr = lna_state, if_gain_reduction
+        self.gain_auto = False         # set by whoever calibrated the gain
+        self.cal_center_hz = None      # where it was calibrated
+        self._source_factory = source_factory  # () -> a new source, for reopening (tests); else the RSP1A
+        self.src = _min_buffer(source or make_rsp1a(self.center_hz, lna_state, if_gain_reduction), SRC_BUFFER)
+        self.slots = [None] * MAX_RECEIVERS
+        self._mix = [blocks.add_ff(), blocks.add_ff()]
+        self._silence = [[blocks.null_source(gr.sizeof_float) for _ in range(2)]
+                         for _ in range(MAX_RECEIVERS)]
+        sink = audio.sink(AUDIO_RATE, '', True)
+        for ch in range(2):
+            self.connect(self._mix[ch], (sink, ch))
+        for slot in range(MAX_RECEIVERS):
+            if slot in receivers:
+                self.slots[slot] = FmStation(receivers[slot], self.center_hz)
+                self._plug(slot, self.slots[slot])
+            else:
+                self._plug_silence(slot)
+
+    @property
+    def stations(self):
+        return [st for st in self.slots if st]
+
+    def free_slot(self):
+        return next((i for i, st in enumerate(self.slots) if st is None), None)
+
+    def add_receiver(self, freq_hz):
+        """Open a receiver on freq_hz in the first free slot; returns (slot, station)."""
+        slot = self.free_slot()
+        if slot is None:
+            raise ValueError(f'all {MAX_RECEIVERS} receivers are in use')
+        st = FmStation(freq_hz, self.center_hz)
+        self.lock()  # rewire the running flowgraph
+        try:
+            self._unplug_silence(slot)
+            self._plug(slot, st)
+            self.slots[slot] = st
+        finally:
+            self.unlock()
+        self._recentre()
+        return slot, st
+
+    def start_iboc(self, slot, program, nrsc5):
+        """Attach an IbocDecoder for slot's station, playing `program` (0 = MPS)."""
+        self.stop_iboc(slot)
+        st = self.slots[slot]
+        dec = IbocDecoder(nrsc5, st.freq_hz - self.center_hz, program)
+        self.lock()
+        try:
+            self.connect(self.src, *dec.blocks)
+        finally:
+            self.unlock()
+        st.iboc = dec
+
+    def stop_iboc(self, slot):
+        st = self.slots[slot]
+        dec = st.iboc if st else None
+        if not dec:
+            return
+        st.iboc = None
+        self.lock()
+        try:
+            self.disconnect(self.src, *dec.blocks)
+        finally:
+            self.unlock()
+        dec.stop()
+
+    def recalibrate(self, progress=None):
+        """Gain calibration on the running receiver (a few seconds; the
+        receivers hear the gain steps). Returns calibrate_gain's report; on
+        failure the previous gain is restored and the error raised."""
+        tap = IqTap()
+        batch = _batch(gr.sizeof_gr_complex, IQ_TAP_BATCH, 4)
+        self.lock()
+        try:
+            self.connect(self.src, batch, tap)
+        finally:
+            self.unlock()
+
+        def set_gain(lna, ifgr):
+            self.src.set_gain(0, 'IFGR', min(max(ifgr, 20), 59))
+            self.src.set_gain(0, 'RFGR', min(max(lna, 0), 9))
+
+        try:
+            freqs = [st.freq_hz for st in self.stations]
+            lna, ifgr, report = calibrate_gain(_Rsp(None, set_gain, tap.grab), self.center_hz, freqs, progress)
+        except Exception:
+            set_gain(self.lna, self.ifgr)
+            raise
+        finally:
+            self.lock()
+            try:
+                self.disconnect(self.src, batch, tap)
+            finally:
+                self.unlock()
+        set_gain(lna, ifgr)
+        self.lna, self.ifgr, self.gain_auto, self.cal_center_hz = lna, ifgr, True, self.center_hz
+        return report
+
+    def detach_sdr(self):
+        """Stop the flowgraph and let go of the SDR (before reopening it)."""
+        self.stop()
+        self.wait()
+        if self.src is None:
+            return
+        for st in self.stations:
+            self.disconnect(self.src, st)
+            if st.iboc:
+                self.disconnect(self.src, st.iboc.blocks[0])
+        self.src = None
+        gc.collect()  # the source block closes the device when it goes
+
+    def attach_sdr(self):
+        """Open the SDR again, wire it to the receivers and start. Raises if it can't be opened."""
+        src = self._source_factory() if self._source_factory else make_rsp1a(self.center_hz, self.lna, self.ifgr)
+        src = _min_buffer(src, SRC_BUFFER)
+        for st in self.stations:
+            self.connect(src, st)
+            if st.iboc:
+                self.connect(src, st.iboc.blocks[0])
+        self.src = src
+        self.start()
+
+    def stop_all_iboc(self):
+        for slot in range(MAX_RECEIVERS):
+            self.stop_iboc(slot)
+
+    def remove_receiver(self, slot):
+        self.stop_iboc(slot)
+        st = self.slots[slot]
+        st.set_playing(False)
+        self.lock()
+        try:
+            self._unplug(slot, st)
+            self._plug_silence(slot)
+            self.slots[slot] = None
+        finally:
+            self.unlock()
+        self._recentre()
+
+    def set_freq(self, slot, freq_hz):
+        """Move one receiver to another station; the SDR re-centres so all fit."""
+        self._recentre({slot: freq_hz})
+
+    def _recentre(self, changes=None):
+        freqs = {i: st.freq_hz for i, st in enumerate(self.slots) if st}
+        freqs.update(changes or {})
+        center = _centre(freqs.values())
+        if center != self.center_hz:
+            if self.src is not None:  # (while the SDR is being reopened, it opens on the new centre)
+                self.src.set_frequency(0, center)
+            self.center_hz = center
+        for i, f in freqs.items():
+            self.slots[i].retune(f, center)
+            if self.slots[i].iboc:
+                self.slots[i].iboc.set_offset(f - center)
+
+    def _plug(self, slot, st):
+        self.connect(self.src, st)
+        for ch in range(2):
+            self.connect((st, ch), (self._mix[ch], slot))
+
+    def _unplug(self, slot, st):
+        self.disconnect(self.src, st)
+        for ch in range(2):
+            self.disconnect((st, ch), (self._mix[ch], slot))
+
+    def _plug_silence(self, slot):
+        for ch in range(2):
+            self.connect(self._silence[slot][ch], (self._mix[ch], slot))
+
+    def _unplug_silence(self, slot):
+        for ch in range(2):
+            self.disconnect(self._silence[slot][ch], (self._mix[ch], slot))
+
+
+# --------------------------------------------------------------------------- GUI
+
+RED, GREEN, DIM, ACCENT = '#ff6b6b', '#69db7c', '#8c9197', '#8ab4f8'
+# Contrast (WCAG 2.1) on the dark backgrounds #16171a-#222328: text 4.5:1 or more
+# (DIM 4.9, muted #9aa0a6 5.9, the rest higher); control outlines 3:1 or more
+# (BORDER 3.3); disabled controls (exempt) stay readable at DISABLED 3.3.
+BORDER, BORDER_HOVER, DISABLED = '#6f747c', '#9aa0a6', '#6f747c'
+LCD = 'background: #0b1a0b; border: 1px solid #1f3a1f; border-radius: 6px;'
+
+APP_QSS = """
+QWidget { font-family: "Segoe UI"; font-size: 9pt; }
+QToolTip { background: #2b2d31; color: #e0e0e0; border: 1px solid #3c4043; padding: 4px 6px; }
+QGroupBox#panel { background: #1c1d21; border: 1px solid #2c2e33; border-radius: 12px; }
+QFrame#card { background: #222328; border: 1px solid #2a2c31; border-radius: 8px; }
+QLabel#cardTitle { color: #8ab4f8; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }
+QLabel#chip { background: #24262b; border: 1px solid #30333a; border-radius: 10px; padding: 3px 10px; color: #c4c7cc; }
+QLabel#appTitle { font-size: 15pt; font-weight: 600; color: #e8eaed; padding-right: 8px; }
+QPushButton, QToolButton { background: #2b2d31; border: 1px solid %BORDER%; border-radius: 6px; padding: 5px 12px; }
+QPushButton:hover, QToolButton:hover { background: #33363c; border-color: %BORDER_HOVER%; }
+QPushButton:focus, QToolButton:focus { border: 1px solid #8ab4f8; }
+QPushButton:disabled, QToolButton:disabled { color: %DISABLED%; background: #25272b; border-color: #3a3d44; }
+QPushButton#help { border-radius: 16px; padding: 0; font-weight: 700; font-size: 11pt; color: #8ab4f8; }
+QPushButton#primary { background: #2f6db5; border-color: #3d7fd0; color: white; font-weight: 600; }
+QPushButton#primary:hover { background: #3a7cc6; }
+QPushButton#primary:focus { border-color: #ffffff; }
+QPushButton#primary:disabled { background: #25272b; border-color: #3a3d44; color: %DISABLED%; }
+QComboBox { background: #2b2d31; border: 1px solid %BORDER%; border-radius: 6px; padding: 3px 8px; }
+QComboBox:hover { border-color: %BORDER_HOVER%; }
+QComboBox:focus { border-color: #8ab4f8; }
+QComboBox:disabled { color: %DISABLED%; border-color: #3a3d44; }
+QComboBox QAbstractItemView { background: #222328; border: 1px solid %BORDER%; selection-background-color: #2f6db5; }
+QLineEdit, QSpinBox, QDoubleSpinBox { background: #16171a; border: 1px solid %BORDER%; border-radius: 5px; padding: 3px 6px; }
+QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: %BORDER_HOVER%; }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: #8ab4f8; }
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { color: %DISABLED%; border-color: #3a3d44; }
+QCheckBox { spacing: 8px; }
+QCheckBox:disabled { color: %DISABLED%; }
+QCheckBox::indicator, QGroupBox::indicator { width: 14px; height: 14px; border: 2px solid %BORDER_HOVER%;
+                                             border-radius: 3px; background: #16171a; }
+QCheckBox::indicator:hover, QGroupBox::indicator:hover, QCheckBox::indicator:focus { border-color: #8ab4f8; }
+QCheckBox::indicator:checked, QGroupBox::indicator:checked { background: #8ab4f8; border-color: #8ab4f8;
+                                                             image: url(%CHECK%); }
+QCheckBox::indicator:disabled, QGroupBox::indicator:disabled { border-color: #4a4e56; background: #1c1d21; }
+QCheckBox::indicator:checked:disabled { background: #4a4e56; border-color: #4a4e56; }
+QPlainTextEdit { background: #16171a; border: none; border-radius: 6px; padding: 4px; color: #c4c7cc;
+                 font-family: Consolas; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 22px;
+                       border: none; border-left: 1px solid %BORDER%; }
+QComboBox::down-arrow { width: 10px; height: 6px; image: url(%ARROW%); }
+QGroupBox { border: 1px solid %BORDER%; border-radius: 8px; margin-top: 14px; padding-top: 6px; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #8ab4f8; }
+"""
+
+
+def draw_icon(size):
+    """The FM-Modmon-ms icon at `size` px: a blue tile with a broadcast mast sending waves."""
+    img = QtGui.QImage(size, size, QtGui.QImage.Format_ARGB32_Premultiplied)
+    img.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(img)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    s = float(size)
+    grad = QtGui.QLinearGradient(0, 0, s, s)
+    grad.setColorAt(0.0, QtGui.QColor('#4a95ea'))
+    grad.setColorAt(1.0, QtGui.QColor('#1d4f91'))
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(grad)
+    p.drawRoundedRect(QtCore.QRectF(0, 0, s, s), 0.22 * s, 0.22 * s)
+
+    white = QtGui.QColor('#ffffff')
+    top = QtCore.QPointF(0.5 * s, 0.40 * s)
+    pen = QtGui.QPen(white, max(1.2, 0.075 * s), QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(QtCore.Qt.NoBrush)
+    # mast: an A-frame from the top down to the base, with a cross brace
+    p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(0.34 * s, 0.84 * s), top, QtCore.QPointF(0.66 * s, 0.84 * s)]))
+    if size >= 24:
+        p.drawLine(QtCore.QPointF(0.415 * s, 0.66 * s), QtCore.QPointF(0.585 * s, 0.66 * s))
+    # radio waves either side of the top
+    for radius, alpha in ((0.17, 255), (0.29, 190)) if size >= 20 else ((0.22, 255),):
+        wave = QtGui.QColor(white)
+        wave.setAlpha(alpha)
+        pen.setColor(wave)
+        p.setPen(pen)
+        box = QtCore.QRectF(top.x() - radius * s, top.y() - radius * s, 2 * radius * s, 2 * radius * s)
+        p.drawArc(box, -40 * 16, 80 * 16)   # right
+        p.drawArc(box, 140 * 16, 80 * 16)   # left
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(white)
+    p.drawEllipse(top, max(1.0, 0.06 * s), max(1.0, 0.06 * s))
+    p.end()
+    return img
+
+
+def splash_pixmap(scale=1.0):
+    """The start-up card: a large logo with the app name under it, room at the
+    bottom for the progress message. `scale` is Windows' display scaling
+    (logical DPI / 96): text is scaled by Windows, so the card is drawn at the
+    same scale to keep the logo in proportion to it."""
+    w, h, logo = 360, 330, 180          # at 100% scaling
+    pix = QtGui.QPixmap(int(w * scale), int(h * scale))
+    pix.fill(QtGui.QColor('#1c1d21'))
+    p = QtGui.QPainter(pix)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
+    p.scale(scale, scale)
+    p.setPen(QtGui.QColor('#2c2e33'))
+    p.drawRect(QtCore.QRectF(0.5, 0.5, w - 1, h - 1))
+    p.drawImage(QtCore.QRectF((w - logo) / 2, 30, logo, logo), draw_icon(int(logo * scale)))
+    font = QtGui.QFont('Segoe UI')
+    font.setPixelSize(34)               # pixels, so the scale above isn't applied twice
+    font.setWeight(QtGui.QFont.DemiBold)
+    p.setFont(font)
+    p.setPen(QtGui.QColor('#e8eaed'))
+    p.drawText(QtCore.QRectF(0, 30 + logo + 12, w, 44), QtCore.Qt.AlignCenter, APP_NAME)
+    p.end()
+    return pix
+
+
+def app_icon():
+    icon = QtGui.QIcon()
+    for size in ICON_SIZES:
+        icon.addPixmap(QtGui.QPixmap.fromImage(draw_icon(size)))
+    return icon
+
+
+def _png(img):
+    buf = QtCore.QBuffer()
+    buf.open(QtCore.QIODevice.WriteOnly)
+    img.save(buf, 'PNG')
+    return bytes(buf.data())
+
+
+def ico_bytes(sizes=ICON_SIZES):
+    """A Windows .ico holding the icon at each size (PNG-compressed entries)."""
+    pngs = [(size, _png(draw_icon(size))) for size in sizes]
+    head = struct.pack('<HHH', 0, 1, len(pngs))
+    offset, entries, data = 6 + 16 * len(pngs), b'', b''
+    for size, png in pngs:
+        entries += struct.pack('<BBBBHHII', size % 256, size % 256, 0, 0, 1, 32, len(png), offset + len(data))
+        data += png
+    return head + entries + data
+
+
+def install_icon(app):
+    """Window/taskbar icon for the app, and fm-modmon-ms.ico (for shortcuts) if it isn't there."""
+    try:  # without this Windows groups the app under python.exe and shows Python's icon
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except (AttributeError, OSError):
+        pass
+    app.setWindowIcon(app_icon())
+    if not os.path.exists(ICON_PATH):
+        try:
+            with open(ICON_PATH, 'wb') as fh:
+                fh.write(ico_bytes())
+        except OSError as e:
+            print(f'could not write {ICON_PATH}: {e}')
+
+
+def apply_dark_theme(app):
+    app.setStyle('Fusion')
+    P = QtGui.QPalette
+    pal = QtGui.QPalette()
+    for role, colour in ((P.Window, '#1e1f22'), (P.WindowText, '#e0e0e0'), (P.Base, '#16171a'),
+                         (P.AlternateBase, '#26272b'), (P.Text, '#e0e0e0'), (P.Button, '#2b2d31'),
+                         (P.ButtonText, '#e0e0e0'), (P.Highlight, '#2f6db5'),
+                         (P.HighlightedText, '#ffffff'), (P.ToolTipBase, '#2b2d31'),
+                         (P.ToolTipText, '#e0e0e0'), (P.Link, ACCENT)):
+        pal.setColor(role, QtGui.QColor(colour))
+    for role in (P.WindowText, P.Text, P.ButtonText):
+        pal.setColor(P.Disabled, role, QtGui.QColor(DISABLED))
+    pal.setColor(P.Window, QtGui.QColor('#17181b'))
+    app.setPalette(pal)
+    # Qt stylesheets can't draw the dropdown arrow once its box is styled, so
+    # draw one into the session cache and point the stylesheet at it.
+    arrow = QtGui.QPixmap(20, 12)
+    arrow.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(arrow)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(QtGui.QColor('#9aa0a6'))
+    p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(1, 1), QtCore.QPointF(19, 1), QtCore.QPointF(10, 11)]))
+    p.end()
+    arrow_path = os.path.join(cache_dir(), 'arrow.png')
+    arrow.save(arrow_path)
+    # ...and the checkbox tick: dark on the blue fill (8.2:1)
+    tick = QtGui.QPixmap(28, 28)
+    tick.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(tick)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.setPen(QtGui.QPen(QtGui.QColor('#0b1a33'), 4.2, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+    p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(5, 14.5), QtCore.QPointF(11.5, 21), QtCore.QPointF(23, 7)]))
+    p.end()
+    tick_path = os.path.join(cache_dir(), 'tick.png')
+    tick.save(tick_path)
+    qss = APP_QSS
+    for token, value in (('%ARROW%', arrow_path.replace('\\', '/')), ('%CHECK%', tick_path.replace('\\', '/')),
+                         ('%BORDER_HOVER%', BORDER_HOVER), ('%BORDER%', BORDER), ('%DISABLED%', DISABLED)):
+        qss = qss.replace(token, value)
+    app.setStyleSheet(qss)
+
+
+def card(title=None, extra=None):
+    """An inset card (QFrame#card) with an optional small uppercase title; returns (card, its layout)."""
+    frame = QtWidgets.QFrame()
+    frame.setObjectName('card')
+    box = QtWidgets.QVBoxLayout(frame)
+    box.setContentsMargins(10, 6, 10, 8)
+    box.setSpacing(3)
+    if title:
+        head = QtWidgets.QHBoxLayout()
+        label = QtWidgets.QLabel(title.upper())
+        label.setObjectName('cardTitle')
+        head.addWidget(label, 1)
+        if extra:
+            head.addWidget(extra)
+        box.addLayout(head)
+    return frame, box
+
+
+class Meter(QtWidgets.QWidget):
+    """A slim labelled level bar: filled from `origin` to the value in the
+    colour of the zone the value is in, with tick marks, and the value as text."""
+
+    def __init__(self, name, lo, hi, zones, origin=None, ticks=()):
+        super().__init__()
+        self.name, self.lo, self.hi, self.zones, self.ticks = name, lo, hi, zones, ticks
+        self.origin = lo if origin is None else origin
+        self.value, self.text = None, '-'
+        self.name_w = None   # set to line several meters' bars up
+        self.setMinimumHeight(22)
+        self.setMinimumWidth(220)
+
+    def set_value(self, value, text):
+        if (value, text) != (self.value, self.text):
+            self.value, self.text = value, text
+            self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h, val_w = self.width(), self.height(), 78
+        name_w = self.name_w or p.fontMetrics().horizontalAdvance(self.name) + 12
+        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.drawText(QtCore.QRectF(0, 0, name_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.name)
+        track = QtCore.QRectF(name_w, h / 2 - 4, max(w - name_w - val_w - 8, 10), 8)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor('#2c2e33'))
+        p.drawRoundedRect(track, 4, 4)
+
+        def x(v):
+            v = min(max(v, self.lo), self.hi)
+            return track.left() + track.width() * (v - self.lo) / (self.hi - self.lo)
+
+        if self.value is not None and math.isfinite(self.value):
+            colour = next((c for upto, c in self.zones if self.value <= upto), self.zones[-1][1])
+            x0, x1 = sorted((x(self.origin), x(self.value)))
+            p.setBrush(QtGui.QColor(colour))
+            p.drawRoundedRect(QtCore.QRectF(x0, track.top(), max(x1 - x0, 3), track.height()), 4, 4)
+        p.setPen(QtGui.QPen(QtGui.QColor('#80868b'), 1))
+        for t in self.ticks:
+            p.drawLine(QtCore.QPointF(x(t), track.top() - 3), QtCore.QPointF(x(t), track.bottom() + 3))
+        font = p.font()
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QtGui.QColor('#e8eaed'))
+        p.drawText(QtCore.QRectF(w - val_w, 0, val_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, self.text)
+
+
+def _flags_html(f):
+    """gr-rds flag string: TP, TA, Music, Stereo(DI), AH, Compressed, static PTY."""
+    if len(f) < 7:
+        return '-'
+
+    def lit(name, on):
+        return f'<b style="color:{RED}">{name}</b>' if on else f'<span style="color:{DIM}">{name}</span>'
+
+    return ' '.join([
+        lit('TP', f[0] == '1'), lit('TA', f[1] == '1'),
+        '<b>Music</b>' if f[2] == '1' else '<b>Speech</b>',
+        lit('DI-Stereo', f[3] == '1'), lit('AH', f[4] == '1'), lit('CMP', f[5] == '1'),
+    ])
+
+
+def _html(text):
+    """Station-supplied text, safe to put in a rich-text label."""
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _num(v, unit, fmt='.1f'):
+    return f'{v:{fmt}} {unit}' if math.isfinite(v) else f'-∞ {unit}'
+
+
+def _fits(freqs):
+    return max(freqs) - min(freqs) <= MAX_SPAN + 1
+
+
+class MpxSpectrum(QtWidgets.QWidget):
+    """Demodulated MPX spectrum, 0-100 kHz, 0 to -70 dB, with markers for the
+    19 kHz pilot, the 38 kHz stereo subcarrier and 57 kHz RDS."""
+
+    TOP, BOTTOM, MAX_KHZ = 0.0, -70.0, 100.0
+    MARKERS = ((19, 'pilot', GREEN), (38, '38k', '#9aa0a6'), (57, 'RDS', ACCENT),
+               (67, 'SCA', '#f0a35e'), (92, 'SCA', '#f0a35e'))
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(240)
+        self._db = None
+
+    def set_data(self, mpx_db):
+        self._db = mpx_db
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        fm_ = p.fontMetrics()
+        left, right = fm_.horizontalAdvance('-70 dB') + 8, self.width() - fm_.horizontalAdvance('100') // 2 - 6
+        top, bottom = 6, self.height() - fm_.height() - 6
+        p.fillRect(self.rect(), QtGui.QColor('#16171a'))
+
+        def x(khz):
+            return left + (right - left) * khz / self.MAX_KHZ
+
+        def y(db):
+            db = min(max(db, self.BOTTOM), self.TOP)
+            return top + (bottom - top) * (self.TOP - db) / (self.TOP - self.BOTTOM)
+
+        # grid and axis labels
+        p.setPen(QtGui.QColor('#3c4043'))
+        for db in range(0, -71, -10):
+            p.drawLine(QtCore.QPointF(left, y(db)), QtCore.QPointF(right, y(db)))
+        p.setPen(QtGui.QColor('#9aa0a6'))
+        for db in range(0, -71, -10):
+            p.drawText(QtCore.QRectF(0, y(db) - 8, left - 6, 16),
+                       QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f'{db} dB')
+        for khz in range(0, 101, 10):
+            p.drawText(QtCore.QRectF(x(khz) - 20, bottom + 2, 40, fm_.height()),
+                       QtCore.Qt.AlignHCenter, str(khz))
+
+        if self._db is not None:
+            khz = (np.arange(len(self._db)) + 1) * 0.5
+            pts = [QtCore.QPointF(x(k), y(d)) for k, d in zip(khz.tolist(), self._db.tolist())]
+            trace = QtGui.QPolygonF([QtCore.QPointF(x(0), y(self._db[0]))] + pts)
+            fill = QtGui.QPolygonF(trace)
+            fill.append(QtCore.QPointF(x(khz[-1]), bottom))
+            fill.append(QtCore.QPointF(x(0), bottom))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(79, 179, 191, 60))
+            p.drawPolygon(fill)
+            p.setPen(QtGui.QPen(QtGui.QColor('#4fb3bf'), 1.2))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawPolyline(trace)
+
+        # subcarrier markers
+        for khz_, label, colour in self.MARKERS:
+            p.setPen(QtGui.QPen(QtGui.QColor(colour), 1, QtCore.Qt.DotLine))
+            p.drawLine(QtCore.QPointF(x(khz_), top), QtCore.QPointF(x(khz_), bottom))
+            p.drawText(QtCore.QPointF(x(khz_) + 4, top + fm_.ascent()), label)
+
+
+class Goniometer(QtWidgets.QWidget):
+    """L/R vectorscope: mono is a vertical line, wide stereo a fuzzy ball,
+    out-of-phase content leans horizontal. Auto-scaled to fill the box.
+    The small one (size px) draws the last `points` samples of each update;
+    the large one (size None, resizable) keeps `history` updates, older ones
+    fading, like a scope's afterglow. on_click: called when clicked."""
+
+    def __init__(self, size=130, history=1, points=400):
+        super().__init__()
+        if size:
+            self.setFixedSize(size, size)
+        self._frames = deque(maxlen=history)
+        self._points = points
+        self.on_click = None
+
+    def set_data(self, lr):
+        if lr is None:
+            self._frames.clear()
+        else:
+            self._frames.append(lr)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self.on_click and event.button() == QtCore.Qt.LeftButton:
+            self.on_click()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.fillRect(self.rect(), QtGui.QColor('#0b1a0b'))
+        w = min(self.width(), self.height())
+        x0, y0 = (self.width() - w) / 2, (self.height() - w) / 2
+        c = w / 2
+        big = w > 200
+        p.setPen(QtGui.QPen(QtGui.QColor('#2a4a2a'), 1, QtCore.Qt.DotLine))
+        for a, b in (((c, 0), (c, w)), ((0, c), (w, c)), ((0, 0), (w, w)), ((w, 0), (0, w))):
+            p.drawLine(QtCore.QPointF(x0 + a[0], y0 + a[1]), QtCore.QPointF(x0 + b[0], y0 + b[1]))
+        if big:
+            p.drawEllipse(QtCore.QPointF(x0 + c, y0 + c), 0.45 * w, 0.45 * w)
+            font = p.font()
+            font.setPointSizeF(font.pointSizeF() * 1.3)
+            p.setFont(font)
+        p.setPen(QtGui.QColor('#6a8f6a'))
+        pad = 8 if big else 4
+        top = pad + p.fontMetrics().ascent()
+        p.drawText(QtCore.QPointF(x0 + pad, y0 + top), 'L')
+        p.drawText(QtCore.QPointF(x0 + w - pad - p.fontMetrics().horizontalAdvance('R'), y0 + top), 'R')
+        p.drawText(QtCore.QPointF(x0 + c + 4, y0 + top), 'M')
+        if big:
+            p.drawText(QtCore.QPointF(x0 + pad, y0 + c - 4), '\u2212S')
+            p.drawText(QtCore.QPointF(x0 + w - pad - p.fontMetrics().horizontalAdvance('+S'), y0 + c - 4), '+S')
+        if not self._frames:
+            return
+        frames = []
+        for l, r in self._frames:
+            l = l[-self._points:] if self._points else l
+            r = r[-self._points:] if self._points else r
+            l, r = l.astype(np.float64), r.astype(np.float64)
+            frames.append(((l + r) / math.sqrt(2), (r - l) / math.sqrt(2)))
+        peak = max(max(np.max(np.abs(m)), np.max(np.abs(sd))) for m, sd in frames)
+        k = 0.45 * w / max(peak, 1e-4)
+        n = len(frames)
+        for i, (mid, side) in enumerate(frames):  # oldest first, faintest
+            colour = QtGui.QColor('#66ff66')
+            colour.setAlphaF(0.25 + 0.75 * (i + 1) / n if n > 1 else 1.0)
+            p.setPen(QtGui.QPen(colour, 1.6 if big else 1.0))
+            xs, ys = (x0 + c + side * k).tolist(), (y0 + c - mid * k).tolist()
+            p.drawPoints(QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in zip(xs, ys)]))
+
+
+class StereoWindow(QtWidgets.QDialog):
+    """A receiver's stereo image, large and live: goniometer with afterglow,
+    phase-correlation bar and the stereo readouts. Opened by clicking the
+    panel's goniometer; follows the panel until closed."""
+
+    READOUTS = ('Correlation', 'Balance', 'Width (S/M)', 'Level L/R')
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
+        self.resize(560, 660)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.scope = Goniometer(size=None, history=8, points=None)
+        self.scope.setMinimumSize(300, 300)
+        layout.addWidget(self.scope, 1)
+        self.phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,))
+        layout.addWidget(self.phase)
+        self.readouts = QtWidgets.QLabel('')
+        self.readouts.setAlignment(QtCore.Qt.AlignCenter)
+        self.readouts.setStyleSheet('color: #9aa0a6; padding: 4px;')
+        layout.addWidget(self.readouts)
+
+    def follow(self, panel):
+        st = panel.station
+        self.setWindowTitle(f'{panel.title} \u2013 stereo image')
+        self.scope.set_data(st.audio_meter.scope)
+        corr = (st.audio_meter.stats or {}).get('correlation')
+        self.phase.set_value(corr, '-' if corr is None else f'{corr:+.2f}')
+        self.readouts.setText('   \u00b7   '.join(
+            f'{n}: <b style="color:#e0e0e0">{QtGui.QTextDocumentFragment.fromHtml(panel.values[n].text()).toPlainText()}</b>'
+            for n in self.READOUTS))
+
+
+AMBER = '#f0a35e'
+IMG_PX = 88        # station logo / album art on the panel
+IMG_TIP_PX = 320   # and in their tooltips
+
+# Alarm name, description, seconds the condition must hold before it raises or
+# clears (SILENCE's is a receiver setting).
+ALARM_DEFS = (
+    ('CARRIER', 'carrier low or lost', 5),
+    ('SILENCE', 'audio silence', 10),
+    ('OVERMOD', 'over-modulation', 3),
+    ('PILOT', 'stereo pilot lost', 5),
+    ('PILOT_SPEC', 'stereo pilot out of tolerance', 10),
+    ('SUBCARRIERS', 'subcarrier injection over the limit', 10),
+    ('FREQUENCY', 'carrier frequency out of tolerance', 30),
+    ('RDS', 'RDS lost', 10),
+    ('PI', 'wrong station (PI differs from expected)', 5),
+    ('ALERT', 'IBOC emergency alert', 0),   # only while an IBOC programme is playing
+)
+
+# FM technical rules the alarms check, per rule set. FCC: 47 CFR 73.1570(b)(2)
+# (modulation), 73.322 (pilot), 73.319(d)(2) (subcarriers), 73.1545(b) (frequency).
+# ISED: BETS-6 issue 3 A.2.2.2, A.2.2.4, 7.2.3 and BPR-3 issue 7 3.13.2 (the
+# modulation, pilot and subcarrier limits match the FCC's; BPR-1 sets no
+# numeric in-service frequency tolerance, so BETS-6's transmitter stability is used).
+# The limits, each adjustable per receiver: (setting, label, unit, low, high, step).
+LIMITS = (
+    ('mod_base_pct', 'over-modulation base', '%', 50, 150, 0.5),
+    ('mod_per_sub', 'subcarrier allowance (x injection)', '', 0, 2, 0.05),
+    ('mod_max_pct', 'over-modulation maximum', '%', 50, 150, 0.5),
+    ('pilot_min_pct', 'pilot minimum', '%', 0, 20, 0.1),
+    ('pilot_max_pct', 'pilot maximum', '%', 0, 20, 0.1),
+    ('pilot_tol_hz', 'pilot frequency tolerance', 'Hz', 0.1, 50, 0.1),
+    ('sub_total_pct', 'subcarrier total', '%', 0, 50, 0.5),
+    ('sub_high_pct', 'subcarriers above 75 kHz', '%', 0, 50, 0.5),
+    ('freq_tol_hz', 'carrier frequency tolerance', 'Hz', 100, 10000, 100),
+)
+_COMMON = {'mod_base_pct': 100.0, 'mod_per_sub': 0.5, 'mod_max_pct': 110.0,
+           'pilot_min_pct': 8.0, 'pilot_max_pct': 10.0, 'pilot_tol_hz': 2.0,
+           'sub_total_pct': 20.0, 'sub_high_pct': 10.0}
+RULES = {
+    'fcc': {'name': 'FCC (47 CFR 73)', 'limits': {**_COMMON, 'freq_tol_hz': 2000.0}},
+    'ised': {'name': 'ISED (BETS-6, BPR-3)', 'limits': {**_COMMON, 'freq_tol_hz': 1000.0}},
+}
+
+
+@dataclass
+class ReceiverSettings:
+    """One receiver's settings; saved with it in fm-modmon-ms_config.json."""
+    name: str = ''
+    deemphasis_us: int = 75          # 75 (Americas, Korea) or 50 (Europe, most elsewhere)
+    stereo: str = 'auto'             # 'auto' or 'mono'
+    volume_pct: int = 100            # play volume
+    pty_names: str = 'rbds'          # 'rbds' (North America) or 'rds'
+    expected_pi: str = ''            # 4 hex digits; the PI alarm compares with it
+    rds_feed: bool = True            # serve raw RDS groups over TCP
+    rds_port: int = 0                # 0: the default, --rds-port + receiver number - 1
+    audio_source: str = 'analog'     # an AUDIO_SOURCES key
+    alarms: dict = field(default_factory=lambda: {name: True for name, *_ in ALARM_DEFS})
+    silence_lufs: float = -45.0      # momentary loudness below this is silence
+    silence_s: int = 10              # for this long
+    min_snr_db: float = 15.0         # MPX S/N below this (or RF < -75 dBFS) is carrier low
+    rules: str = ''                  # 'ised', 'fcc', 'custom', or '' = by --country (ISED for CA, else FCC)
+    # the limits the alarms use with rules 'custom' (with a preset, the preset's)
+    mod_base_pct: float = 100.0      # over-modulation above base + per_sub x subcarrier injection, at most max
+    mod_per_sub: float = 0.5
+    mod_max_pct: float = 110.0
+    pilot_min_pct: float = 8.0       # stereo pilot injection range...
+    pilot_max_pct: float = 10.0
+    pilot_tol_hz: float = 2.0        # ...and frequency tolerance around 19 kHz
+    sub_total_pct: float = 20.0      # all subcarriers together
+    sub_high_pct: float = 10.0       # subcarriers above 75 kHz
+    freq_tol_hz: float = 2000.0      # carrier frequency
+
+    @classmethod
+    def from_dict(cls, d):
+        """Settings from a saved dict: unknown keys ignored, bad values back to defaults."""
+        known = {f.name for f in fields(cls)}
+        d = dict(d or {})
+        if 'overmod_pct' in d and 'mod_base_pct' not in d and d.get('rules') == 'custom':
+            # an earlier version's single custom limit: a fixed limit, no subcarrier allowance
+            d.update(mod_base_pct=d['overmod_pct'], mod_per_sub=0.0, mod_max_pct=d['overmod_pct'])
+        out = cls(**{k: v for k, v in d.items() if k in known})
+        default = cls()
+        if out.deemphasis_us not in (50, 75):
+            out.deemphasis_us = default.deemphasis_us
+        if out.stereo not in ('auto', 'mono'):
+            out.stereo = default.stereo
+        if out.pty_names not in ('rbds', 'rds'):
+            out.pty_names = default.pty_names
+        if out.audio_source not in dict(AUDIO_SOURCES):
+            out.audio_source = default.audio_source
+        out.expected_pi = str(out.expected_pi).strip().upper()
+        if out.expected_pi and not (len(out.expected_pi) == 4 and
+                                    all(c in '0123456789ABCDEF' for c in out.expected_pi)):
+            out.expected_pi = ''
+        out.alarms = {name: bool((out.alarms or {}).get(name, True)) for name, *_ in ALARM_DEFS}
+        out.volume_pct = int(min(max(out.volume_pct, 0), 200))
+        if not (out.rds_port == 0 or 1024 <= int(out.rds_port) <= 65535):
+            out.rds_port = 0
+        out.silence_s = int(min(max(out.silence_s, 2), 300))
+        if out.rules not in ('', 'ised', 'fcc', 'custom'):
+            out.rules = ''
+        for name, _, _, lo, hi, _ in LIMITS:
+            try:
+                setattr(out, name, float(min(max(float(getattr(out, name)), lo), hi)))
+            except (TypeError, ValueError):
+                setattr(out, name, getattr(default, name))
+        return out
+
+    def to_dict(self):
+        return asdict(self)
+
+    def preset(self, country):
+        """The rule set in force: 'ised', 'fcc' or 'custom'."""
+        return self.rules or ('ised' if country == 'CA' else 'fcc')
+
+    def limits(self, country):
+        """The limits in force: the preset's, or this receiver's own (custom)."""
+        rules = self.preset(country)
+        if rules in RULES:
+            return dict(RULES[rules]['limits'])
+        return {name: getattr(self, name) for name, *_ in LIMITS}
+
+
+ALARM_GRACE_S = 5  # ignore alarms this long after (re)tuning
+
+
+class StationAlarms:
+    """Raises an alarm once its condition has held for its delay, and clears it
+    the same way, so brief dips don't flap. update() returns what changed."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.active = set()
+        self._pending = {}
+        self.seen_pilot = self.seen_rds = False
+        self._t0 = time.monotonic()
+
+    def hold(self):
+        """Pause judging for ALARM_GRACE_S (gain steps, SDR reopened) without
+        forgetting what is raised: no false 'cleared', no repeat 'ALARM'."""
+        self._pending = {}
+        self._t0 = time.monotonic()
+
+    def ready(self):
+        """False during the grace period after (re)tuning, while the meters
+        still hold some of the previous station's signal."""
+        return time.monotonic() - self._t0 >= ALARM_GRACE_S
+
+    def update(self, conditions, holds=None):
+        now = time.monotonic()
+        changes = []
+        if now - self._t0 < ALARM_GRACE_S:
+            return changes
+        for name, desc, hold in ALARM_DEFS:
+            hold = (holds or {}).get(name, hold)
+            want = bool(conditions.get(name))
+            if want == (name in self.active):
+                self._pending.pop(name, None)
+                continue
+            if now - self._pending.setdefault(name, now) >= hold:
+                del self._pending[name]
+                (self.active.add if want else self.active.discard)(name)
+                changes.append((desc, want))
+        return changes
+
+
+def mod_limit(rules, limits, stats):
+    """(limit %, how it was worked out) for peak modulation with `limits`."""
+    inj = (stats.get('rds_pct') or 0.0) + sum(stats.get(f'sca{k}_pct') or 0.0 for k in (67, 92))
+    lim = limits
+    limit = min(lim['mod_base_pct'] + lim['mod_per_sub'] * inj, lim['mod_max_pct'])
+    name = RULES[rules]['name'] if rules in RULES else 'custom'
+    return limit, (f'{name}: {lim["mod_base_pct"]:g}% + {lim["mod_per_sub"]:g} \u00d7 {inj:.1f}% subcarriers, '
+                   f'max {lim["mod_max_pct"]:g}%')
+
+
+def _pct_html(v, warn=100, alarm=110):
+    colour = RED if v > alarm else AMBER if v > warn else None
+    text = f'{v:.0f}%'
+    return f'<span style="color:{colour}">{text}</span>' if colour else text
+
+
+class StationPanel(QtWidgets.QGroupBox):
+    # (title, columns, readouts, readouts long enough to get a full-width row at the end)
+    SECTIONS = (
+        ('RDS', 2, ('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss',
+                    'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types'),
+         ('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types')),
+        ('Signal', 2, ('RF level', 'MPX S/N', 'Carrier offset', 'AM / multipath',
+                       'Pilot (19 kHz)', 'Pilot freq', 'RDS injection', 'IBOC signal',
+                       'SCA 67 kHz', 'SCA 92 kHz'), ('SCA 67 kHz', 'SCA 92 kHz')),
+        ('Modulation', 2, ('Peak + / −', 'Peak deviation', 'Over 100%', 'Over 110%',
+                           'L / R', 'L+R / L−R', 'MPX power', 'Limit'), ('Limit',)),
+        ('MPX spectrum 0–100 kHz', 0, (), ()),
+        ('Loudness', 2, ('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), ()),
+        ('Stereo image', 1, ('Level L/R', 'Balance', 'Correlation', 'Width (S/M)'), ()),
+    )
+
+    def __init__(self, station, stations, on_play, on_select, iboc_scan=None, on_remove=None, on_settings=None,
+                 on_source=None, radiodns=None, country='CA'):
+        super().__init__()
+        self.station = station
+        self.slot = 0
+        self.settings = ReceiverSettings()
+        self.radiodns = radiodns
+        self.country = country
+        self.iboc_scan = iboc_scan if iboc_scan is not None else {}
+        self.alarms = StationAlarms()
+        self.rate = 0.0
+        self._groups = deque()
+        self._web_lists = None  # (stations, sources) for the web page; None = rebuild
+        self.setObjectName('panel')
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # Station selector: every station the scan found; ones that can't share
+        # the SDR window with the other two receivers are greyed out.
+        self.combo = QtWidgets.QComboBox()
+        self.combo.setStyleSheet('font-size: 20pt; font-weight: bold; padding: 2px 8px;')
+        for freq, snr in stations:
+            self.combo.addItem(f'{freq / 1e6:.1f} MHz', freq)
+            if snr is not None:
+                self.combo.setItemData(self.combo.count() - 1,
+                                       f'scan: {snr:.0f} dB above noise', QtCore.Qt.ToolTipRole)
+        self.combo.setCurrentIndex(self.combo.findData(station.freq_hz))
+        self.combo.activated.connect(lambda i: on_select(self, self.combo.itemData(i)))
+        self.remove_btn = QtWidgets.QToolButton()
+        self.remove_btn.setText('\u2715')
+        self.remove_btn.setToolTip('Remove this receiver')
+        self.remove_btn.setStyleSheet('font-size: 13pt; padding: 4px 10px;')
+        self.remove_btn.clicked.connect(lambda: on_remove(self) if on_remove else None)
+        self.settings_btn = QtWidgets.QToolButton()
+        self.settings_btn.setText('\u2699')
+        self.settings_btn.setToolTip('Settings for this receiver')
+        self.settings_btn.setStyleSheet('font-size: 13pt; padding: 4px 10px;')
+        self.settings_btn.clicked.connect(lambda: on_settings(self) if on_settings else None)
+        combo_row = QtWidgets.QHBoxLayout()
+        combo_row.addWidget(self.combo, 1)
+        combo_row.addWidget(self.settings_btn)
+        combo_row.addWidget(self.remove_btn)
+
+        self.ps = QtWidgets.QLabel('--------')
+        self.ps.setTextFormat(QtCore.Qt.PlainText)
+        self.ps.setAlignment(QtCore.Qt.AlignCenter)
+        self.ps.setStyleSheet(LCD + 'font-family: Consolas, monospace; font-size: 18pt;'
+                              'font-weight: bold; color: #7cfc7c; padding: 2px;')
+        # Radiotext: up to 64 characters, always on one line; RT+ tags under it.
+        self.rt = QtWidgets.QLabel('')
+        self.rt.setTextFormat(QtCore.Qt.PlainText)
+        rt_font = QtGui.QFont('Consolas', 10)
+        self.rt.setFont(rt_font)
+        self.rt.setStyleSheet(LCD + 'color: #cfe8cf; padding: 4px 6px; font-family: Consolas; font-size: 10pt;')
+        self.rt.setMinimumWidth(QtGui.QFontMetrics(rt_font).horizontalAdvance('M' * 64) + 16)
+        self.rtplus = QtWidgets.QLabel('')
+        self.rtplus.setStyleSheet(f'color: {ACCENT};')
+        self.alarm_label = QtWidgets.QLabel('')
+        self.alarm_label.setTextFormat(QtCore.Qt.PlainText)
+        self._alarm_state = None
+        self.feed = None  # RdsGroupServer for this receiver, if any
+        self.feed_label = QtWidgets.QLabel('')
+        self.feed_label.setStyleSheet('color: #9aa0a6;')
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.addWidget(self.alarm_label)
+        status_row.addStretch(1)
+        status_row.addWidget(self.feed_label)
+        layout.addLayout(combo_row)
+        text_grid = QtWidgets.QGridLayout()
+        text_grid.setHorizontalSpacing(8)
+        text_grid.setVerticalSpacing(3)
+        # DYNAMIC PS: an amber pill beside the alarm pill, shown only while it applies
+        self.ps_mode = QtWidgets.QLabel('DYNAMIC PS')
+        self.ps_mode.setStyleSheet('border-radius: 10px; padding: 2px 10px; font-weight: 600; '
+                                   'background: #3a2e1b; color: #f0a35e; border: 1px solid #6b5228;')
+        self.ps_mode.setToolTip('The PS has changed 3 or more times in the last '
+                                f'{DYNAMIC_PS_S} s (scrolling or block text)')
+        self.ps_mode.hide()
+        status_row.insertWidget(1, self.ps_mode)
+        self.iboc_line, self.psd_line, self.sis_line, self.rdns_line = (QtWidgets.QLabel('-') for _ in range(4))
+        self._iboc_rows = []   # IBOC, PSD and SIS rows: shown only when the station has IBOC
+        self._rdns_row = ()     # the RadioDNS row: shown only while RadioDNS works for the station
+        self._rdns_working = False
+        self._stereo = None     # the large stereo-image window, once opened
+        self.rdns_line.setToolTip('RadioDNS service information (ETSI TS 103 270 / TS 102 818)')
+        self.logo_img, self.art_img = QtWidgets.QLabel(), QtWidgets.QLabel()
+        for img in (self.logo_img, self.art_img):
+            img.setFixedSize(IMG_PX, IMG_PX)
+            img.setAlignment(QtCore.Qt.AlignCenter)
+            img.hide()
+            img.path = None
+        text_grid.addWidget(self.logo_img, 3, 3, 4, 1)
+        text_grid.addWidget(self.art_img, 3, 4, 4, 1)
+        for w in (self.rtplus, self.iboc_line, self.psd_line, self.sis_line, self.rdns_line):
+            w.setTextFormat(QtCore.Qt.RichText)
+            w.setStyleSheet(f'color: {ACCENT};')
+            # long text is cut at the panel edge (full text in the tooltip), never widening it
+            w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.psd_line.setToolTip('IBOC programme service data (PSD) of the programme playing')
+        self.sis_line.setToolTip('IBOC station information service (SIS)')
+        for row, (title, widget) in enumerate((('PS', self.ps), ('RT', self.rt), ('RT+', self.rtplus),
+                                               ('IBOC', self.iboc_line), ('PSD', self.psd_line),
+                                               ('SIS', self.sis_line), ('RadioDNS', self.rdns_line))):
+            label = QtWidgets.QLabel(title)
+            label.setStyleSheet(f'font-weight: bold; color: {ACCENT};')
+            label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            text_grid.addWidget(label, row, 0)
+            if title in ('IBOC', 'PSD', 'SIS'):
+                self._iboc_rows.extend((label, widget))
+            elif title == 'RadioDNS':
+                self._rdns_row = (label, widget)
+            # PS, RT and RT+ span the image columns too, so their boxes end aligned
+            text_grid.addWidget(widget, row, 1, 1, 4 if row in (0, 1, 2) else 2)
+        text_grid.setColumnStretch(1, 1)
+        # start without the rows refresh() would hide anyway, so the window opens at its final height
+        for w in self._iboc_rows if not self._iboc_lines() else ():
+            w.hide()
+        for w in self._rdns_row:
+            w.hide()
+        display, display_box = card()
+        display_box.addLayout(text_grid)
+        layout.addWidget(display)
+        layout.addLayout(status_row)
+
+        # live meters
+        self.meters = {
+            'rf': Meter('Signal', -90, -10, [(-70, RED), (-50, AMBER), (0, GREEN)]),
+            'snr': Meter('S/N', 0, 60, [(15, RED), (30, AMBER), (999, GREEN)]),
+            'mod': Meter('Peak mod', 0, 130, [(100, GREEN), (110, AMBER), (999, RED)], ticks=(100,)),
+            'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,)),
+        }
+        meters, meters_box = card('Levels')
+        meter_grid = QtWidgets.QGridLayout()
+        meter_grid.setHorizontalSpacing(18)
+        meter_grid.setVerticalSpacing(6)
+        for m in self.meters.values():
+            m.ensurePolished()
+        name_w = max(m.fontMetrics().horizontalAdvance(m.name) for m in self.meters.values()) + 14
+        for i, m in enumerate(self.meters.values()):
+            m.name_w = name_w
+            meter_grid.addWidget(m, i // 2, i % 2)
+        meters_box.addLayout(meter_grid)
+        layout.addWidget(meters)
+
+        self.values = {}
+        # one label width for every section, so the values line up down the panel
+        probe = QtWidgets.QLabel(self)
+        probe.ensurePolished()  # measure in the font the stylesheet gives labels
+        self._label_w = max(probe.fontMetrics().horizontalAdvance(n + ':')
+                            for _, _, names, _ in self.SECTIONS for n in names) + 10
+        probe.deleteLater()
+        for title, cols, names, wide in self.SECTIONS:
+            extra = None
+            if title == 'Loudness':
+                extra = QtWidgets.QToolButton()
+                extra.setText('reset integrated')
+                extra.setStyleSheet('padding: 1px 8px;')
+                extra.clicked.connect(station.audio_meter.reset_integrated)
+            section, box = card(title, extra)
+            layout.addWidget(section)
+            if title.startswith('MPX spectrum'):
+                self.mpx = MpxSpectrum()
+                box.addWidget(self.mpx)
+                continue
+            grid = self._grid(names, cols, wide)
+            if title == 'Stereo image':
+                self.gonio = Goniometer()
+                self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
+                self.gonio.setToolTip('Click for a larger view')
+                self.gonio.on_click = self._open_stereo
+                row = QtWidgets.QHBoxLayout()
+                readouts = QtWidgets.QVBoxLayout()   # rows at their normal spacing, beside the goniometer
+                readouts.addLayout(grid)
+                readouts.addStretch(1)
+                row.addLayout(readouts, 1)
+                row.addWidget(self.gonio, 0, QtCore.Qt.AlignTop)
+                box.addLayout(row)
+            else:
+                box.addLayout(grid)
+
+        self.source = QtWidgets.QComboBox()
+        self.source.setMinimumHeight(34)
+        for key, label in AUDIO_SOURCES:
+            self.source.addItem(label, key)
+        self.source.setToolTip('What Play plays')
+        self.source.activated.connect(lambda i: on_source(self, self.source.itemData(i)) if on_source else None)
+        self.play = QtWidgets.QPushButton('\u25b6  Play audio')
+        self.play.setCheckable(True)
+        self.play.setMinimumHeight(34)
+        self.play.setStyleSheet('QPushButton { font-weight: 600; }'
+                                'QPushButton:checked { background: #2e7d32; color: white;'
+                                ' border: 1px solid #69db7c; border-radius: 6px; }'
+                                'QPushButton:checked:hover { background: #37913c; }')
+        self.play.toggled.connect(lambda on: on_play(self, on))
+        audio_row = QtWidgets.QHBoxLayout()
+        audio_row.addWidget(self.source)
+        audio_row.addWidget(self.play, 1)
+        layout.addLayout(audio_row)
+        layout.addStretch(1)
+
+    def _grid(self, names, cols, wide=()):
+        """Label/value pairs in `cols` equal columns with one label width (so values
+        line up across sections); readouts in `wide` get a full-width row each."""
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(3)
+        normal = [n for n in names if n not in wide]
+        rows = (len(normal) + cols - 1) // cols
+        for i, name in enumerate(normal + [n for n in names if n in wide]):
+            if i < len(normal):
+                row, col, span = i // cols, i % cols, 1
+            else:
+                row, col, span = rows + i - len(normal), 0, cols * 2 - 1
+            label = QtWidgets.QLabel(name + ':')
+            label.setStyleSheet('color: #9aa0a6;')
+            label.setFixedWidth(self._label_w)
+            value = QtWidgets.QLabel('-')
+            value.setTextFormat(QtCore.Qt.RichText)
+            value.setStyleSheet('font-weight: bold;')
+            # long text is cut at the column edge rather than pushing the columns out of line
+            value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            grid.addWidget(label, row, col * 2)
+            grid.addWidget(value, row, col * 2 + 1, 1, span)
+            self.values[name] = value
+        for col in range(cols):
+            grid.setColumnStretch(col * 2 + 1, 1)
+        return grid
+
+    def static_ps(self):
+        """The PS as a station name: '' while it is dynamic, None until a complete
+        PS has held for PS_NAME_STABLE_S (so a scrolling PS's first frames
+        don't become the name before it is recognised as dynamic)."""
+        raw = self.station.rds.snapshot()
+        if raw['ps_dynamic']:
+            return ''
+        if raw['ps'].strip() and raw['ps_age'] >= PS_NAME_STABLE_S:
+            return raw['ps'].strip()
+        return None
+
+    @property
+    def title(self):
+        ps = self.static_ps() or self.station.rds.snapshot()['ps'].strip()
+        return f'{self.station.freq_hz / 1e6:.1f}' + (f' {ps}' if ps else '')
+
+    def set_fit(self, other_freqs):
+        """Grey out stations that can't share the SDR window with other_freqs."""
+        for i in range(self.combo.count()):
+            ok = _fits(other_freqs + [self.combo.itemData(i)])
+            self.combo.model().item(i).setEnabled(ok)
+        self._web_lists = None
+
+    def set_station_name(self, freq, ps):
+        i = self.combo.findData(freq)
+        if i >= 0:
+            self.combo.setItemText(i, f'{freq / 1e6:.1f} MHz' + (f'  {ps}' if ps else ''))
+            self._web_lists = None
+
+    def source_key(self):
+        return self.source.currentData()
+
+    def set_source(self, key):
+        self.source.setCurrentIndex(self.source.findData(key))
+
+    def set_sources(self, nrsc5):
+        """Grey out IBOC where it can't play: no nrsc5, or no IBOC found on this station."""
+        scan = self.iboc_scan.get(self.station.freq_hz, 'unknown')
+        why = ('nrsc5 not found (see --nrsc5)' if not nrsc5 else
+               'The start-up scan found no IBOC on this station' if scan is None else '')
+        for i, (key, _) in enumerate(AUDIO_SOURCES):
+            if key.startswith('iboc'):
+                item = self.source.model().item(i)
+                item.setEnabled(not why)
+                item.setToolTip(why)
+        self._web_lists = None
+        return not why
+
+    def _iboc_line_text(self):
+        dec = self.station.iboc
+        if not dec:
+            return '-'
+        st = dec.status
+        parts = [dict(AUDIO_SOURCES)[f'iboc{dec.program}'].split()[1],
+                 'synchronized' if st['synced'] else f'<span style="color:{AMBER}">searching\u2026</span>']
+        if dec.program in st['services']:
+            parts[0] += f" ({st['services'][dec.program]})"
+        if st['kbps']:
+            parts.append(f"{st['kbps']:.0f} kbps")
+        if st['mer']:
+            parts.append(f"MER {min(st['mer']):.1f} dB")
+        if st['ber'] is not None:
+            parts.append(f"BER {st['ber']:.1e}")
+        if dec.pipe.dropped:
+            parts.append(f'<span style="color:{RED}">{dec.pipe.dropped} blocks dropped</span>')
+        if st['alert']:
+            parts.append(f'<b style="color:{RED}">ALERT: {_html(st["alert"])}</b>')
+        return '  \u00b7  '.join(parts)
+
+    def _psd_sis_text(self):
+        """(PSD line, SIS line) from nrsc5, each '-' when there is nothing."""
+        dec = self.station.iboc
+        if not dec:
+            return '-', '-'
+        st = dec.status
+        song = ' \u2013 '.join(x for x in (st['artist'], st['title']) if x)
+        psd = [x for x in (song, st['album'], st['genre'], st['comment']) if x]
+        sis = [x for x in (st['name'], st['slogan'], st['message']) if x]
+        return ('  \u00b7  '.join(map(_html, psd)) or '-', '  \u00b7  '.join(map(_html, sis)) or '-')
+
+    def _rdns_lookups(self, f, raw):
+        """[(label, result, slideshow or None)] for this station's RadioDNS
+        services (FM, and IBOC while it plays)."""
+        if not self.radiodns:
+            return []
+        out = []
+        pi = f.get(0, '').strip()
+        fm_key = radiodns_fm(pi, self.station.freq_hz, raw['ecc'], self.country) if pi else None
+        if fm_key:
+            out.append(('FM', self.radiodns.lookup(*fm_key), self.radiodns.vis(fm_key[0])))
+        dec = self.station.iboc
+        if dec:
+            iboc_key = radiodns_iboc(dec.status['country'], dec.status['facility'], dec.program)
+            if iboc_key:
+                out.append(('IBOC', self.radiodns.lookup(*iboc_key), self.radiodns.vis(iboc_key[0])))
+        return out
+
+    @staticmethod
+    def _rdns_text(result):
+        state = result['state']
+        if state == 'found':
+            text = f"{_html(result['name'] or 'listed')} ({result['spi']})"
+            if result.get('description'):
+                text += f" \u2013 {_html(result['description'])}"
+            return text
+        if state == 'needs client identifier':
+            return (f'registered ({result["target"]}); <span style="color:{AMBER}">service information '
+                    'needs a client identifier</span>')
+        if state in ('client identifier rejected', 'not listed', 'no service information'):
+            return f'registered ({result["target"]}); <span style="color:{AMBER}">{state}</span>'
+        if state == 'error':
+            return f'<span style="color:{RED}">lookup failed: {_html(result.get("error", ""))}</span>'
+        return f'<span style="color:{DIM}">{state}</span>'
+
+    def _update_media(self, f, raw):
+        """RadioDNS line (only while RadioDNS works for the station), station
+        logo (IBOC on air, else RadioDNS) and album art (IBOC, else the RadioDNS slideshow)."""
+        lookups = self._rdns_lookups(f, raw)
+        working = [(label, r, vis) for label, r, vis in lookups
+                   if r['state'] == 'found' or (vis and vis.image)]
+        parts = []
+        for label, r, vis in working:
+            text = self._rdns_text(r) if r['state'] == 'found' else f'registered ({_html(r.get("target", ""))})'
+            if vis and vis.image:
+                text += ' \u00b7 slideshow'
+            parts.append(f'{label}: {text}')
+        self.rdns_line.setText('  \u00b7  '.join(parts) or '-')
+        self.rdns_line.setToolTip(QtGui.QTextDocumentFragment.fromHtml(self.rdns_line.text()).toPlainText())
+        self._rdns_working = bool(working)
+        for w in self._rdns_row:
+            if w.isHidden() == self._rdns_working:
+                w.setVisible(self._rdns_working)
+        logo, art = self.station.iboc.images() if self.station.iboc else (None, None)
+        art_what = 'Album art'
+        for label, r, vis in reversed(lookups):  # IBOC's RadioDNS logo and slideshow before FM's
+            logo = logo or r.get('logo')
+            if not art and vis and vis.image:
+                art = vis.image
+                art_what = 'Album art (RadioDNS slideshow)' + (f': {_html(vis.text)}' if vis.text else '')
+        self._show_image(self.logo_img, logo, 'Station logo')
+        self._show_image(self.art_img, art, art_what)
+
+    @staticmethod
+    def _show_image(label, path, what):
+        if path == label.path:
+            return
+        label.path = path
+        pix = QtGui.QPixmap(path) if path and os.path.exists(path) else QtGui.QPixmap()
+        if pix.isNull():
+            label.clear()
+            label.hide()
+            return
+        label.setPixmap(pix.scaled(IMG_PX, IMG_PX, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        label.setToolTip(f'{what}<br><img src="{path}" width="{IMG_TIP_PX}">')
+        label.show()
+
+    def reset_display(self):
+        self.ps.setText('--------')
+        self.ps_mode.hide()
+        self.rt.setText('')
+        self.rtplus.setText('-')
+        for value in self.values.values():
+            value.setText('-')
+        self._groups.clear()
+        self.rate = 0.0
+        self.alarms.reset()
+        for m in self.meters.values():
+            m.set_value(None, '-')
+        self.gonio.set_data(None)
+        self.mpx.set_data(None)
+
+    def _rds_rate(self):
+        """Groups per second over the last 3 s."""
+        now = time.monotonic()
+        self._groups.append((now, self.station.rds.groups))
+        while now - self._groups[0][0] > 3.0:
+            self._groups.popleft()
+        (t0, g0), (t1, g1) = self._groups[0], self._groups[-1]
+        return (g1 - g0) / (t1 - t0) if t1 > t0 else 0.0
+
+    def _sca_kind(self, khz, s):
+        """'audio' | 'data' | 'tone' | 'idle' | 'weak' | 'checking', or None if there is no SCA."""
+        if s is None or s[f'sca{khz}_pct'] is None:
+            return None
+        if s[f'sca{khz}_db'] < SCA_CLASSIFY_DB:
+            return 'weak'
+        kind = self.station.sca_meter.kinds[khz]
+        return kind[0] if kind else 'checking'
+
+    def _sca_kind_html(self, khz, s):
+        kind = self._sca_kind(khz, s)
+        baud = (self.station.sca_meter.kinds[khz] or (None, None))[1]
+        return {
+            'audio': f'<span style="color:{AMBER}">AUDIO</span>',
+            'data': f'<span style="color:{ACCENT}">DATA</span>' + (f' ~{baud:.0f} Bd' if baud else '')
+                    + f' <span style="color:{DIM}">(not audio)</span>',
+            'tone': f'<span style="color:{AMBER}">TONE</span>',
+            'idle': f'<span style="color:{DIM}">IDLE (no modulation)</span>',
+            'weak': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(too weak to tell)</span>',
+            'checking': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(checking\u2026)</span>',
+        }[kind]
+
+    def _sca_sources(self, s):
+        """Label the SCA audio sources with what they carry, so data isn't taken for audio."""
+        for i, (key, label) in enumerate(AUDIO_SOURCES):
+            if not key.startswith('sca'):
+                continue
+            kind = self._sca_kind(int(key[3:]), s)
+            text, tip = label, ''
+            if kind is None:
+                text, tip = f'{label} (none)', 'No subcarrier on this station'
+            elif kind == 'data':
+                text, tip = f'{label} (data)', 'This subcarrier carries data, not audio: there is nothing to listen to'
+            elif kind == 'idle':
+                text, tip = f'{label} (idle)', 'This subcarrier is on but carries nothing'
+            if self.source.itemText(i) != text:
+                self.source.setItemText(i, text)
+                self.source.setItemData(i, tip, QtCore.Qt.ToolTipRole)
+                self._web_lists = None
+
+    def _open_stereo(self):
+        if self._stereo is None:
+            self._stereo = StereoWindow(self)
+        self._stereo.follow(self)
+        self._stereo.show()
+        self._stereo.raise_()
+        self._stereo.activateWindow()
+
+    def rules(self):
+        """The rule set the alarms use: 'ised', 'fcc' or 'custom'."""
+        return self.settings.preset(self.country)
+
+    def _iboc_lines(self):
+        """Whether to show the IBOC, PSD and SIS rows: IBOC found on this station, or playing."""
+        return bool(self.station.iboc) or isinstance(self.iboc_scan.get(self.station.freq_hz), float)
+
+    def _iboc_text(self):
+        if self.station.freq_hz not in self.iboc_scan:
+            return f'<span style="color:{DIM}">unknown (not scanned)</span>'
+        info = self.iboc_scan[self.station.freq_hz]
+        if info == 'adjacent':
+            return f'<span style="color:{DIM}">unknown (adjacent station)</span>'
+        if info is None:
+            return f'<span style="color:{DIM}">not detected</span>'
+        return f'<span style="color:{AMBER}">detected</span>, {info:.0f} dBc'
+
+    def refresh(self):
+        """Update every readout; returns alarm changes as [(description, raised), ...]."""
+        v = self.values
+        st = self.station
+        f = st.rds.fields
+        raw = st.rds.snapshot()
+        if raw['ps']:
+            self.ps.setText(raw['ps'])
+        elif 1 in f:
+            self.ps.setText(f[1].ljust(8))
+        self.ps_mode.setVisible(raw['ps_dynamic'])
+        rt = f.get(4, '')
+        self.rt.setText(rt.strip())
+        show = self._iboc_lines()
+        for w in self._iboc_rows:
+            if w.isHidden() == show:
+                w.setVisible(show)
+        for label, text in zip((self.iboc_line, self.psd_line, self.sis_line),
+                               (self._iboc_line_text(), *self._psd_sis_text())):
+            label.setText(text)
+            label.setToolTip(QtGui.QTextDocumentFragment.fromHtml(text).toPlainText() if text != '-' else '')
+        self._update_media(f, raw)
+        tags = [f'{RTPLUS_TYPES.get(t, f"type {t}")}: {text}'
+                for t, text in sorted(raw['rtplus'], key=lambda kv: (kv[0] != 4, kv[0]))]
+        self.rtplus.setText(_html('   ·   '.join(tags)) if tags else '-')
+        v['PI'].setText(f.get(0, '-'))
+        if raw['pty'] is not None:
+            v['PTY'].setText((PTY_RDS if self.settings.pty_names == 'rds' else PTY_RBDS)[raw['pty']])
+        else:
+            v['PTY'].setText(f.get(2, '-'))
+        v['Flags'].setText(_flags_html(f.get(3, '')))
+        if raw['ct']:  # RDS sends UTC and the local offset: show local time
+            local, offset = raw['ct']
+            v['Clock'].setText(f'{local:%Y-%m-%d %H:%M} local (UTC{"-" if offset < 0 else "+"}'
+                               f'{abs(offset) // 60}:{abs(offset) % 60:02d})')
+        else:
+            v['Clock'].setText('-')
+        v['Alt. freqs'].setText(f.get(6, '-') or '-')
+        v['PTYN'].setText(raw['ptyn'] or '-')
+        v['ECC'].setText('-' if raw['ecc'] is None else
+                         f"{raw['ecc']:02X}" if raw['ecc'] else '00 (not set)')
+        v['ODA'].setText(', '.join(ODA_NAMES.get(aid, f'{aid:04X}') for aid in raw['oda']) or '-')
+        self.rate = rate = self._rds_rate()
+        v['Groups/s'].setText(f'{rate:.1f}')
+        total = sum(raw['types'].values())
+        v['Group loss'].setText(f'{max(0.0, 1 - rate / 11.4) * 100:.0f}%' if total else '-')
+        v['Group types'].setText('  '.join(f'{k} {n * 100 / total:.0f}%' for k, n in
+                                           sorted(raw['types'].items(), key=lambda kv: -kv[1])[:5])
+                                 if total else '-')
+
+        s = st.meter.stats
+        if s:
+            v['RF level'].setText(_num(s['rf_dbfs'], 'dBFS'))
+            v['MPX S/N'].setText(_num(s['snr_db'], 'dB'))
+            rules = self.rules()
+            lim = self.settings.limits(self.country)
+            limit, why = mod_limit(rules, lim, s)
+            tol = lim['freq_tol_hz']
+            off = f"{s['offset_hz']:+.0f} Hz"
+            v['Carrier offset'].setText(f'<span style="color:{RED}">{off}</span>' if tol and abs(s['offset_hz']) > tol
+                                        else off)
+            am = s['am_pct']
+            am_text = f'{am:.1f}%'
+            v['AM / multipath'].setText(
+                f'<span style="color:{RED}">{am_text}  peaks unreliable</span>' if am >= 20 else
+                f'<span style="color:{AMBER}">{am_text}</span>' if am >= 10 else am_text)
+            pilot_txt = f"{s['pilot_pct']:.1f}%"
+            if st.pilot and not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']:
+                pilot_txt = f'<span style="color:{RED}">{pilot_txt}</span>'
+            v['Pilot (19 kHz)'].setText(
+                f"{pilot_txt}  " +
+                (f'<span style="color:{RED}">STEREO</span>' if st.stereo
+                 else f'<span style="color:{AMBER}">mono (forced)</span>' if st.pilot
+                 else f'<span style="color:{DIM}">mono</span>'))
+            if st.pilot_hz is not None:
+                err = st.pilot_hz - 19000
+                text = f'{st.pilot_hz:.1f} Hz ({err:+.1f})'
+                v['Pilot freq'].setText(f'<span style="color:{RED}">{text}</span>' if abs(err) > lim['pilot_tol_hz'] else text)
+            else:
+                v['Pilot freq'].setText('-')
+            v['RDS injection'].setText(f"{s['rds_pct']:.1f}%")
+            v['IBOC signal'].setText(self._iboc_text())
+            for khz in (67, 92):
+                pct = s[f'sca{khz}_pct']
+                v[f'SCA {khz} kHz'].setText(f'{pct:.1f}%  ' + self._sca_kind_html(khz, s) if pct is not None
+                                            else f'<span style="color:{DIM}">none</span>')
+            self._sca_sources(s)
+            v['Peak + / −'].setText(f"+{_pct_html(s['pos_pct'], alarm=limit)} / −{_pct_html(s['neg_pct'], alarm=limit)}")
+            v['Limit'].setText(f'{limit:.1f}%  <span style="color:{DIM}">({_html(why)})</span>')
+            v['Peak deviation'].setText(f"{s['peak_dev_khz']:.1f} kHz  ({s['peak_dev_khz'] / 0.75:.0f}%)")
+            v['Over 100%'].setText(f"{s['over100_min']} /min")
+            v['Over 110%'].setText(f"{s['over110_min']} /min")
+            window = '' if s['mpx_window_s'] >= MPX_POWER_S else f"  ({s['mpx_window_s']:.0f} s)"
+            v['MPX power'].setText(_num(s['mpx_dbr'], 'dBr', '+.1f') + window)
+            self.mpx.set_data(s['mpx_db'])
+            self.meters['rf'].set_value(s['rf_dbfs'], _num(s['rf_dbfs'], 'dBFS', '.0f'))
+            self.meters['snr'].set_value(s['snr_db'], _num(s['snr_db'], 'dB', '.0f'))
+            peak = max(s['pos_pct'], s['neg_pct'])
+            self.meters['mod'].set_value(peak, f'{peak:.0f}%')
+
+        a = st.audio_meter.stats
+        if a:
+            v['L / R'].setText(f"{_pct_html(a['mod_l'])} / {_pct_html(a['mod_r'])}")
+            v['L+R / L−R'].setText(f"{_pct_html(a['mod_m'])} / {_pct_html(a['mod_s'])}")
+            v['Momentary'].setText(_num(a['momentary'], 'LUFS'))
+            v['Short-term'].setText(_num(a['short_term'], 'LUFS'))
+            v['Integrated'].setText(_num(a['integrated'], 'LUFS'))
+            v['True peak L/R'].setText(f"{a['tp_l']:.1f} / {a['tp_r']:.1f} dBTP")
+            v['Level L/R'].setText(f"{_num(a['rms_l'], '')}/ {_num(a['rms_r'], 'dB')}")
+            bal = a['rms_l'] - a['rms_r'] if math.isfinite(a['rms_l'] + a['rms_r']) else 0.0
+            v['Balance'].setText('centre' if abs(bal) < 0.5 else
+                                 f"{abs(bal):.1f} dB {'L' if bal > 0 else 'R'}")
+            corr = a['correlation']
+            colour = RED if corr < 0 else GREEN
+            v['Correlation'].setText(f'<span style="color:{colour}">{corr:+.2f}</span>')
+            v['Width (S/M)'].setText('mono' if not math.isfinite(a['width_db']) or a['width_db'] < -40
+                                     else _num(a['width_db'], 'dB'))
+            self.meters['corr'].set_value(corr, f'{corr:+.2f}')
+        if st.audio_meter.scope is not None:
+            self.gonio.set_data(st.audio_meter.scope)
+        if self._stereo and self._stereo.isVisible():
+            self._stereo.follow(self)
+
+        changes = []
+        if s and a:
+            cfg = self.settings
+            carrier = s['rf_dbfs'] < -75 or s['snr_db'] < cfg.min_snr_db
+            if self.alarms.ready():
+                self.alarms.seen_pilot |= st.pilot
+                self.alarms.seen_rds |= rate > 5
+            pi = f.get(0, '').strip().upper()
+            # Multipath and noise spikes look like over-modulation (and upset the
+            # other readings); only judge the technical rules on clean reception.
+            clean = not carrier and s['am_pct'] < 15 and s['snr_db'] > 25
+            rules = self.rules()
+            lim = cfg.limits(self.country)
+            limit, _ = mod_limit(rules, lim, s)
+            tol = lim['freq_tol_hz']
+            subcarriers = (s['rds_pct'] or 0.0) + sum(s[f'sca{k}_pct'] or 0.0 for k in (67, 92))
+            conditions = {
+                'CARRIER': carrier,
+                'SILENCE': not carrier and a['momentary'] < cfg.silence_lufs,
+                'OVERMOD': (clean and max(s['pos_pct'], s['neg_pct']) > limit),
+                'PILOT_SPEC': (clean and st.pilot and (not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']
+                                                       or (st.pilot_hz is not None
+                                                           and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']))),
+                'SUBCARRIERS': (clean and (subcarriers > lim['sub_total_pct']
+                                           or (s['sca92_pct'] or 0.0) > lim['sub_high_pct'])),
+                'FREQUENCY': bool(clean and tol and abs(s['offset_hz']) > tol),
+                'PILOT': self.alarms.seen_pilot and not st.pilot,
+                'RDS': self.alarms.seen_rds and rate < 1,
+                'PI': bool(cfg.expected_pi and pi and pi != cfg.expected_pi),
+                'ALERT': bool(st.iboc and st.iboc.status['alert']),
+            }
+            changes = self.alarms.update({k: v and cfg.alarms.get(k, True) for k, v in conditions.items()},
+                                         holds={'SILENCE': cfg.silence_s})
+        feed = ''
+        if self.feed:
+            n = self.feed.clients
+            feed = f' \u00b7 RDS feed TCP {self.feed.port} \u00b7 {n} client{"" if n == 1 else "s"}'
+        name = f' \u00b7 {self.settings.name}' if self.settings.name else ''
+        self.feed_label.setText(f'Receiver {self.slot + 1}{name}{feed}')
+        active = [desc for name, desc, _ in ALARM_DEFS if name in self.alarms.active]
+        state = tuple(active)
+        if state != self._alarm_state:  # a pill: green when clear, red with the alarms
+            self._alarm_state = state
+            self.alarm_label.setText(f'\u26a0  {", ".join(active)}' if active else '\u25cf  No alarms')
+            self.alarm_label.setStyleSheet(
+                'border-radius: 10px; padding: 2px 10px; font-weight: 600; ' +
+                ('background: #3a1d1f; color: #ff8a8a; border: 1px solid #6b2a2e;' if active else
+                 'background: #1b2f21; color: #69db7c; border: 1px solid #2c5236;'))
+        return changes
+
+    def web_state(self, feed_port, default_port, listeners):
+        """Everything the web page shows for this receiver, as plain JSON values.
+        Readouts are the panel's own rich text (the page allows only colour
+        and bold through), so the page shows exactly what the app shows."""
+        st = self.station
+        scope = st.audio_meter.scope
+
+        def items(combo):
+            return [{'value': combo.itemData(i), 'label': combo.itemText(i),
+                     'enabled': combo.model().item(i).isEnabled(),
+                     'tip': combo.itemData(i, QtCore.Qt.ToolTipRole) or combo.model().item(i).toolTip() or ''}
+                    for i in range(combo.count())]
+
+        if self._web_lists is None:
+            self._web_lists = items(self.combo), items(self.source)
+        stations, sources = self._web_lists
+        return {
+            'receiver': self.slot + 1, 'freq': st.freq_hz, 'title': self.title,
+            'ps': self.ps.text(), 'ps_dynamic': not self.ps_mode.isHidden(), 'rt': self.rt.text(),
+            'lines': [[t, w.text()] for t, w in (('RT+', self.rtplus), ('IBOC', self.iboc_line),
+                                                ('PSD', self.psd_line), ('SIS', self.sis_line),
+                                                ('RadioDNS', self.rdns_line))],
+            'sections': [[title, cols, [[n, self.values[n].text(), n in wide]
+                                        for n in [m for m in names if m not in wide] + [m for m in names if m in wide]]]
+                         for title, cols, names, wide in self.SECTIONS],
+            'iboc_lines': self._iboc_lines(), 'rdns_line': self._rdns_working,
+            'meters': [{'name': m.name, 'lo': m.lo, 'hi': m.hi, 'zones': m.zones, 'origin': m.origin,
+                        'ticks': list(m.ticks), 'value': m.value, 'text': m.text} for m in self.meters.values()],
+            'mpx': None if self.mpx._db is None else _Finite(np.round(np.nan_to_num(self.mpx._db), 1).tolist()),
+            'gonio': None if scope is None else [_Finite(np.round(np.nan_to_num(x[-400::2]), 4).tolist()) for x in scope],
+            'alarms': [desc for name, desc, _ in ALARM_DEFS if name in self.alarms.active],
+            'status': self.feed_label.text(),
+            'stations': stations,
+            'source': self.source_key(), 'sources': sources,
+            'removable': self.remove_btn.isEnabled(),
+            'settings': self.settings.to_dict(), 'feed_port': feed_port, 'default_port': default_port,
+            'images': {kind: (f'{abs(hash(label.path)):x}' if label.path and not label.isHidden() else None)
+                       for kind, label in (('logo', self.logo_img), ('art', self.art_img))},
+            'listeners': listeners,
+        }
+
+
+class AppSettingsDialog(QtWidgets.QDialog):
+    """Notifications (email, webhook, which events) and start with Windows."""
+
+    def __init__(self, parent, settings, notifier):
+        super().__init__(parent)
+        self.setWindowTitle(f'{APP_NAME} settings')
+        self.setMinimumWidth(560)
+        self.notifier = notifier
+        form = QtWidgets.QVBoxLayout(self)
+
+        mail = QtWidgets.QGroupBox('Email (SMTP)')
+        mail.setCheckable(True)
+        mail.setChecked(settings.email)
+        mf = QtWidgets.QFormLayout(mail)
+        self.mail = mail
+        self.smtp_host = QtWidgets.QLineEdit(settings.smtp_host)
+        self.smtp_host.setPlaceholderText('e.g. smtp.office365.com')
+        self.smtp_port = QtWidgets.QSpinBox()
+        self.smtp_port.setRange(1, 65535)
+        self.smtp_port.setValue(settings.smtp_port)
+        self.smtp_security = QtWidgets.QComboBox()
+        for key, label in (('starttls', 'STARTTLS (port 587)'), ('ssl', 'SSL/TLS (port 465)'), ('none', 'None (port 25)')):
+            self.smtp_security.addItem(label, key)
+        self.smtp_security.setCurrentIndex(self.smtp_security.findData(settings.smtp_security))
+        server = QtWidgets.QHBoxLayout()
+        server.addWidget(self.smtp_host, 1)
+        server.addWidget(QtWidgets.QLabel('port'))
+        server.addWidget(self.smtp_port)
+        mf.addRow('Server:', server)
+        mf.addRow('Security:', self.smtp_security)
+        self.smtp_user = QtWidgets.QLineEdit(settings.smtp_user)
+        self.smtp_user.setPlaceholderText('optional: sign-in name')
+        mf.addRow('User name:', self.smtp_user)
+        pw = 'set' if os.environ.get('FM_MODMON_SMTP_PASSWORD') else 'NOT set'
+        note = QtWidgets.QLabel(f'Password: from the FM_MODMON_SMTP_PASSWORD environment variable ({pw}); '
+                                'it is never saved in the settings file.')
+        note.setWordWrap(True)
+        note.setStyleSheet('color: #9aa0a6;')
+        mf.addRow('', note)
+        self.email_from = QtWidgets.QLineEdit(settings.email_from)
+        self.email_from.setPlaceholderText('sender address (default: the user name)')
+        mf.addRow('From:', self.email_from)
+        self.email_to = QtWidgets.QLineEdit(settings.email_to)
+        self.email_to.setPlaceholderText('one or more addresses, separated by commas')
+        mf.addRow('To:', self.email_to)
+        form.addWidget(mail)
+
+        hook = QtWidgets.QGroupBox('Webhook')
+        hook.setCheckable(True)
+        hook.setChecked(settings.webhook)
+        hf = QtWidgets.QFormLayout(hook)
+        self.hook = hook
+        self.webhook_url = QtWidgets.QLineEdit(settings.webhook_url)
+        self.webhook_url.setPlaceholderText('https://...')
+        hf.addRow('URL:', self.webhook_url)
+        self.webhook_format = QtWidgets.QComboBox()
+        for key, label in (('json', 'Generic JSON'), ('slack', 'Slack'), ('teams', 'Microsoft Teams (workflow)'),
+                           ('discord', 'Discord')):
+            self.webhook_format.addItem(label, key)
+        self.webhook_format.setCurrentIndex(self.webhook_format.findData(settings.webhook_format))
+        hf.addRow('Format:', self.webhook_format)
+        form.addWidget(hook)
+
+        events = QtWidgets.QGroupBox('Send')
+        ef = QtWidgets.QVBoxLayout(events)
+        self.events = {}
+        for key, label in (('on_raise', 'Alarms raised'), ('on_clear', 'Alarms cleared'),
+                           ('on_sdr', 'SDR lost and recovered'), ('on_start_stop', 'FM-Modmon-ms started and stopped')):
+            box = QtWidgets.QCheckBox(label)
+            box.setChecked(getattr(settings, key))
+            ef.addWidget(box)
+            self.events[key] = box
+        form.addWidget(events)
+
+        self.autostart = QtWidgets.QCheckBox('Start FM-Modmon-ms when I sign in to Windows')
+        self.autostart.setChecked(autostart_enabled())
+        form.addWidget(self.autostart)
+
+        test_row = QtWidgets.QHBoxLayout()
+        self.test_btn = QtWidgets.QPushButton('Send test')
+        self.test_btn.clicked.connect(self._test)
+        self.test_result = QtWidgets.QLabel('')
+        self.test_result.setWordWrap(True)
+        test_row.addWidget(self.test_btn)
+        test_row.addWidget(self.test_result, 1)
+        form.addLayout(test_row)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addWidget(buttons)
+        self._test_job = None
+        self._poll = QtCore.QTimer(self)
+        self._poll.timeout.connect(self._test_done)
+
+    def settings(self):
+        return NotifySettings.from_dict({
+            'email': self.mail.isChecked(), 'smtp_host': self.smtp_host.text().strip(),
+            'smtp_port': self.smtp_port.value(), 'smtp_security': self.smtp_security.currentData(),
+            'smtp_user': self.smtp_user.text().strip(), 'email_from': self.email_from.text().strip(),
+            'email_to': self.email_to.text().strip(),
+            'webhook': self.hook.isChecked(), 'webhook_url': self.webhook_url.text().strip(),
+            'webhook_format': self.webhook_format.currentData(),
+            **{key: box.isChecked() for key, box in self.events.items()}})
+
+    def _test(self):
+        new = self.settings()
+        problems = new.problems()
+        if not (new.email or new.webhook):
+            problems.append('turn on email and / or the webhook first')
+        if problems:
+            self.test_result.setText('\n'.join(problems))
+            self.test_result.setStyleSheet(f'color: {RED};')
+            return
+        self.test_btn.setEnabled(False)
+        self.test_result.setStyleSheet('color: #9aa0a6;')
+        self.test_result.setText('sending\u2026')
+        job = self._test_job = {}
+        threading.Thread(target=lambda: job.update(result=self.notifier.test(new)), daemon=True).start()
+        self._poll.start(200)
+
+    def _test_done(self):
+        job = self._test_job
+        if not job or 'result' not in job:
+            return
+        self._poll.stop()
+        self.test_btn.setEnabled(True)
+        ok = all(err is None for _, err in job['result'])
+        self.test_result.setText('\n'.join(f'{name}: {"sent" if err is None else err}' for name, err in job['result']))
+        self.test_result.setStyleSheet(f'color: {GREEN if ok else RED};')
+
+    def _accept(self):
+        problems = self.settings().problems()
+        if problems:
+            QtWidgets.QMessageBox.warning(self, self.windowTitle(), '\n'.join(problems))
+            return
+        self.accept()
+
+
+class ReceiverDialog(QtWidgets.QDialog):
+    """Edits one receiver's ReceiverSettings."""
+
+    def __init__(self, parent, slot, settings, feed_port, default_port=None, taken_ports=(), country='CA'):
+        super().__init__(parent)
+        self.setWindowTitle(f'Receiver {slot + 1} settings')
+        form = QtWidgets.QFormLayout(self)
+
+        self.name = QtWidgets.QLineEdit(settings.name)
+        self.name.setPlaceholderText('optional, e.g. Main TX')
+        self.name.setMaxLength(40)
+        form.addRow('Name:', self.name)
+
+        self.deemph = QtWidgets.QComboBox()
+        self.deemph.addItem('75 \u00b5s (Americas, Korea)', 75)
+        self.deemph.addItem('50 \u00b5s (Europe, most elsewhere)', 50)
+        self.deemph.setCurrentIndex(self.deemph.findData(settings.deemphasis_us))
+        form.addRow('De-emphasis:', self.deemph)
+
+        self.stereo = QtWidgets.QComboBox()
+        self.stereo.addItem('Stereo when a pilot is present', 'auto')
+        self.stereo.addItem('Always mono', 'mono')
+        self.stereo.setCurrentIndex(self.stereo.findData(settings.stereo))
+        form.addRow('Stereo:', self.stereo)
+
+        self.volume = QtWidgets.QSpinBox()
+        self.volume.setRange(0, 200)
+        self.volume.setSuffix(' %')
+        self.volume.setValue(settings.volume_pct)
+        form.addRow('Play volume:', self.volume)
+
+        self.pty = QtWidgets.QComboBox()
+        self.pty.addItem('RBDS (North America)', 'rbds')
+        self.pty.addItem('RDS (Europe, elsewhere)', 'rds')
+        self.pty.setCurrentIndex(self.pty.findData(settings.pty_names))
+        form.addRow('PTY names:', self.pty)
+
+        self.pi = QtWidgets.QLineEdit(settings.expected_pi)
+        self.pi.setPlaceholderText('optional, e.g. C6B2')
+        self.pi.setValidator(QtGui.QRegularExpressionValidator(QtCore.QRegularExpression('[0-9A-Fa-f]{0,4}')))
+        form.addRow('Expected PI:', self.pi)
+
+        self.default_port, self.taken_ports = default_port, set(taken_ports)
+        self.feed = QtWidgets.QCheckBox('Serve raw RDS groups over TCP' if feed_port
+                                        else 'RDS feeds are off (--rds-port 0)')
+        self.feed.setChecked(settings.rds_feed)
+        self.feed.setEnabled(bool(feed_port))
+        self.port = QtWidgets.QSpinBox()
+        self.port.setRange(1024, 65535)
+        self.port.setValue(feed_port or RDS_TCP_PORT)
+        self.port.setEnabled(bool(feed_port) and settings.rds_feed)
+        self.port.setToolTip(f'Default {default_port}' if default_port else '')
+        self.feed.toggled.connect(lambda on: self.port.setEnabled(on and bool(feed_port)))
+        feed_row = QtWidgets.QHBoxLayout()
+        feed_row.addWidget(self.feed)
+        feed_row.addStretch(1)
+        feed_row.addWidget(QtWidgets.QLabel('TCP port'))
+        feed_row.addWidget(self.port)
+        form.addRow('RDS feed:', feed_row)
+
+        alarms = QtWidgets.QGroupBox('Alarms')
+        grid = QtWidgets.QGridLayout(alarms)
+        self.alarm_checks = {}
+        for i, (name, desc, _) in enumerate(ALARM_DEFS):
+            box = QtWidgets.QCheckBox(desc[0].upper() + desc[1:])
+            box.setChecked(settings.alarms.get(name, True))
+            self.alarm_checks[name] = box
+            grid.addWidget(box, i, 0)
+
+        def spin(value, lo, hi, suffix, decimals=0):
+            w = QtWidgets.QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setDecimals(decimals)
+            w.setSuffix(suffix)
+            w.setValue(value)
+            return w
+
+        self.min_snr = spin(settings.min_snr_db, 0, 60, ' dB S/N')
+        self.silence_lufs = spin(settings.silence_lufs, -70, -10, ' LUFS')
+        self.silence_s = spin(settings.silence_s, 2, 300, ' s')
+        self.country = country
+        self.limit_spins = {}
+        for name, label, unit, lo, hi, step in LIMITS:
+            w = spin(0, lo, hi, f' {unit}' if unit else '', 0 if step >= 1 else (2 if step < 0.1 else 1))
+            w.setSingleStep(step)
+            w.setToolTip(label[0].upper() + label[1:])
+            w.valueChanged.connect(self._limit_edited)
+            self.limit_spins[name] = w
+        self.rules = QtWidgets.QComboBox()
+        for key, label in (('', 'By country (ISED in Canada, else FCC)'), ('ised', RULES['ised']['name']),
+                           ('fcc', RULES['fcc']['name']), ('custom', 'Custom (the limits below)')):
+            self.rules.addItem(label, key)
+        self.rules.setToolTip('Choosing a rule set fills in its limits; changing any limit makes them custom')
+        self._loading = True
+        self.rules.setCurrentIndex(max(0, self.rules.findData(settings.rules)))
+        self._fill_limits(settings.limits(country))
+        self._loading = False
+        self.rules.currentIndexChanged.connect(self._rules_chosen)
+        row = {name: i for i, (name, *_) in enumerate(ALARM_DEFS)}
+        grid.addWidget(QtWidgets.QLabel('below'), row['CARRIER'], 1)
+        carrier_row = QtWidgets.QHBoxLayout()
+        carrier_row.addWidget(self.min_snr)
+        carrier_row.addStretch(1)
+        grid.addLayout(carrier_row, row['CARRIER'], 2)
+        grid.addWidget(QtWidgets.QLabel('below'), row['SILENCE'], 1)
+        silence = QtWidgets.QHBoxLayout()
+        silence.addWidget(self.silence_lufs)
+        silence.addWidget(QtWidgets.QLabel('for'))
+        silence.addWidget(self.silence_s)
+        silence.addStretch(1)
+        grid.addLayout(silence, row['SILENCE'], 2)
+        def line(*parts):
+            box = QtWidgets.QHBoxLayout()
+            for part in parts:
+                if isinstance(part, str):
+                    box.addWidget(QtWidgets.QLabel(part))
+                else:
+                    box.addWidget(part)
+            box.addStretch(1)
+            return box
+
+        ls = self.limit_spins
+        grid.addWidget(QtWidgets.QLabel('above'), row['OVERMOD'], 1)
+        grid.addLayout(line(ls['mod_base_pct'], '+', ls['mod_per_sub'], '\u00d7 subcarriers, max', ls['mod_max_pct']),
+                       row['OVERMOD'], 2)
+        grid.addWidget(QtWidgets.QLabel('outside'), row['PILOT_SPEC'], 1)
+        grid.addLayout(line(ls['pilot_min_pct'], '\u2013', ls['pilot_max_pct'], 'or 19 kHz \u00b1', ls['pilot_tol_hz']),
+                       row['PILOT_SPEC'], 2)
+        grid.addWidget(QtWidgets.QLabel('above'), row['SUBCARRIERS'], 1)
+        grid.addLayout(line(ls['sub_total_pct'], 'total, or', ls['sub_high_pct'], 'above 75 kHz'), row['SUBCARRIERS'], 2)
+        grid.addWidget(QtWidgets.QLabel('beyond'), row['FREQUENCY'], 1)
+        grid.addLayout(line('\u00b1', ls['freq_tol_hz']), row['FREQUENCY'], 2)
+        form.addRow('Rules:', self.rules)
+        form.addRow(alarms)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _fill_limits(self, limits):
+        for name, w in self.limit_spins.items():
+            w.blockSignals(True)
+            w.setValue(limits[name])
+            w.blockSignals(False)
+
+    def _rules_chosen(self):
+        key = self.rules.currentData()
+        if key == 'custom':
+            return
+        preset = key or ('ised' if self.country == 'CA' else 'fcc')
+        self._fill_limits(RULES[preset]['limits'])
+
+    def _limit_edited(self):
+        if not self._loading and self.rules.currentData() != 'custom':
+            self.rules.blockSignals(True)
+            self.rules.setCurrentIndex(self.rules.findData('custom'))
+            self.rules.blockSignals(False)
+
+    def _accept(self):
+        if self.feed.isChecked() and self.port.isEnabled() and self.port.value() in self.taken_ports:
+            QtWidgets.QMessageBox.warning(self, self.windowTitle(),
+                                          f'TCP port {self.port.value()} is already used by another '
+                                          'receiver or the web view.')
+            return
+        pi = self.pi.text().strip()
+        if pi and len(pi) != 4:
+            QtWidgets.QMessageBox.warning(self, self.windowTitle(),
+                                          'Expected PI is four hex digits (such as C6B2), or empty.')
+            return
+        self.accept()
+
+    def settings(self):
+        return ReceiverSettings.from_dict({
+            'name': self.name.text().strip(),
+            'deemphasis_us': self.deemph.currentData(),
+            'stereo': self.stereo.currentData(),
+            'volume_pct': self.volume.value(),
+            'pty_names': self.pty.currentData(),
+            'expected_pi': self.pi.text(),
+            'rds_feed': self.feed.isChecked(),
+            'rds_port': 0 if self.port.value() == self.default_port else self.port.value(),
+            'alarms': {name: box.isChecked() for name, box in self.alarm_checks.items()},
+            'silence_lufs': self.silence_lufs.value(),
+            'silence_s': int(self.silence_s.value()),
+            'min_snr_db': self.min_snr.value(),
+            'rules': self.rules.currentData(),
+            **{name: w.value() for name, w in self.limit_spins.items()},
+        })
+
+
+@dataclass
+class NotifySettings:
+    """Where notifications go and which events; saved in fm-modmon-ms_config.json.
+    The SMTP password is not here: it comes from FM_MODMON_SMTP_PASSWORD."""
+    email: bool = False
+    smtp_host: str = ''
+    smtp_port: int = 587
+    smtp_security: str = 'starttls'   # 'starttls', 'ssl' or 'none'
+    smtp_user: str = ''
+    email_from: str = ''
+    email_to: str = ''                # comma-separated
+    webhook: bool = False
+    webhook_url: str = ''
+    webhook_format: str = 'json'      # 'json', 'slack', 'teams' or 'discord'
+    on_raise: bool = True
+    on_clear: bool = True
+    on_sdr: bool = True
+    on_start_stop: bool = True
+
+    @classmethod
+    def from_dict(cls, d):
+        known = {f.name for f in fields(cls)}
+        out = cls(**{k: v for k, v in (d or {}).items() if k in known})
+        if out.smtp_security not in ('starttls', 'ssl', 'none'):
+            out.smtp_security = 'starttls'
+        if out.webhook_format not in ('json', 'slack', 'teams', 'discord'):
+            out.webhook_format = 'json'
+        try:
+            out.smtp_port = int(out.smtp_port)
+        except (TypeError, ValueError):
+            out.smtp_port = 587
+        return out
+
+    def to_dict(self):
+        return asdict(self)
+
+    def recipients(self):
+        return [a.strip() for a in self.email_to.replace(';', ',').split(',') if a.strip()]
+
+    def problems(self):
+        """What stops the enabled channels working, as text lines."""
+        out = []
+        if self.email:
+            if not self.smtp_host:
+                out.append('email: no SMTP server')
+            if not self.recipients():
+                out.append('email: no recipients')
+            if not (self.email_from or self.smtp_user):
+                out.append('email: no sender address')
+            if self.smtp_user and not os.environ.get('FM_MODMON_SMTP_PASSWORD'):
+                out.append('email: FM_MODMON_SMTP_PASSWORD is not set')
+        if self.webhook and not re.match(r'https?://', self.webhook_url):
+            out.append('webhook: the URL must start with https:// (or http://)')
+        return out
+
+
+class Notifier:
+    """Sends events by email and / or webhook from a background thread.
+    event() queues; events within NOTIFY_BATCH_S go out together; a failed
+    send is retried after NOTIFY_RETRY_S; failures are put on self.results
+    (lines for the event log, read by the GUI thread)."""
+
+    KINDS = {'raise': 'on_raise', 'clear': 'on_clear', 'sdr': 'on_sdr', 'startstop': 'on_start_stop'}
+
+    def __init__(self, settings, where):
+        self.settings = settings
+        self.where = where              # () -> (host name, web address or None) for the message
+        self.results = queue.Queue()
+        self._q = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def enabled(self, kind):
+        s = self.settings
+        return (s.email or s.webhook) and getattr(s, self.KINDS.get(kind, 'on_raise'))
+
+    def event(self, kind, text):
+        if self.enabled(kind):
+            self._q.put((time.strftime('%Y-%m-%d %H:%M:%S'), kind, text))
+
+    def send_now(self, kind, text, timeout=8):
+        """Send one event at once, without retries (for "stopped", as the app exits)."""
+        if self.enabled(kind):
+            self._deliver([(time.strftime('%Y-%m-%d %H:%M:%S'), kind, text)], retries=(), timeout=timeout)
+
+    def test(self, settings):
+        """Send a test message with `settings`; returns [(channel, error or None)]."""
+        host, _ = self.where()
+        return self._deliver([(time.strftime('%Y-%m-%d %H:%M:%S'), 'test',
+                               f'test message from {APP_NAME} on {host}')], settings, retries=(), report=False)
+
+    def _run(self):
+        while True:
+            batch = [self._q.get()]
+            deadline = time.monotonic() + NOTIFY_BATCH_S
+            while (left := deadline - time.monotonic()) > 0:
+                try:
+                    batch.append(self._q.get(timeout=left))
+                except queue.Empty:
+                    break
+            self._deliver(batch)
+
+    def _deliver(self, batch, settings=None, retries=NOTIFY_RETRY_S, timeout=15, report=True):
+        s = settings or self.settings
+        results = []
+        for name, send in (('email', self._email), ('webhook', self._webhook)):
+            if not getattr(s, name):
+                continue
+            err = None
+            for wait in (0, *retries):
+                time.sleep(wait)
+                try:
+                    send(s, batch, timeout)
+                    err = None
+                    break
+                except Exception as e:  # noqa: BLE001 - any failure is reported, then retried
+                    err = f'{type(e).__name__}: {e}'
+            results.append((name, err))
+            if err and report:
+                self.results.put(f'notification by {name} failed ({len(retries) + 1} attempts): {err}')
+        return results
+
+    def _message(self, batch):
+        host, web = self.where()
+        first = batch[0][2]
+        subject = f'[{APP_NAME} {host}] ' + (first if len(batch) == 1 else f'{len(batch)} events: {first} \u2026')
+        lines = [f'{t}  {text}' for t, _, text in batch]
+        footer = [f'{APP_NAME} on {host}'] + ([f'web: {web}'] if web else [])
+        return subject, lines, footer
+
+    def _email(self, s, batch, timeout):
+        subject, lines, footer = self._message(batch)
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = s.email_from or s.smtp_user
+        msg['To'] = ', '.join(s.recipients())
+        msg.set_content('\n'.join(lines + [''] + footer) + '\n')
+        password = os.environ.get('FM_MODMON_SMTP_PASSWORD')
+        if s.smtp_security == 'ssl':
+            smtp = smtplib.SMTP_SSL(s.smtp_host, s.smtp_port, timeout=timeout, context=ssl.create_default_context())
+        else:
+            smtp = smtplib.SMTP(s.smtp_host, s.smtp_port, timeout=timeout)
+        with smtp:
+            if s.smtp_security == 'starttls':
+                smtp.starttls(context=ssl.create_default_context())
+            if s.smtp_user and password:
+                smtp.login(s.smtp_user, password)
+            smtp.send_message(msg)
+
+    def _webhook(self, s, batch, timeout):
+        subject, lines, footer = self._message(batch)
+        text = '\n'.join([subject] + lines)
+        host, web = self.where()
+        if s.webhook_format == 'slack':
+            payload = {'text': text}
+        elif s.webhook_format == 'discord':
+            payload = {'content': text[:1990]}
+        elif s.webhook_format == 'teams':  # a Teams "workflow" incoming webhook: an Adaptive Card
+            body = [{'type': 'TextBlock', 'text': subject, 'weight': 'Bolder', 'wrap': True}]
+            body += [{'type': 'TextBlock', 'text': line, 'wrap': True, 'spacing': 'None'} for line in lines]
+            payload = {'type': 'message', 'attachments': [{
+                'contentType': 'application/vnd.microsoft.card.adaptive',
+                'content': {'$schema': 'http://adaptivecards.io/schemas/adaptive-card.json',
+                            'type': 'AdaptiveCard', 'version': '1.4', 'body': body}}]}
+        else:
+            payload = {'app': APP_NAME, 'host': host, 'web': web, 'summary': subject, 'text': text,
+                       'events': [{'time': t, 'kind': k, 'text': x} for t, k, x in batch]}
+        req = urllib.request.Request(s.webhook_url, data=json.dumps(payload).encode(), method='POST',
+                                     headers={'Content-Type': 'application/json', 'User-Agent': APP_NAME})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+
+
+def autostart_enabled():
+    return os.path.exists(STARTUP_LNK)
+
+
+def set_autostart(on, args_text=''):
+    """Add or remove a shortcut in the Windows Startup folder (start FM-Modmon-ms at sign-in)."""
+    if not on:
+        if os.path.exists(STARTUP_LNK):
+            os.remove(STARTUP_LNK)
+        return
+    pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+    script = os.path.abspath(__file__)
+    q = lambda v: v.replace("'", "''")  # noqa: E731 - PowerShell single-quote escaping
+    ps = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{q(STARTUP_LNK)}'); "
+          f"$s.TargetPath = '{q(pythonw if os.path.exists(pythonw) else sys.executable)}'; "
+          f"$s.Arguments = '{q(subprocess.list2cmdline([script]) + (' ' + args_text if args_text else ''))}'; "
+          f"$s.WorkingDirectory = '{q(os.path.dirname(script))}'; "
+          f"$s.IconLocation = '{q(ICON_PATH)}'; $s.Description = 'FM-Modmon-ms FM monitor'; $s.Save()")
+    subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps], check=True, timeout=30,
+                   capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+
+
+def load_notify(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return NotifySettings.from_dict(json.load(fh).get('notify'))
+    except (OSError, ValueError, AttributeError):
+        return NotifySettings()
+
+
+def load_config(path):
+    """Saved receivers as {slot: (freq_hz, ReceiverSettings)}; {} if none or unreadable."""
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        print(f'ignoring {path}: {e}')
+        return {}
+    out = {}
+    for r in data.get('receivers', []):
+        try:
+            slot = int(r['receiver']) - 1
+            freq = int(round(float(r['freq_mhz']) * 10)) * 100000
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0 <= slot < MAX_RECEIVERS and 64e6 <= freq <= 108e6 and slot not in out:
+            out[slot] = (freq, ReceiverSettings.from_dict(r.get('settings')))
+    if out and not _fits([f for f, _ in out.values()]):
+        first = min(out)
+        print(f'{path}: saved receivers no longer fit one SDR window; opening receiver {first + 1} only')
+        out = {first: out[first]}
+    return out
+
+
+def save_config(path, panels, notify=None):
+    """Write the open receivers and their settings, and the notification settings (atomically)."""
+    data = {'version': 1,
+            'receivers': [{'receiver': p.slot + 1, 'freq_mhz': p.station.freq_hz / 1e6,
+                           'settings': p.settings.to_dict()} for p in panels]}
+    if notify is not None:
+        data['notify'] = notify.to_dict()
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f'could not save {path}: {e}')
+
+
+class _Finite(list):
+    """A list of numbers already known to be finite: _finite passes it through."""
+
+
+def _finite(obj):
+    """obj with NaN/inf floats as None (JSON has no infinity)."""
+    if isinstance(obj, _Finite):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite(v) for v in obj]
+    if isinstance(obj, np.generic):
+        return _finite(obj.item())
+    return obj
+
+
+def _image_type(data):
+    for magic, ctype in ((b'\x89PNG', 'image/png'), (b'\xff\xd8', 'image/jpeg'), (b'GIF8', 'image/gif'),
+                         (b'<svg', 'image/svg+xml'), (b'<?xml', 'image/svg+xml')):
+        if data.startswith(magic):
+            return ctype
+    if data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
+WEB_HELP = """\
+Anyone who can open this page can watch it and listen.
+
+Listen (under each receiver) plays that receiver in this browser, a few
+seconds behind the air, in the format chosen beside it: MP3 or AAC (any
+browser), Opus (half the data for the same quality) or FLAC (lossless, about
+1 Mbit/s); only formats this browser can play are listed, and the choice is
+remembered. While it plays, the player beside it shows LIVE and how long, with
+mute and volume (also remembered); Stop ends the stream. It plays the
+receiver's audio source (analog FM or an SCA subcarrier; IBOC plays on the
+FM-Modmon-ms PC only).
+
+The controls (station, settings, remove, audio source, reset integrated, add
+receiver, recalibrate gain) need signing in: click "View only" and enter the
+password. The button turns green ("Controls on"); click it again to sign out.
+Closing the tab also signs out; reloading the page doesn't. When FM-Modmon-ms runs
+without a web password, the controls work only in a browser on the fm-modmon-ms
+PC itself, and the button can't be clicked.
+
+Everything shown is the app's own display, refreshed 10 times a second. The
+guide below explains each measurement."""
+
+_HELP_PATH = re.compile(r'(?:[A-Za-z]:\\|\.\.?[\\/])[^\s,;)\'"]*')
+
+
+def help_sections(safe=False, session=None):
+    """Help as [(title, kind, text)], kind 'text' or 'pre'. safe=True is for the
+    web page: no session details, and local paths replaced with <path>."""
+    out = []
+    if session and not safe:
+        out.append(('This session', 'pre', session))
+    if safe:
+        out.append(('Using this page', 'text', WEB_HELP))
+    out.append(('Guide', 'pre', __doc__.strip()))
+    out.append(('Command-line options', 'pre', build_parser().format_help()))
+    if safe:
+        out = [(title, kind, _HELP_PATH.sub('<path>', text)) for title, kind, text in out]
+    return out
+
+
+class HelpDialog(QtWidgets.QDialog):
+    """The app's help: sections from help_sections() in one scrolling page."""
+
+    def __init__(self, parent, sections):
+        super().__init__(parent)
+        self.setWindowTitle(f'{APP_NAME} help')
+        self.resize(940, 760)
+        view = QtWidgets.QTextBrowser()
+        view.setOpenExternalLinks(False)
+        css = ('h2 { color: #8ab4f8; font-size: 13pt; margin: 14px 0 6px; } '
+               'pre { font-family: Consolas; font-size: 9pt; color: #d6d8dc; white-space: pre-wrap; } '
+               'p { color: #d6d8dc; } a { color: #8ab4f8; }')
+        toc = ' \u00b7 '.join(f'<a href="#s{i}">{_html(t)}</a>' for i, (t, _, _) in enumerate(sections))
+        body = [f'<style>{css}</style><p>{toc}</p>']
+        for i, (title, kind, text) in enumerate(sections):
+            body.append(f'<h2><a name="s{i}"></a>{_html(title)}</h2>')
+            if kind == 'pre':
+                body.append(f'<pre>{_html(text)}</pre>')
+            else:
+                body.extend(f'<p>{_html(par)}</p>' for par in text.split('\n\n'))
+        view.setHtml(''.join(body))
+        view.anchorClicked.connect(lambda url: view.scrollToAnchor(url.fragment()))
+        close = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        close.rejected.connect(self.close)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(view)
+        layout.addWidget(close)
+
+
+class WebView:
+    """The web version of the app: fm-modmon-ms-web.html draws the receiver panels
+    from /state.json (rebuilt at UPDATE_HZ while anyone is watching), sends
+    controls to /api/<action> (run on the GUI thread), and plays each
+    receiver's audio as MP3 from /audio/<receiver>.mp3.
+
+    Anyone who can reach the port can watch and listen. Controls need the
+    password, or, with no password set, a browser on this PC itself
+    (http://localhost:<port>/). Signing in returns a session token that the
+    page keeps in the tab's sessionStorage and sends as X-FM-Modmon-Session:
+    closing the tab ends the session (a reload keeps it), and a session not
+    heard from for SESSION_IDLE_S is dropped. Control requests must carry an
+    X-FM-Modmon header, which a page on another site can't send.
+    """
+
+    WEB_IDLE_S = 15
+    SESSION_IDLE_S = 600
+
+    def __init__(self, bind, port, password=None):
+        self.port = port
+        self.password = password or None
+        self.favicon = ico_bytes((16, 32, 48))
+        self.touch_icon = _png(draw_icon(180))
+        self.state = b'{"ready": false}'
+        self.events = b'[]'
+        self.help = json.dumps({'sections': help_sections(safe=True)}).encode()
+        self.images = {}               # (receiver number, 'logo' | 'art') -> file path
+        self.audio = {}                # receiver number -> WebAudio
+        self.formats = []              # WEB_FORMATS keys offered (ffmpeg can encode them)
+        self.commands = queue.Queue()  # (action, args, Future or None) for the GUI thread
+        self.sessions = {}             # token -> last heard from (monotonic)
+        self.last_hit = 0.0
+        self.server = ThreadingHTTPServer((bind, port), self._handler())
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def wanted(self):
+        return time.monotonic() - self.last_hit < self.WEB_IDLE_S
+
+    def listeners(self):
+        return sum(s.listeners for s in list(self.audio.values()))
+
+    def note(self, text):
+        """An event-log line, written by the GUI thread."""
+        self.commands.put(('log', {'text': text}, None))
+
+    def close_audio(self):
+        for audio in list(self.audio.values()):
+            audio.close_all()
+
+    def _session(self, handler):
+        """The request's session token if it is signed in (and keep the session alive)."""
+        token = handler.headers.get('X-FM-Modmon-Session') or ''
+        now = time.monotonic()
+        for old in [t for t, seen in list(self.sessions.items()) if now - seen > self.SESSION_IDLE_S]:
+            self.sessions.pop(old, None)  # tabs closed without signing out
+        if token in self.sessions:
+            self.sessions[token] = now
+            return token
+        return None
+
+    def can_control(self, handler):
+        if self.password:
+            return self._session(handler) is not None
+        # No password: only a browser on this PC, addressed as localhost (the
+        # Host check stops another site reaching it through DNS rebinding).
+        host = (handler.headers.get('Host') or '').lower()
+        host = host[1:host.find(']')] if host.startswith('[') else host.split(':')[0]
+        return handler.client_address[0] in ('127.0.0.1', '::1') and host in ('localhost', '127.0.0.1', '::1')
+
+    def _handler(self):
+        view = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, code, body, ctype, headers=()):
+                self.send_response(code)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                self._hardening()
+                for k, v in headers:
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _hardening(self):
+                # No framing (clickjacking of the controls), no MIME sniffing,
+                # and the page's URL isn't leaked to the sites its images come from.
+                self.send_header('X-Frame-Options', 'DENY')
+                self.send_header('Content-Security-Policy', "frame-ancestors 'none'")
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Referrer-Policy', 'no-referrer')
+
+            def _json(self, code, obj, headers=()):
+                self._send(code, json.dumps(obj).encode(), 'application/json', headers)
+
+            def do_GET(self):
+                view.last_hit = time.monotonic()
+                path = self.path.split('?', 1)[0]
+                if path in ('/', '/index.html'):
+                    try:
+                        with open(WEB_HTML, 'rb') as fh:
+                            body = fh.read()
+                    except OSError as e:
+                        self.send_error(500, f'cannot read {WEB_HTML}: {e}')
+                        return
+                    self._send(200, body, 'text/html; charset=utf-8')
+                elif path in ('/state.json', '/status.json'):
+                    access = json.dumps({'control': view.can_control(self), 'password': bool(view.password)})
+                    self._send(200, b'{"access": ' + access.encode() + b', ' + view.state[1:], 'application/json')
+                elif path == '/help.json':
+                    self._send(200, view.help, 'application/json')
+                elif path == '/events.json':
+                    self._send(200, view.events, 'application/json')
+                elif path == '/favicon.ico':
+                    self._send(200, view.favicon, 'image/x-icon')
+                elif path == '/icon.png':
+                    self._send(200, view.touch_icon, 'image/png')
+                elif m := re.fullmatch(r'/img/(\d)/(logo|art)', path):
+                    try:
+                        with open(view.images[(int(m[1]), m[2])], 'rb') as fh:
+                            body = fh.read()
+                    except (KeyError, OSError):
+                        self.send_error(404)
+                        return
+                    ctype = _image_type(body)
+                    if not ctype:
+                        self.send_error(415)
+                        return
+                    self._send(200, body, ctype)
+                elif m := re.fullmatch(r'/audio/(\d)\.(\w+)', path):
+                    self._stream(int(m[1]), m[2])
+                else:
+                    self.send_error(404)
+
+            def _stream(self, n, fmt):
+                audio = view.audio.get(n)
+                if not audio:
+                    self.send_error(404, 'no such receiver, or no audio encoder (--ffmpeg)')
+                    return
+                if fmt not in view.formats:
+                    self.send_error(404, f'formats: {", ".join(view.formats)}')
+                    return
+                if view.listeners() >= WEB_MAX_LISTENERS:
+                    self.send_error(503, f'{WEB_MAX_LISTENERS} listeners already')
+                    return
+                enc = audio.open(fmt)
+                who = self.client_address[0]
+                view.note(f'web audio: {who} listening to receiver {n} ({WEB_FORMATS[fmt]["label"]})')
+                try:
+                    self.send_response(200)
+                    self.send_header('Content-Type', WEB_FORMATS[fmt]['mime'])
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('icy-name', f'{APP_NAME} receiver {n}')
+                    self._hardening()
+                    self.end_headers()
+                    for chunk in enc.chunks():
+                        self.wfile.write(chunk)
+                except OSError:
+                    pass
+                finally:
+                    audio.close(enc)
+                    view.note(f'web audio: {who} stopped listening to receiver {n}')
+
+            def do_POST(self):
+                view.last_hit = time.monotonic()
+                path = self.path.split('?', 1)[0]
+                who = self.client_address[0]
+                if self.headers.get('X-FM-Modmon') != '1':
+                    self._json(403, {'error': 'missing X-FM-Modmon header'})
+                    return
+                try:
+                    n = int(self.headers.get('Content-Length') or 0)
+                    if n > 65536:
+                        raise ValueError
+                    args = json.loads(self.rfile.read(n) or b'{}')
+                    if not isinstance(args, dict):
+                        raise ValueError
+                except ValueError:
+                    self._json(400, {'error': 'bad request'})
+                    return
+                if path == '/api/login':
+                    if not view.password:
+                        self._json(400, {'error': 'no password is set (--web-password)'})
+                        return
+                    if not hmac.compare_digest(str(args.get('password', '')).encode(), view.password.encode()):
+                        time.sleep(1)  # slows guessing
+                        view.note(f'web: failed sign-in from {who}')
+                        self._json(403, {'error': 'wrong password'})
+                        return
+                    token = secrets.token_urlsafe(24)
+                    view.sessions[token] = time.monotonic()
+                    view.note(f'web: {who} signed in to the controls')
+                    self._json(200, {'ok': True, 'token': token})
+                    return
+                if path == '/api/logout':
+                    token = view._session(self)
+                    if token:
+                        view.sessions.pop(token, None)
+                        view.note(f'web: {who} signed out of the controls')
+                    self._json(200, {'ok': True})
+                    return
+                if not path.startswith('/api/'):
+                    self.send_error(404)
+                    return
+                if not view.can_control(self):
+                    self._json(403, {'error': 'sign in to use the controls' if view.password else
+                                     'controls work only from this PC (http://localhost:'
+                                     f'{view.port}/) unless FM-Modmon-ms runs with --web-password'})
+                    return
+                fut = concurrent.futures.Future()
+                view.commands.put((path[len('/api/'):], args, fut))
+                try:
+                    result = fut.result(timeout=20)
+                except concurrent.futures.TimeoutError:
+                    self._json(504, {'error': 'the app did not answer'})
+                    return
+                except ValueError as e:
+                    self._json(400, {'error': str(e)})
+                    return
+                self._json(200, result or {'ok': True})
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+
+class MainWindow(QtWidgets.QWidget):
+    def __init__(self, tb, stations, gain_info, iboc_scan=None, web=None, open_feed=None,
+                 settings=None, config_path=None, nrsc5=None, radiodns=None, country='CA', ffmpeg=None):
+        super().__init__()
+        self.tb = tb
+        self.ffmpeg = ffmpeg            # ffmpeg for browser audio, or None: none
+        self.radiodns = radiodns        # RadioDns, or None: no lookups
+        self.country = country
+        self.nrsc5 = nrsc5              # path to nrsc5.exe, or None: no IBOC playout
+        self.config_path = config_path  # None: don't save
+        self.stations = stations
+        self.gain_info = gain_info
+        self.iboc_scan = iboc_scan
+        self.web = web
+        self.open_feed = open_feed  # slot -> RdsGroupServer or None
+        self.n_found = sum(1 for _, snr in stations if snr is not None)
+        self.scanned = bool(self.n_found) or bool(iboc_scan)
+        self.names = {}  # freq -> PS seen on air
+        self.events = deque(maxlen=200)
+        self.n_events = 0
+        self._feed_clients = {}
+        self.panels = []
+        self.setWindowTitle(f'{APP_NAME} - RSP1A')
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(6)
+        logo = QtWidgets.QLabel()
+        logo.setPixmap(QtGui.QPixmap.fromImage(draw_icon(64)).scaled(
+            30, 30, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        top.addWidget(logo)
+        title = QtWidgets.QLabel(APP_NAME)
+        title.setObjectName('appTitle')
+        top.addWidget(title)
+        self.chips = {}
+        for key in ('sdr', 'window', 'rate', 'gain', 'found'):
+            chip = self.chips[key] = QtWidgets.QLabel()
+            chip.setObjectName('chip')
+            top.addWidget(chip)
+        top.addStretch(1)
+        self.help_btn = QtWidgets.QPushButton('?')
+        self.help_btn.setObjectName('help')
+        self.help_btn.setFixedSize(32, 32)
+        self.help_btn.setToolTip('Help: this session, the guide and all command-line options')
+        self.help_btn.clicked.connect(self._show_help)
+        top.addWidget(self.help_btn)
+        self.settings_btn = QtWidgets.QPushButton('\u2699  Settings')
+        self.settings_btn.setMinimumHeight(32)
+        self.settings_btn.setToolTip('Notifications (email, webhook) and starting with Windows')
+        self.settings_btn.clicked.connect(self._app_settings)
+        top.addWidget(self.settings_btn)
+        self.notify_settings = NotifySettings()
+        self.notifier = Notifier(self.notify_settings, self._where)
+        self._recovery = None   # while the SDR is being reopened: {'since', 'attempt', 'error', 'done'}
+        self._watch_from = None  # the SDR watchdog starts once the flowgraph does
+        self.args = None   # the command line, set by main(), for the help
+        self.cal_btn = QtWidgets.QPushButton('\u27f2  Recalibrate gain')
+        self.cal_btn.setMinimumHeight(32)
+        self.cal_btn.setToolTip('Set the RSP1A gain for the stations being received now (takes a few '
+                                'seconds; the meters restart afterwards)')
+        self.cal_btn.clicked.connect(self._recalibrate)
+        top.addWidget(self.cal_btn)
+        self._cal = None  # {'thread', 'result' | 'error', 'was'} while recalibrating
+        self.add_btn = QtWidgets.QPushButton('+  Add receiver')
+        self.add_btn.setObjectName('primary')
+        self.add_btn.setMinimumHeight(32)
+        self.add_btn.clicked.connect(self._add_receiver)
+        top.addWidget(self.add_btn)
+        layout.addLayout(top)
+        self.header_text = ''
+        self.row = QtWidgets.QHBoxLayout()
+        self.row.setSpacing(12)
+        layout.addLayout(self.row, 1)   # spare height goes to the receivers, not the event log
+        events, events_box = card('Events')
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(500)
+        self.log_view.setFont(QtGui.QFont('Consolas', 9))
+        self.log_view.setFixedHeight(86)
+        events_box.addWidget(self.log_view)
+        events.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        layout.addWidget(events)
+        for slot, st in enumerate(tb.slots):
+            if st:
+                self._add_panel(slot, st, (settings or {}).get(slot))
+        self._update_window()
+        self.log('monitor started: ' + ', '.join(f'{p.station.freq_hz / 1e6:.1f}' for p in self.panels))
+
+        poll = QtCore.QTimer(self)
+        poll.timeout.connect(self._refresh)
+        poll.start(1000 // UPDATE_HZ)
+        if web:
+            commands = QtCore.QTimer(self)
+            commands.timeout.connect(self._web_commands)
+            commands.start(50)
+
+    def log(self, text):
+        """Event log: window, web view and logs/fm-modmon-ms_events_YYYY-MM-DD.log."""
+        line = f'{time.strftime("%Y-%m-%d %H:%M:%S")}  {text}'
+        self.events.append(line)
+        self.n_events += 1
+        self.log_view.appendPlainText(line)
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(os.path.join(LOG_DIR, f'{APP_NAME.lower()}_events_{time.strftime("%Y-%m-%d")}.log'),
+                      'a', encoding='utf-8') as fh:
+                fh.write(line + '\n')
+        except OSError as e:
+            print(f'could not write event log: {e}')
+
+    # ------------------------------------------------------------ receivers
+    def _add_panel(self, slot, st, settings=None):
+        panel = StationPanel(st, self.stations, self._on_play, self._on_select, self.iboc_scan,
+                             self._remove_receiver, self._on_settings, self._on_source,
+                             self.radiodns, self.country)
+        panel.slot = slot
+        panel.settings = settings or ReceiverSettings()
+        panel.set_source(panel.settings.audio_source)
+        st.audio_source = panel.settings.audio_source
+        st.apply_settings(panel.settings)
+        self._set_feed(panel, panel.settings.rds_feed)
+        for freq, ps in self.names.items():
+            panel.set_station_name(freq, ps)
+        self.panels.append(panel)
+        self.panels.sort(key=lambda p: p.slot)
+        if self.web and self.ffmpeg and self.web.formats:
+            self.web.audio[slot + 1] = WebAudio(self.ffmpeg, st.web_tap)
+        self.row.insertWidget(self.panels.index(panel), panel)
+
+    def _feed_port(self, panel):
+        """The receiver's RDS feed port: its own setting, else --rds-port + receiver number - 1."""
+        if not self.open_feed:
+            return None
+        return panel.settings.rds_port or self.open_feed.base_port + panel.slot
+
+    def _set_feed(self, panel, on):
+        """Open, move or close a receiver's RDS feed."""
+        port = self._feed_port(panel)
+        if panel.feed and (not on or panel.feed.port != port):
+            panel.station.rds.group_sink = None
+            panel.feed.close()
+            panel.feed = None
+        if on and not panel.feed and self.open_feed:
+            panel.feed = self.open_feed(panel.slot, port)
+            if panel.feed:
+                panel.station.rds.group_sink = panel.feed.send_group
+            else:
+                self.log(f'receiver {panel.slot + 1}: RDS feed not started, TCP port {port} is in use')
+        self._feed_clients[panel.slot] = 0
+
+    def save(self):
+        if self.config_path:
+            save_config(self.config_path, self.panels, self.notify_settings)
+
+    # ------------------------------------------------------------ notifications
+    def _where(self):
+        host = socket.gethostname()
+        return host, (f'http://{host}:{self.web.port}/' if self.web else None)
+
+    def set_notify(self, settings):
+        self.notify_settings = self.notifier.settings = settings
+
+    def _app_settings(self):
+        dialog = AppSettingsDialog(self, self.notify_settings, self.notifier)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        new = dialog.settings()
+        if new != self.notify_settings:
+            self.set_notify(new)
+            self.save()
+            on = [n for n, v in (('email', new.email), ('webhook', new.webhook)) if v]
+            self.log('notifications: ' + (' and '.join(on) if on else 'off'))
+        if dialog.autostart.isChecked() != autostart_enabled():
+            try:
+                set_autostart(dialog.autostart.isChecked())
+                self.log('start with Windows: ' + ('on' if dialog.autostart.isChecked() else 'off'))
+            except (OSError, subprocess.SubprocessError) as e:
+                self.log(f'start with Windows: could not change it: {e}')
+
+    # ------------------------------------------------------------ SDR watchdog
+    def start_watchdog(self):
+        """Called once the flowgraph runs: from now on, no samples for SDR_STALL_S means the SDR is lost."""
+        self._watch_from = time.monotonic()
+        timer = QtCore.QTimer(self)
+        timer.timeout.connect(self._watch_sdr)
+        timer.start(1000)
+
+    def _last_samples(self):
+        times = [st.meter.last_update for st in self.tb.stations if st.meter.last_update]
+        return max(times + [self._watch_from or 0])
+
+    def _watch_sdr(self):
+        rec = self._recovery
+        if rec:
+            if rec.get('done'):
+                self._sdr_recovered(rec)
+            elif rec.get('error') and rec.get('error') != rec.get('logged'):
+                rec['logged'] = rec['error']
+                self.log(f'SDR: reopening attempt {rec["attempt"]} failed: {rec["error"]}')
+                self._update_window()
+            else:
+                self._update_window()
+            return
+        silent = time.monotonic() - self._last_samples()
+        if self._watch_from and silent > SDR_STALL_S:
+            self._sdr_lost(silent)
+
+    def _sdr_lost(self, silent):
+        rec = self._recovery = {'since': time.time(), 'attempt': 0, 'error': None}
+        text = f'SDR lost: no samples from the RSP1A for {silent:.0f} s; reopening it'
+        self.log(text)
+        self.notifier.event('sdr', text)
+        for p in self.panels:
+            p.alarms.hold()     # a silent SDR isn't the stations' fault
+        threading.Thread(target=self._recover, args=(rec,), daemon=True).start()
+        self._update_window()
+
+    def _recover(self, rec):
+        """Background: let go of the SDR, then reopen it until samples flow again."""
+        try:
+            self.tb.detach_sdr()
+        except Exception as e:  # noqa: BLE001 - reported; reopening is tried anyway
+            rec['error'] = f'letting go of it: {e}'
+        while True:
+            rec['attempt'] += 1
+            try:
+                self.tb.attach_sdr()
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < 6:
+                    time.sleep(0.25)
+                    if self._last_samples() > t0:
+                        rec['done'] = True
+                        return
+                rec['error'] = 'opened, but no samples came'
+                self.tb.detach_sdr()
+            except Exception as e:  # noqa: BLE001 - not there yet (unplugged, driver restarting): try again
+                rec['error'] = str(e) or type(e).__name__
+                try:
+                    self.tb.detach_sdr()
+                except Exception:  # noqa: BLE001
+                    pass
+            time.sleep(SDR_RETRY_S[min(rec['attempt'] - 1, len(SDR_RETRY_S) - 1)])
+
+    def _sdr_recovered(self, rec):
+        self._recovery = None
+        text = (f'SDR recovered after {time.time() - rec["since"]:.0f} s '
+                f'({rec["attempt"]} attempt{"" if rec["attempt"] == 1 else "s"})')
+        self.log(text)
+        self.notifier.event('sdr', text)
+        for p in self.panels:  # the gap would otherwise sit in peak holds, counters and loudness
+            p.station.meter.reset()
+            p.station.audio_meter.reset()
+            p.station.sca_meter.reset()
+            p.alarms.hold()
+        self._update_window()
+
+    def _on_settings(self, panel):
+        port = self._feed_port(panel)
+        taken = {self._feed_port(p) for p in self.panels if p is not panel} | getattr(self.open_feed, 'reserved', set())
+        dialog = ReceiverDialog(self, panel.slot, panel.settings, port,
+                                self.open_feed.base_port + panel.slot if self.open_feed else None, taken,
+                                self.country)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        self._apply_settings(panel, dialog.settings())
+
+    def _apply_settings(self, panel, new):
+        if new == panel.settings:
+            return
+        panel.settings = new
+        panel.station.apply_settings(new)
+        self._set_feed(panel, new.rds_feed)
+        self.save()
+        self.log(f'receiver {panel.slot + 1} settings changed')
+
+    def fit_on_screen(self, centre=False):
+        """Size the window to its contents (no larger than the screen) and keep
+        it on screen; centre=True centres it on the main monitor."""
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        self.adjustSize()
+        frame_extra = self.frameGeometry().size() - self.geometry().size()
+        self.resize(min(self.width(), screen.width() - frame_extra.width()),
+                    min(self.height(), screen.height() - frame_extra.height()))
+        frame = self.frameGeometry()
+        if centre:
+            frame.moveCenter(screen.center())
+        else:
+            frame.moveLeft(max(screen.left(), min(frame.left(), screen.right() - frame.width() + 1)))
+            frame.moveTop(max(screen.top(), min(frame.top(), screen.bottom() - frame.height() + 1)))
+        self.move(frame.topLeft())
+
+    def _candidate(self):
+        """Strongest station not yet open that fits the SDR window with the others."""
+        used = [p.station.freq_hz for p in self.panels]
+        options = [(f, snr) for f, snr in self.stations if f not in used and _fits(used + [f])]
+        if not options:
+            return None
+        return max(options, key=lambda s: -1 if s[1] is None else s[1])[0]
+
+    def _show_help(self):
+        dialog = getattr(self, '_help', None)
+        if dialog is None:
+            dialog = self._help = HelpDialog(self, help_sections(session=self._session_text()))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _session_text(self):
+        """What this run of FM-Modmon-ms is using, for the help."""
+        a, tb, c = self.args, self.tb, self.tb.center_hz
+        rows = [('Start command', subprocess.list2cmdline([sys.executable] + sys.argv)),
+                ('SDR', f'RSP1A centred on {c / 1e6:.2f} MHz, window {(c - MAX_SPAN / 2) / 1e6:.1f}-'
+                        f'{(c + MAX_SPAN / 2) / 1e6:.1f} MHz, {SAMP_RATE / 1e6:.1f} MS/s'),
+                ('Gain', self._gain_text() + ('' if tb.gain_auto else
+                                              ' (set by --lna / --ifgr)' if a and a.gain_manual else
+                                              ' (default, not calibrated)'))]
+        for p in self.panels:
+            feed = f'RDS feed TCP {p.feed.port}' if p.feed else 'no RDS feed'
+            rows.append((f'Receiver {p.slot + 1}', f'{p.title}, {feed}'))
+        if self.web:
+            rows.append(('Web version', f'http://{socket.gethostname()}:{self.web.port}/ and '
+                                        f'http://localhost:{self.web.port}/; controls '
+                                        + ('with the password' if self.web.password else 'from this PC only')))
+        else:
+            rows.append(('Web version', 'off (--web-port 0)'))
+        formats = ', '.join(WEB_FORMATS[f]['label'] for f in (self.web.formats if self.web else []))
+        rows += [('Web audio', f'{formats}, by {self.ffmpeg}' if self.ffmpeg and formats else
+                  'off: ffmpeg not found (--ffmpeg)' if not self.ffmpeg else 'off'),
+                 ('IBOC playout', self.nrsc5 or 'off: nrsc5 not found (--nrsc5)'),
+                 ('RadioDNS', 'off' if not self.radiodns else
+                  f'on, country {self.country}, client identifier '
+                  + ('set' if getattr(self.radiodns, 'client_id', None) else 'not set')),
+                 ('Notifications', ', '.join(
+                     ([f'email to {self.notify_settings.email_to} via {self.notify_settings.smtp_host}']
+                      if self.notify_settings.email else []) +
+                     ([f'webhook ({self.notify_settings.webhook_format})'] if self.notify_settings.webhook else []))
+                  or 'off (Settings)'),
+                 ('Start with Windows', 'on' if autostart_enabled() else 'off'),
+                 ('Settings file', self.config_path or 'not saved'),
+                 ('Event logs', LOG_DIR),
+                 ('Image cache', cache_dir())]
+        if a:
+            rows.append(('RDS feed ports', f'from {a.rds_port} (receiver 1), bound to {a.rds_bind}'
+                                           if a.rds_port else 'off (--rds-port 0)'))
+        width = max(len(k) for k, _ in rows) + 2
+        return '\n'.join(f'{k + ":":<{width}}{v}' for k, v in rows)
+
+    def _gain_text(self):
+        tb = self.tb
+        if self._recovery:
+            rec = self._recovery
+            return f'SDR LOST \u2013 reopening (attempt {max(rec["attempt"], 1)}, {time.time() - rec["since"]:.0f} s)'
+        if self._cal:
+            return 'Gain: calibrating\u2026'
+        text = f'LNA {tb.lna} \u00b7 IFGR {tb.ifgr} dB'
+        if not tb.gain_auto:
+            return text
+        if tb.cal_center_hz != tb.center_hz:
+            return text + ' (auto, for another window: recalibrate?)'
+        return text + ' (auto)'
+
+    def _recalibrate(self):
+        """Run the gain calibration on the running receivers, off the GUI thread."""
+        if self._cal or self._recovery:
+            return
+        cal = self._cal = {'was': f'LNA {self.tb.lna} \u00b7 IFGR {self.tb.ifgr} dB'}
+
+        def run():
+            try:
+                cal['result'] = self.tb.recalibrate()
+            except Exception as e:  # noqa: BLE001 - reported in the event log
+                cal['error'] = e
+
+        cal['thread'] = threading.Thread(target=run, daemon=True)
+        cal['thread'].start()
+        for p in self.panels:
+            p.alarms.hold()    # the gain steps aren't the station's fault
+        self.cal_btn.setEnabled(False)
+        self.log('gain: recalibrating (the receivers hear gain steps for a few seconds)')
+        self._update_window()
+
+    def _recalibrate_done(self):
+        cal = self._cal
+        if not cal or cal['thread'].is_alive():
+            return
+        self._cal = None
+        self.cal_btn.setEnabled(True)
+        if 'error' in cal:
+            self.log(f'gain: recalibration failed, kept {cal["was"]}: {cal["error"]}')
+        else:
+            self.log(f'gain: recalibrated, was {cal["was"]}; now {cal["result"]}')
+        for p in self.panels:  # the gain steps would otherwise sit in peak holds, counters and loudness
+            p.station.meter.reset()
+            p.station.audio_meter.reset()
+            p.station.sca_meter.reset()
+            p.alarms.hold()
+        self._update_window()
+
+    def _add_receiver(self):
+        freq = self._candidate()
+        if freq is None or len(self.panels) >= MAX_RECEIVERS:
+            return
+        slot, st = self.tb.add_receiver(freq)
+        self._add_panel(slot, st)
+        self._update_window()
+        QtCore.QTimer.singleShot(0, self.fit_on_screen)  # grow, staying on screen
+        self.log(f'receiver {slot + 1} added on {freq / 1e6:.1f}')
+        self.save()
+
+    def _remove_receiver(self, panel):
+        if len(self.panels) <= 1:
+            return
+        title = panel.title
+        if panel.play.isChecked():
+            panel.play.setChecked(False)
+        self._set_feed(panel, False)
+        audio = self.web.audio.pop(panel.slot + 1, None) if self.web else None
+        if audio:
+            audio.close_all()
+        self.tb.remove_receiver(panel.slot)
+        self.panels.remove(panel)
+        self.row.removeWidget(panel)
+        panel.deleteLater()
+        self._feed_clients.pop(panel.slot, None)
+        self._update_window()
+        self.log(f'receiver {panel.slot + 1} removed ({title})')
+        self.save()
+        QtCore.QTimer.singleShot(0, self.fit_on_screen)  # shrink to the panels left
+
+    def _update_window(self):
+        c = self.tb.center_hz
+        window = f'{(c - MAX_SPAN / 2) / 1e6:.1f}\u2013{(c + MAX_SPAN / 2) / 1e6:.1f} MHz'
+        chips = {'sdr': f'RSP1A  {c / 1e6:.2f} MHz', 'window': f'Window {window}',
+                 'rate': f'{SAMP_RATE / 1e6:.1f} MS/s', 'gain': self._gain_text(),
+                 'found': f'{self.n_found} stations found' if self.scanned else 'no scan'}
+        for key, text in chips.items():
+            self.chips[key].setText(text)
+        self.header_text = f'RSP1A centred on {c / 1e6:.2f} MHz (window {window})  \u00b7  ' + '  \u00b7  '.join(
+            chips[k] for k in ('rate', 'gain', 'found'))
+        for p in self.panels:
+            p.set_fit([q.station.freq_hz for q in self.panels if q is not p])
+            p.remove_btn.setEnabled(len(self.panels) > 1)
+            if not p.set_sources(self.nrsc5) and p.source_key().startswith('iboc'):
+                p.set_source('analog')  # this station has no IBOC to play
+                p.settings.audio_source = 'analog'
+                self._apply_audio(p)
+        lost = bool(self._recovery)
+        self.chips['gain'].setStyleSheet('background: #3a1d1f; color: #ff8a8a; border-color: #6b2a2e;' if lost else '')
+        self.cal_btn.setEnabled(not lost and not self._cal)
+        for p in self.panels:
+            p.combo.setEnabled(not lost)
+            if lost:
+                p.remove_btn.setEnabled(False)
+        if lost:
+            self.add_btn.setEnabled(False)
+            self.add_btn.setToolTip('The SDR is being reopened')
+        elif len(self.panels) >= MAX_RECEIVERS:
+            self.add_btn.setEnabled(False)
+            self.add_btn.setToolTip(f'{MAX_RECEIVERS} receivers is the most this app runs')
+        elif self._candidate() is None:
+            self.add_btn.setEnabled(False)
+            self.add_btn.setToolTip('No other station found fits the SDR window with the open receivers')
+        else:
+            self.add_btn.setEnabled(True)
+            self.add_btn.setToolTip(f'Open a receiver on {self._candidate() / 1e6:.1f} MHz')
+
+    def _on_select(self, panel, freq):
+        if freq == panel.station.freq_hz:
+            return
+        freqs = [freq if p is panel else p.station.freq_hz for p in self.panels]
+        if not _fits(freqs):  # greyed-out entries can't normally be picked
+            panel.combo.setCurrentIndex(panel.combo.findData(panel.station.freq_hz))
+            return
+        old = panel.title
+        self.tb.stop_iboc(panel.slot)       # nrsc5 follows one station; restarted below
+        self.tb.set_freq(panel.slot, freq)  # SDR window follows the chosen stations
+        panel.reset_display()
+        self._update_window()
+        self._apply_audio(panel)
+        self.log(f'receiver {panel.slot + 1}: {old} -> {freq / 1e6:.1f}')
+        self.save()
+
+    def _on_play(self, panel, on):
+        if on:  # one station at a time
+            for p in self.panels:
+                if p is not panel and p.play.isChecked():
+                    p.play.setChecked(False)
+        self._apply_audio(panel)
+        panel.play.setText('\u25a0  Stop audio' if on else '\u25b6  Play audio')
+
+    def _on_source(self, panel, key):
+        if key == panel.settings.audio_source:
+            return
+        panel.set_source(key)
+        panel.settings.audio_source = key
+        self._apply_audio(panel)
+        self.save()
+        self.log(f'receiver {panel.slot + 1}: audio source {dict(AUDIO_SOURCES)[key]}')
+
+    def _apply_audio(self, panel):
+        """Make a receiver's playout match its Play button and audio source,
+        starting or stopping nrsc5 for IBOC."""
+        st, key, on = panel.station, panel.source_key(), panel.play.isChecked()
+        program = int(key[4:]) if on and key.startswith('iboc') else None
+        if st.iboc and st.iboc.program != program:
+            self.tb.stop_iboc(panel.slot)
+        if program is not None and not st.iboc:
+            try:
+                self.tb.start_iboc(panel.slot, program, self.nrsc5)
+            except OSError as e:
+                self.log(f'receiver {panel.slot + 1}: IBOC not started: {e}')
+        st.set_audio(key, on)
+
+    def _refresh(self):
+        for p in self.panels:
+            if p.feed and p.feed.clients != self._feed_clients.get(p.slot, 0):
+                n, was = p.feed.clients, self._feed_clients.get(p.slot, 0)
+                self.log(f'RDS feed TCP {p.feed.port} (receiver {p.slot + 1}): '
+                         f'{"client connected" if n > was else "client disconnected"}, {n} now')
+                self._feed_clients[p.slot] = n
+            for desc, raised in p.refresh():
+                text = f'{p.title}: {"ALARM" if raised else "cleared"} - {desc}'
+                self.log(text)
+                if not self._recovery:
+                    self.notifier.event('raise' if raised else 'clear', text)
+            alert = p.station.iboc.status['alert'] if p.station.iboc else None
+            if alert != getattr(p, 'last_alert', None):
+                if alert:
+                    self.log(f'{p.title}: IBOC alert text: {alert}')
+                    self.notifier.event('raise', f'{p.title}: IBOC alert text: {alert}')
+                p.last_alert = alert
+            ps = p.static_ps()
+            if ps is not None and self.names.get(p.station.freq_hz, '') != ps:
+                self.names[p.station.freq_hz] = ps
+                for q in self.panels:
+                    q.set_station_name(p.station.freq_hz, ps)
+        self._recalibrate_done()
+        while True:
+            try:
+                self.log(self.notifier.results.get_nowait())
+            except queue.Empty:
+                break
+        if self.web and self.web.wanted():
+            self._publish()
+
+    def _publish(self):
+        """Hand the web view the current state (only while someone is watching)."""
+        web = self.web
+        state = {
+            'ready': True, 'app': APP_NAME, 'time': time.strftime('%H:%M:%S'),
+            'chips': [self.chips[k].text() for k in ('sdr', 'window', 'rate', 'gain', 'found')],
+            'add': {'enabled': self.add_btn.isEnabled(), 'tip': self.add_btn.toolTip()},
+            'calibrating': bool(self._cal),
+            'audio_formats': [{'key': f, 'label': WEB_FORMATS[f]['label'], 'canplay': WEB_FORMATS[f]['canplay']}
+                              for f in (web.formats if self.ffmpeg else [])],
+            'listeners': web.listeners(), 'max_listeners': WEB_MAX_LISTENERS,
+            'alarm_defs': [[name, desc] for name, desc, _ in ALARM_DEFS],
+            'rules': {'presets': {k: v['limits'] for k, v in RULES.items()},
+                      'by_country': 'ised' if self.country == 'CA' else 'fcc',
+                      'limits': [list(x) for x in LIMITS]},
+            'events_seq': self.n_events,
+            'receivers': [p.web_state(self._feed_port(p),
+                                      self.open_feed.base_port + p.slot if self.open_feed else None,
+                                      web.audio[p.slot + 1].listeners if p.slot + 1 in web.audio else 0)
+                          for p in self.panels],
+        }
+        web.images = {(p.slot + 1, kind): label.path for p in self.panels
+                      for kind, label in (('logo', p.logo_img), ('art', p.art_img))
+                      if label.path and not label.isHidden()}
+        web.state = json.dumps(_finite(state)).encode()
+        web.events = json.dumps(list(self.events)[-100:]).encode()
+
+    def _web_commands(self):
+        """Run the web page's control requests, here on the GUI thread."""
+        while True:
+            try:
+                action, args, fut = self.web.commands.get_nowait()
+            except queue.Empty:
+                return
+            if action == 'log':
+                self.log(args['text'])
+                continue
+            if not fut.set_running_or_notify_cancel():
+                continue
+            try:
+                fut.set_result(self._web_command(action, args))
+            except ValueError as e:
+                fut.set_exception(e)
+            except Exception as e:  # noqa: BLE001 - reported to the page, the app carries on
+                fut.set_exception(ValueError(f'{type(e).__name__}: {e}'))
+            self._publish()
+
+    def _web_command(self, action, args):
+        """One control from the web page, done as the matching control in the window would."""
+        if self._recovery and action in ('add', 'remove', 'select', 'recalibrate'):
+            raise ValueError('the SDR is being reopened; try again when it is back')
+        if action == 'recalibrate':
+            if self._cal:
+                raise ValueError('the gain is being calibrated already')
+            self._recalibrate()
+            return None
+        if action == 'add':
+            if len(self.panels) >= MAX_RECEIVERS or self._candidate() is None:
+                raise ValueError(self.add_btn.toolTip() or 'no receiver can be added')
+            self._add_receiver()
+            return None
+        panel = next((p for p in self.panels if p.slot + 1 == args.get('receiver')), None)
+        if panel is None:
+            raise ValueError('no such receiver')
+        if action == 'select':
+            i = panel.combo.findData(args.get('freq'))
+            if i < 0 or not panel.combo.model().item(i).isEnabled():
+                raise ValueError('that station does not fit the SDR window with the other receivers')
+            panel.combo.setCurrentIndex(i)
+            self._on_select(panel, panel.combo.itemData(i))
+        elif action == 'remove':
+            if len(self.panels) <= 1:
+                raise ValueError('the last receiver cannot be removed')
+            self._remove_receiver(panel)
+        elif action == 'source':
+            i = panel.source.findData(args.get('source'))
+            if i < 0 or not panel.source.model().item(i).isEnabled():
+                raise ValueError('that audio source is not available on this receiver')
+            self._on_source(panel, panel.source.itemData(i))
+        elif action == 'reset_integrated':
+            panel.station.audio_meter.reset_integrated()
+        elif action == 'settings':
+            got = args.get('settings')
+            if not isinstance(got, dict):
+                raise ValueError('no settings')
+            pi = str(got.get('expected_pi', '')).strip()
+            if pi and not re.fullmatch(r'[0-9A-Fa-f]{4}', pi):
+                raise ValueError('Expected PI is four hex digits (such as C6B2), or empty.')
+            merged = panel.settings.to_dict() | got
+            merged['audio_source'] = panel.settings.audio_source  # set with the source control
+            default = self.open_feed.base_port + panel.slot if self.open_feed else None
+            port = int(merged.get('rds_port') or 0) or default
+            if self.open_feed and merged.get('rds_feed'):
+                if not 1024 <= port <= 65535:
+                    raise ValueError('The RDS feed port must be 1024-65535.')
+                taken = ({self._feed_port(p) for p in self.panels if p is not panel}
+                         | getattr(self.open_feed, 'reserved', set()))
+                if port in taken:
+                    raise ValueError(f'TCP port {port} is already used by another receiver or the web view.')
+            merged['rds_port'] = 0 if port == default else port
+            self._apply_settings(panel, ReceiverSettings.from_dict(merged))
+        else:
+            raise ValueError(f'unknown action {action!r}')
+        return None
+
+
+def build_parser(width=100):
+    ap = argparse.ArgumentParser(prog='fm-modmon-ms.py', description=__doc__.split('\n\n')[1],
+                                 formatter_class=lambda prog: argparse.HelpFormatter(prog, width=width,
+                                                                                     max_help_position=32))
+    ap.add_argument('--freqs', type=float, nargs='+', metavar='MHZ',
+                    help=f'start with receivers on these stations (1-{MAX_RECEIVERS}) instead of '
+                         'the saved receivers, or one on the strongest station found')
+    ap.add_argument('--nrsc5', default=os.path.normpath(NRSC5_PATH),
+                    help='nrsc5 executable for IBOC playout (default: %(default)s)')
+    ap.add_argument('--no-radiodns', action='store_true', help='no RadioDNS lookups')
+    ap.add_argument('--radiodns-client-id', default=os.environ.get('RADIODNS_CLIENT_ID'),
+                    help='RadioDNS client identifier for providers that need one '
+                         '(default: the RADIODNS_CLIENT_ID environment variable)')
+    ap.add_argument('--country', default='CA', type=str.upper,
+                    help='ISO country of this receiver, for RadioDNS when a station sends no ECC (default CA)')
+    ap.add_argument('--config', default=CONFIG_PATH,
+                    help='where receivers and their settings are saved (default: %(default)s)')
+    ap.add_argument('--no-scan', action='store_true',
+                    help='skip the band scan; dropdowns then list every channel')
+    ap.add_argument('--lna', type=int, help='RSP1A LNA state 0-9, higher = less gain (default: calibrated at '
+                                            f'start-up; {CAL_DEFAULT[0]} if only --ifgr is given)')
+    ap.add_argument('--ifgr', type=int, help='IF gain reduction 20-59 dB (default: calibrated at start-up; '
+                                             f'{CAL_DEFAULT[1]} if only --lna is given)')
+    ap.add_argument('--web-port', type=int, default=WEB_PORT,
+                    help='port for the web version (default %(default)s; 0 = off)')
+    ap.add_argument('--web-bind', default='0.0.0.0',
+                    help='address the web version listens on (default all; 127.0.0.1 = this PC only)')
+    ap.add_argument('--web-password', default=os.environ.get('FM_MODMON_WEB_PASSWORD'),
+                    help='password for the web controls from other computers (default: the '
+                         'FM_MODMON_WEB_PASSWORD environment variable; without one, the controls work '
+                         'only in a browser on this PC)')
+    ap.add_argument('--ffmpeg', default=None,
+                    help='ffmpeg for the web audio (default: ffmpeg on the PATH, or a WinGet install)')
+    ap.add_argument('--web-audio', default=','.join(WEB_FORMATS), metavar='FORMATS',
+                    help='web audio formats to offer, the first being the page default '
+                         '(default: %(default)s; those ffmpeg can encode)')
+    ap.add_argument('--rds-port', type=int, default=RDS_TCP_PORT,
+                    help='first TCP port of the raw RDS group feeds, one per receiver '
+                         '(default %(default)s, so 7711-7713; 0 = off)')
+    ap.add_argument('--rds-bind', default='0.0.0.0',
+                    help='address the RDS feeds listen on (default all; 127.0.0.1 = this PC only)')
+    return ap
+
+
+def parse_args(argv=None):
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    args.gain_manual = args.lna is not None or args.ifgr is not None
+    args.lna = CAL_DEFAULT[0] if args.lna is None else args.lna
+    args.ifgr = CAL_DEFAULT[1] if args.ifgr is None else args.ifgr
+    if args.freqs and len(args.freqs) > MAX_RECEIVERS:
+        ap.error(f'at most {MAX_RECEIVERS} receivers')
+    if args.freqs and round(max(args.freqs) - min(args.freqs), 6) > MAX_SPAN / 1e6:
+        ap.error(f'stations must lie within {MAX_SPAN / 1e6:.1f} MHz of each other')
+    return args
+
+
+def choose_stations(args, saved=None):
+    """Scan (unless told not to) and return (dropdown list, {slot: freq} to open, IBOC scan info).
+
+    Receivers open from --freqs, else the saved ones, else one on the
+    strongest station the scan found."""
+    if args.no_scan:
+        found, iboc_scan = [], {}
+        stations = [(ch * 100000, None) for ch in CHANNELS_MHZ10]
+    else:
+        print('Scanning the FM band...', flush=True)
+        found, iboc_scan = band_scan(args.lna, args.ifgr)
+        print('Found:', ', '.join(f'{f / 1e6:.1f} ({snr:.0f} dB{", IBOC" if isinstance(iboc_scan.get(f), float) else ""})'
+                                  for f, snr in found) or 'nothing')
+        stations = list(found)
+    if args.freqs:
+        receivers = {i: int(round(f * 10)) * 100000 for i, f in enumerate(args.freqs)}
+    elif saved:
+        receivers = {slot: freq for slot, (freq, _) in saved.items()}
+    else:
+        receivers = {0: (pick_initial(found, n=1) or [int(round(DEFAULT_FREQS_MHZ[0] * 10)) * 100000])[0]}
+    known = {f for f, _ in stations}
+    stations += [(f, None) for f in set(receivers.values()) if f not in known]
+    return sorted(stations), receivers, iboc_scan
+
+
+def start_web(args):
+    if not args.web_port:
+        return None
+    try:
+        web = WebView(args.web_bind, args.web_port, args.web_password)
+    except OSError as e:
+        print(f'web version not started (port {args.web_port}): {e}')
+        return None
+    host = socket.gethostname() if args.web_bind == '0.0.0.0' else args.web_bind
+    print(f'Web version: http://{host}:{args.web_port}/  (also http://localhost:{args.web_port}/); controls '
+          + ('with the password' if args.web_password else 'from this PC only (no --web-password)'))
+    args.ffmpeg = args.ffmpeg or find_ffmpeg()
+    web.formats = ffmpeg_formats(args.ffmpeg, [f.strip() for f in args.web_audio.split(',') if f.strip()])
+    if not args.ffmpeg:
+        print('ffmpeg not found: the web version has no audio (see --ffmpeg)')
+    elif not web.formats:
+        print(f'{args.ffmpeg} can encode none of {args.web_audio}: the web version has no audio')
+    else:
+        print('Web audio:', ', '.join(WEB_FORMATS[f]['label'] for f in web.formats))
+    return web
+
+
+def feed_opener(args):
+    """(slot, port) -> RdsGroupServer (None if the port is taken); None if feeds are off."""
+    if not args.rds_port:
+        return None
+
+    def open_feed(slot, port):
+        try:
+            feed = RdsGroupServer(args.rds_bind, port)
+        except OSError as e:
+            print(f'RDS feed for receiver {slot + 1} not started (port {port}): {e}')
+            return None
+        print(f'RDS groups, receiver {slot + 1}: tcp://{socket.gethostname()}:{port}')
+        return feed
+
+    open_feed.base_port = args.rds_port
+    open_feed.reserved = {args.web_port} if args.web_port else set()
+    return open_feed
+
+
+def main():
+    args = parse_args()
+    clear_cache(stale=True)  # caches left by a session that didn't close cleanly
+    app = QtWidgets.QApplication(sys.argv)
+    install_icon(app)
+    apply_dark_theme(app)
+    # Started from the shortcut there is no console, so show progress and errors in windows.
+    splash = QtWidgets.QSplashScreen(splash_pixmap(app.primaryScreen().logicalDotsPerInch() / 96))
+    splash.setFont(QtGui.QFont('Segoe UI', 10))
+    splash.show()
+    app.processEvents()
+    try:
+        saved = {} if args.freqs else load_config(args.config)
+        if not args.no_scan:
+            splash.showMessage('Scanning the FM band…\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
+                               QtGui.QColor('#9aa0a6'))
+            app.processEvents()
+        stations, receivers, iboc_scan = choose_stations(args, saved)
+        cal_report = None
+        if not args.gain_manual:
+            def step(text):
+                splash.showMessage(f'Setting the gain\u2026\n{text}', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
+                                   QtGui.QColor('#9aa0a6'))
+                app.processEvents()
+
+            step('')
+            args.lna, args.ifgr, cal_report = calibrate_startup(receivers.values(), args.lna, args.ifgr, step)
+            print('Gain calibrated:', cal_report)
+        tb = FmMonitor(receivers, args.lna, args.ifgr)
+        if cal_report:
+            tb.gain_auto, tb.cal_center_hz = True, tb.center_hz
+        web = start_web(args)
+        win = MainWindow(tb, stations, f'LNA {args.lna} · IFGR {args.ifgr} dB', iboc_scan, web,
+                         feed_opener(args), {slot: cfg for slot, (_, cfg) in saved.items()}, args.config,
+                         args.nrsc5 if os.path.isfile(args.nrsc5) else None,
+                         None if args.no_radiodns else RadioDns(args.radiodns_client_id), args.country,
+                         args.ffmpeg if web and web.formats else None)
+    except Exception as e:  # noqa: BLE001 - anything that stops start-up is shown, then the app exits
+        splash.close()
+        hint = ('\n\nIs the RSP1A plugged in, and is no other program (such as SDRconnect) using it?'
+                if 'RSP' in str(e) or 'sdrplay' in str(e).lower() else '')
+        QtWidgets.QMessageBox.critical(None, APP_NAME, f'{APP_NAME} could not start:\n\n{e}{hint}')
+        sys.exit(1)
+    if cal_report:
+        win.log(f'gain: calibrated at start-up, {cal_report}')
+    win.args = args
+    win.set_notify(load_notify(args.config))
+    win.save()
+    # Windows only knows the frame size once the window exists, so open it
+    # invisible, centre it, then reveal it: it never appears anywhere else.
+    win.setWindowOpacity(0.0)
+    win.show()
+
+    def reveal():
+        win.fit_on_screen(centre=True)
+        win.setWindowOpacity(1.0)
+        splash.finish(win)
+
+    QtCore.QTimer.singleShot(0, reveal)
+
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    keepalive = QtCore.QTimer()
+    keepalive.timeout.connect(lambda: None)  # lets Python see Ctrl+C
+    keepalive.start(250)
+
+    tb.start()
+    win.start_watchdog()
+    win.notifier.event('startstop', 'FM-Modmon-ms started: ' + ', '.join(p.title for p in win.panels))
+    app.aboutToQuit.connect(lambda: (win.log('monitor stopped'), web and web.close_audio(), tb.stop_all_iboc(),
+                                     tb.stop(), tb.wait(), clear_cache(),
+                                     win.notifier.send_now('startstop', 'FM-Modmon-ms stopped')))
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()

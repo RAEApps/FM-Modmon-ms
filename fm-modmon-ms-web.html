@@ -1,0 +1,854 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- FM-Modmon-ms web version: served by fm-modmon-ms.py on http://<pc>:8765/ -->
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FM-Modmon-ms</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="apple-touch-icon" href="icon.png">
+<style>
+/* Contrast (WCAG 2.1) on the dark backgrounds: text 4.5:1 or more (dim 4.9, muted 5.9),
+   control outlines 3:1 or more (--btn-b 3.3); disabled controls (exempt) stay readable. */
+:root {
+  color-scheme: dark;                 /* native controls, lists and scrollbars drawn dark */
+  accent-color: #8ab4f8;              /* checkboxes and sliders in the app's blue */
+  --bg: #1e1f22; --panel: #1c1d21; --panel-b: #2c2e33; --card: #222328; --card-b: #2a2c31;
+  --text: #e0e0e0; --bright: #e8eaed; --muted: #9aa0a6; --dim: #8c9197; --disabled: #6f747c;
+  --accent: #8ab4f8; --green: #69db7c; --red: #ff6b6b; --amber: #f0a35e;
+  --btn: #2b2d31; --btn-b: #6f747c; --btn-bh: #9aa0a6; --btn-h: #33363c; --field: #16171a;
+  --lcd: #0b1a0b; --lcd-b: #1f3a1f;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 13px "Segoe UI", system-ui, sans-serif; padding: 12px 14px; }
+button, select, input { font: inherit; color: var(--text); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }   /* keyboard focus */
+button { background: var(--btn); border: 1px solid var(--btn-b); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+button:hover:not(:disabled) { background: var(--btn-h); border-color: var(--btn-bh); }
+button:disabled, select:disabled, input:disabled { color: var(--disabled); background: #25272b; border-color: #3a3d44; cursor: default; }
+button.primary { background: #2f6db5; border-color: #3d7fd0; color: #fff; font-weight: 600; }
+button.primary:hover:not(:disabled) { background: #3a7cc6; }
+button.primary:disabled { background: #25272b; border-color: #3a3d44; color: var(--disabled); font-weight: normal; }
+button.on { background: #2e7d32; border-color: #69db7c; color: #fff; }
+select { background: var(--btn); border: 1px solid var(--btn-b); border-radius: 6px; padding: 4px 8px; }
+select:hover:not(:disabled), input:hover:not(:disabled) { border-color: var(--btn-bh); }
+input { background: var(--field); border: 1px solid var(--btn-b); border-radius: 5px; padding: 4px 6px; }
+input[type=checkbox] { width: 16px; height: 16px; margin: 0 4px 0 0; vertical-align: -3px; cursor: pointer; }
+input:focus, select:focus { border-color: var(--accent); }
+
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+header img { width: 30px; height: 30px; }
+header h1 { font-size: 20px; font-weight: 600; color: var(--bright); margin: 0 8px 0 2px; }
+.chip { background: #24262b; border: 1px solid #30333a; border-radius: 10px; padding: 3px 10px; color: #c4c7cc; white-space: nowrap; }
+header .grow { flex: 1; }
+#access { position: relative; color: var(--muted); }
+#lock { white-space: nowrap; }
+#lock.on { background: #2e7d32; border-color: #69db7c; color: #fff; font-weight: 600; }
+#lock.on:hover:not(:disabled) { background: #37913c; }
+#lock:disabled.on { color: #fff; background: #2e7d32; border-color: #2c5236; }
+#signin { position: absolute; right: 0; top: calc(100% + 6px); z-index: 10; display: none; gap: 6px; align-items: center;
+          background: var(--card); border: 1px solid var(--btn-b); border-radius: 8px; padding: 8px;
+          box-shadow: 0 6px 18px rgba(0,0,0,.45); flex-wrap: wrap; width: 260px; }
+#signin.open { display: flex; }
+#signin input { flex: 1; min-width: 0; }
+#signin .err { width: 100%; margin: 0; min-height: 0; }
+#conn { color: var(--amber); }
+#conn:empty { display: none; }
+
+#panels { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; padding-bottom: 4px; }
+.panel { background: var(--panel); border: 1px solid var(--panel-b); border-radius: 12px; padding: 12px;
+         display: flex; flex-direction: column; gap: 8px; flex: 1 1 0; min-width: 600px; }
+.card { background: var(--card); border: 1px solid var(--card-b); border-radius: 8px; padding: 6px 10px 8px; }
+.card-head { display: flex; align-items: center; margin-bottom: 3px; }
+.card-title { flex: 1; color: var(--accent); font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
+.card-head button { padding: 1px 8px; }
+
+.top { display: flex; gap: 6px; }
+.top select.station { flex: 1; font-size: 26px; font-weight: bold; padding: 2px 8px; min-width: 0; }
+.top button { font-size: 17px; padding: 4px 10px; }
+
+.text-grid { display: grid; grid-template-columns: auto 1fr auto auto; column-gap: 8px; row-gap: 3px; align-items: center; }
+.text-grid .lbl { font-weight: bold; color: var(--accent); text-align: right; }
+.text-grid .wide { grid-column: 2 / span 3; }
+.text-grid .line { color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ps { background: var(--lcd); border: 1px solid var(--lcd-b); border-radius: 6px; text-align: center; padding: 2px;
+      font: bold 24px Consolas, monospace; color: #7cfc7c; white-space: pre; }
+.rt { background: var(--lcd); border: 1px solid var(--lcd-b); border-radius: 6px; padding: 4px 6px;
+      font: 13px Consolas, monospace; color: #cfe8cf; white-space: pre; overflow: hidden; min-height: 26px; }
+.media { grid-row: 4 / span 4; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
+.media img { max-width: 88px; max-height: 88px; border-radius: 4px; cursor: zoom-in; }
+
+.status-row { display: flex; align-items: center; gap: 6px; }
+.pill { border-radius: 10px; padding: 2px 10px; font-weight: 600; white-space: nowrap; }
+.pill.ok { background: #1b2f21; color: #69db7c; border: 1px solid #2c5236; }
+.pill.alarm { background: #3a1d1f; color: #ff8a8a; border: 1px solid #6b2a2e; }
+.pill.dyn { background: #3a2e1b; color: #f0a35e; border: 1px solid #6b5228; }
+.status-row .grow { flex: 1; }
+.status-row .feed { color: var(--muted); text-align: right; }
+
+.meters { display: grid; grid-template-columns: 1fr 1fr; column-gap: 18px; row-gap: 6px; }
+.meter { display: flex; align-items: center; height: 20px; gap: 6px; }
+.meter .name { color: var(--muted); white-space: nowrap; width: var(--mw, auto); flex: none; }
+.meter .track { position: relative; flex: 1; height: 8px; background: #2c2e33; border-radius: 4px; }
+.meter .fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.meter .tick { position: absolute; top: -3px; bottom: -3px; width: 1px; background: #80868b; }
+.meter .val { width: 78px; text-align: right; font-weight: bold; color: var(--bright); white-space: nowrap; }
+
+.values { display: grid; column-gap: 10px; row-gap: 3px; }
+.values .k { color: var(--muted); white-space: nowrap; }
+.values .v { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.stereo { display: flex; gap: 10px; align-items: flex-start; }
+.stereo .values { flex: 1; }
+canvas { display: block; }
+canvas.mpx { width: 100%; height: 240px; }
+canvas.gonio { width: 130px; height: 130px; flex: none; }
+
+.audio-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.audio-row select { min-height: 34px; max-width: 150px; text-overflow: ellipsis; }
+.audio-row > button { min-height: 34px; font-weight: 600; min-width: 84px; padding: 5px 10px; }
+.audio-row > button.on { background: #2e7d32; border-color: #69db7c; color: #fff; }
+.audio-row > button.on:hover { background: #37913c; }
+.player { display: none; align-items: center; gap: 6px; flex: 1; min-width: 200px; height: 34px; padding: 0 8px;
+          background: var(--field); border: 1px solid var(--btn-b); border-radius: 6px; }
+.player.on { display: flex; }
+.player .live { font: 600 12px Consolas, monospace; color: var(--muted); white-space: nowrap; min-width: 84px; }
+.player .live.on { color: var(--green); }
+.player .live.wait { color: var(--amber); }
+.player .mute { background: none; border: none; padding: 2px 4px; font-size: 15px; line-height: 1; }
+.player .mute:hover { background: var(--btn-h); }
+.vol { flex: 1; min-width: 70px; height: 4px; -webkit-appearance: none; appearance: none; border-radius: 2px; cursor: pointer;
+       background: linear-gradient(to right, var(--accent) var(--fill, 80%), var(--btn-b) var(--fill, 80%)); }
+.vol::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--bright); border: 2px solid var(--accent); }
+.vol::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--bright); border: 2px solid var(--accent); }
+.vol::-moz-range-track { background: transparent; }
+.audio-row .note { color: var(--muted); }
+
+#events { margin-top: 12px; }
+#log { background: var(--field); border-radius: 6px; padding: 6px 8px; height: 110px; overflow: auto;
+       font: 12px Consolas, monospace; color: #c4c7cc; white-space: pre; }
+
+dialog { background: var(--card); color: var(--text); border: 1px solid var(--btn-b); border-radius: 10px; padding: 16px; max-width: 640px; width: 95vw; }
+#settings { max-width: 780px; }
+dialog::backdrop { background: rgba(0,0,0,.55); }
+dialog h2 { margin: 0 0 12px; font-size: 16px; color: var(--accent); }
+.form { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; }
+.form label.k { text-align: right; color: var(--muted); }
+fieldset { grid-column: 1 / span 2; border: 1px solid var(--btn-b); border-radius: 8px; }
+legend { color: var(--accent); }
+.alarm-grid { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+.alarm-grid input[type=number] { width: 64px; }
+.alarm-grid .limit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.alarm-grid > label { white-space: nowrap; }
+@media (max-width: 520px) { .alarm-grid > label { white-space: normal; } }
+.buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.err { color: var(--red); margin-top: 8px; min-height: 1em; }
+#help-btn { width: 32px; height: 32px; padding: 0; border-radius: 16px; font-weight: 700; font-size: 15px; color: var(--accent); }
+#helpdlg { max-width: 960px; width: 96vw; padding: 0; }
+#stereo { max-width: min(94vw, 640px); width: 640px; padding: 0 0 12px; }
+#stereo .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 8px; }
+#stereo .help-head h2 { margin: 0; }
+#stereo-scope { display: block; width: calc(100% - 32px); aspect-ratio: 1; margin: 0 16px; border-radius: 6px; }
+#stereo-phase { margin: 10px 16px 0; } #stereo-phase .name { width: auto; }
+#stereo-readouts { margin: 6px 16px 0; color: var(--muted); text-align: center; }
+#stereo-readouts b { color: var(--text); }
+canvas.gonio { cursor: pointer; }
+#helpdlg .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; }
+#helpdlg .help-head h2 { margin: 0; }
+#help-toc { padding: 6px 16px; color: var(--muted); }
+#help-toc a { color: var(--accent); cursor: pointer; margin-right: 12px; }
+#help-body { max-height: 75vh; overflow: auto; padding: 0 16px 16px; }
+#help-body h3 { color: var(--accent); margin: 16px 0 6px; font-size: 15px; }
+#help-body pre { font: 12px Consolas, monospace; color: #d6d8dc; white-space: pre-wrap; margin: 0; }
+#help-body p { margin: 0 0 8px; line-height: 1.45; }
+#toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: #3a1d1f; color: #ffb3b3;
+         border: 1px solid #6b2a2e; border-radius: 8px; padding: 8px 14px; display: none; max-width: 90vw; }
+#zoom { position: fixed; inset: 0; background: rgba(0,0,0,.75); display: none; align-items: center; justify-content: center; }
+#zoom img { max-width: 90vw; max-height: 90vh; }
+
+@media (max-width: 700px) {
+  body { padding: 10px; }
+  #panels { flex-direction: column; overflow-x: visible; }
+  .panel { min-width: 0; width: 100%; }
+  .top select.station { font-size: 20px; }
+  .rt { white-space: pre-wrap; }
+  .meters { grid-template-columns: 1fr; }
+  .values { grid-template-columns: var(--kw) minmax(0, 1fr) !important; }
+  .values .v { white-space: normal; }
+  .text-grid .line { white-space: normal; overflow: visible; }
+  .status-row { flex-wrap: wrap; }
+  .status-row .grow { display: none; }
+  .status-row .feed { flex-basis: 100%; text-align: left; }
+  /* header: title with sign-in and help on one row, the chips as one sideways-scrolling
+     strip, then the two action buttons side by side */
+  header { gap: 6px; }
+  header img { order: 0; } header h1 { order: 1; margin-right: auto; }
+  #access { order: 2; } #help-btn { order: 3; }
+  #chips { display: flex !important; order: 4; flex: 0 0 100%; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  #chips::-webkit-scrollbar { display: none; }
+  header .grow { display: none; }
+  #conn { order: 5; flex-basis: 100%; }
+  #cal, #add { order: 6; flex: 1 1 0; white-space: nowrap; }
+  .text-grid { grid-template-columns: auto 1fr; }
+  .text-grid .wide { grid-column: 2; }
+  .media { display: none !important; }
+}
+</style>
+</head>
+<body>
+<header>
+  <img src="icon.png" alt="">
+  <h1>FM-Modmon-ms</h1>
+  <span id="chips"></span>
+  <span class="grow"></span>
+  <span id="conn"></span>
+  <span id="access">
+    <button id="lock">&#x1F512;&nbsp; View only</button>
+    <span id="signin"><input type="password" placeholder="password" autocomplete="current-password"><button class="primary">Sign in</button><span class="err"></span></span>
+  </span>
+  <button id="help-btn" title="Help: using this page, the guide and the command-line options">?</button>
+  <button id="cal" disabled title="Set the RSP1A gain for the stations being received now (takes a few seconds; the meters restart afterwards)">&#x27F2;&nbsp; Recalibrate gain</button>
+  <button id="add" class="primary" disabled>+&nbsp; Add receiver</button>
+</header>
+<div id="panels"></div>
+<div id="events" class="card"><div class="card-head"><span class="card-title">Events</span></div><div id="log"></div></div>
+
+<dialog id="settings">
+  <h2 id="settings-title">Receiver settings</h2>
+  <form method="dialog" id="settings-form">
+    <div class="form">
+      <label class="k" for="s-name">Name:</label><input id="s-name" maxlength="40" placeholder="optional, e.g. Main TX">
+      <label class="k" for="s-deemph">De-emphasis:</label>
+      <select id="s-deemph"><option value="75">75 µs (Americas, Korea)</option><option value="50">50 µs (Europe, most elsewhere)</option></select>
+      <label class="k" for="s-stereo">Stereo:</label>
+      <select id="s-stereo"><option value="auto">Stereo when a pilot is present</option><option value="mono">Always mono</option></select>
+      <label class="k" for="s-volume">Play volume (PC):</label><span><input id="s-volume" type="number" min="0" max="200" style="width:80px"> %</span>
+      <label class="k" for="s-pty">PTY names:</label>
+      <select id="s-pty"><option value="rbds">RBDS (North America)</option><option value="rds">RDS (Europe, elsewhere)</option></select>
+      <label class="k" for="s-pi">Expected PI:</label><input id="s-pi" maxlength="4" placeholder="optional, e.g. C6B2" pattern="[0-9A-Fa-f]{0,4}">
+      <label class="k">RDS feed:</label>
+      <span><label><input type="checkbox" id="s-feed"> <span id="s-feed-label">Serve raw RDS groups over TCP</span></label>
+            &nbsp; TCP port <input id="s-port" type="number" min="1024" max="65535" style="width:90px"></span>
+      <label class="k" for="s-rules">Rules:</label>
+      <select id="s-rules" title="The rules the alarms check. Choosing a rule set fills in its limits below; changing any limit makes them custom.">
+        <option value="">By country (ISED in Canada, else FCC)</option><option value="ised">ISED (BETS-6, BPR-3)</option>
+        <option value="fcc">FCC (47 CFR 73)</option><option value="custom">Custom (the limits below)</option></select>
+      <fieldset><legend>Alarms</legend><div class="alarm-grid" id="s-alarms"></div></fieldset>
+    </div>
+    <div class="err" id="s-err"></div>
+    <div class="buttons"><button value="cancel" formnovalidate>Cancel</button><button class="primary" id="s-ok" value="ok">OK</button></div>
+  </form>
+</dialog>
+<dialog id="stereo">
+  <div class="help-head"><h2 id="stereo-title">Stereo image</h2><button id="stereo-close">Close</button></div>
+  <canvas id="stereo-scope"></canvas>
+  <div class="meter" id="stereo-phase"><span class="name">Phase</span><span class="track"><span class="fill"></span><span class="tick" style="left:50%"></span></span><span class="val">-</span></div>
+  <div id="stereo-readouts"></div>
+</dialog>
+<dialog id="helpdlg">
+  <div class="help-head"><h2>FM-Modmon-ms help</h2><button id="help-close">Close</button></div>
+  <div id="help-toc"></div>
+  <div id="help-body">loading&hellip;</div>
+</dialog>
+<div id="toast"></div>
+<div id="zoom"><img alt=""></div>
+
+<script>
+'use strict';
+const $ = (sel, el = document) => el.querySelector(sel);
+const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+let state = null, control = false, eventsSeq = -1, failures = 0;
+const panels = new Map();   // receiver number -> {el, parts...}
+
+// ---------------------------------------------------------------- helpers
+// Readouts arrive as the app's own rich text. Station-supplied text is in
+// it, so only text, <span>/<b>/<i> and a colour are let through.
+function setRich(el, html) {
+  if (el._html === html) return;
+  el._html = html;
+  const doc = new DOMParser().parseFromString('<body>' + (html || '') + '</body>', 'text/html');
+  const clean = (src, dst) => {
+    for (const n of src.childNodes) {
+      if (n.nodeType === Node.TEXT_NODE) dst.append(n.textContent);
+      else if (n.nodeType === Node.ELEMENT_NODE) {
+        const tag = n.tagName.toLowerCase();
+        const keep = ['span', 'b', 'i'].includes(tag);
+        const out = keep ? h(tag) : document.createDocumentFragment();
+        const m = keep && /color\s*:\s*(#[0-9a-f]{3,8}|[a-z]+)/i.exec(n.getAttribute('style') || '');
+        if (m) out.style.color = m[1];
+        clean(n, out);
+        dst.append(out);
+      }
+    }
+  };
+  const frag = document.createDocumentFragment();
+  clean(doc.body, frag);
+  el.replaceChildren(frag);
+  el.title = el.textContent;
+}
+function setText(el, text) { if (el.textContent !== text) el.textContent = text; }
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = 'none', 6000);
+}
+// Signed-in session: kept in this tab's sessionStorage, so closing the tab
+// signs out and a reload doesn't.
+const session = {
+  token: (() => { try { return sessionStorage.getItem('fm-modmon-ms-session') || ''; } catch (e) { return ''; } })(),
+  set(t) { this.token = t || ''; try { t ? sessionStorage.setItem('fm-modmon-ms-session', t) : sessionStorage.removeItem('fm-modmon-ms-session'); } catch (e) {} },
+};
+function headers(json) {
+  const hd = {'X-FM-Modmon': '1', 'X-FM-Modmon-Session': session.token};
+  if (json) hd['Content-Type'] = 'application/json';
+  return hd;
+}
+async function post(action, args = {}) {
+  try {
+    const r = await fetch('api/' + action, {method: 'POST', headers: headers(true), body: JSON.stringify(args)});
+    return [r.ok, await r.json().catch(() => ({error: 'HTTP ' + r.status}))];
+  } catch (e) { return [false, {error: 'FM-Modmon-ms is not answering'}]; }
+}
+async function api(action, args = {}) {
+  const [ok, body] = await post(action, args);
+  if (!ok) { toast(body.error || 'failed'); return false; }
+  poll(true);
+  return true;
+}
+function fillSelect(sel, items, value) {
+  // Rebuild only when the list changes, and never while it is open.
+  const sig = JSON.stringify(items);
+  if (sel._sig !== sig && document.activeElement !== sel) {
+    sel._sig = sig;
+    sel.replaceChildren(...items.map(it => { const o = h('option', null, it.label); o.value = JSON.stringify(it.value);
+                                             o.disabled = !it.enabled; o.title = it.tip || ''; return o; }));
+  }
+  if (document.activeElement !== sel) sel.value = JSON.stringify(value);
+}
+
+// ---------------------------------------------------------------- drawing
+function canvasCtx(cv) {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), hgt = Math.max(1, Math.round(r.height * dpr));
+  if (cv.width !== w || cv.height !== hgt) { cv.width = w; cv.height = hgt; }
+  const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return [c, r.width, r.height];
+}
+const MARKERS = [[19, 'pilot', '#69db7c'], [38, '38k', '#9aa0a6'], [57, 'RDS', '#8ab4f8'], [67, 'SCA', '#f0a35e'], [92, 'SCA', '#f0a35e']];
+function drawMpx(cv, db) {
+  const [c, w, hgt] = canvasCtx(cv);
+  c.font = '12px "Segoe UI", system-ui, sans-serif';
+  const left = c.measureText('-70 dB').width + 8, right = w - c.measureText('100').width / 2 - 6, top = 6, bottom = hgt - 20;
+  const x = k => left + (right - left) * k / 100;
+  const y = d => top + (bottom - top) * (0 - Math.min(Math.max(d, -70), 0)) / 70;
+  c.fillStyle = '#16171a'; c.fillRect(0, 0, w, hgt);
+  c.strokeStyle = '#3c4043'; c.lineWidth = 1;
+  for (let d = 0; d >= -70; d -= 10) { c.beginPath(); c.moveTo(left, y(d)); c.lineTo(right, y(d)); c.stroke(); }
+  c.fillStyle = '#9aa0a6'; c.textBaseline = 'middle'; c.textAlign = 'right';
+  for (let d = 0; d >= -70; d -= 10) c.fillText(d + ' dB', left - 6, y(d));
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  for (let k = 0; k <= 100; k += 10) c.fillText(String(k), x(k), bottom + 3);
+  if (db) {
+    c.beginPath(); c.moveTo(x(0), y(db[0]));
+    db.forEach((d, i) => c.lineTo(x((i + 1) * 0.5), y(d)));
+    const trace = new Path2D(); trace.moveTo(x(0), y(db[0])); db.forEach((d, i) => trace.lineTo(x((i + 1) * 0.5), y(d)));
+    c.lineTo(x(db.length * 0.5), bottom); c.lineTo(x(0), bottom); c.closePath();
+    c.fillStyle = 'rgba(79,179,191,0.24)'; c.fill();
+    c.strokeStyle = '#4fb3bf'; c.lineWidth = 1.2; c.stroke(trace);
+  }
+  c.textAlign = 'left'; c.textBaseline = 'top'; c.setLineDash([2, 3]); c.lineWidth = 1;
+  for (const [k, label, col] of MARKERS) {
+    c.strokeStyle = col; c.beginPath(); c.moveTo(x(k), top); c.lineTo(x(k), bottom); c.stroke();
+    c.fillStyle = col; c.fillText(label, x(k) + 4, top + 1);
+  }
+  c.setLineDash([]);
+}
+function drawGonio(cv, data, frames) {
+  // data: this update's [l, r] (or null); frames: earlier updates to draw fading behind it
+  const [c, cw, ch] = canvasCtx(cv), w = Math.min(cw, ch), x0 = (cw - w) / 2, y0 = (ch - w) / 2, m = w / 2, big = w > 200;
+  c.fillStyle = '#0b1a0b'; c.fillRect(0, 0, cw, ch);
+  c.strokeStyle = '#2a4a2a'; c.setLineDash([2, 3]); c.lineWidth = 1;
+  for (const [a, b, cc, d] of [[m, 0, m, w], [0, m, w, m], [0, 0, w, w], [w, 0, 0, w]]) { c.beginPath(); c.moveTo(x0 + a, y0 + b); c.lineTo(x0 + cc, y0 + d); c.stroke(); }
+  if (big) { c.beginPath(); c.arc(x0 + m, y0 + m, 0.45 * w, 0, 2 * Math.PI); c.stroke(); }
+  c.setLineDash([]);
+  c.fillStyle = '#6a8f6a'; c.font = (big ? '16px' : '12px') + ' "Segoe UI", system-ui, sans-serif'; c.textBaseline = 'top';
+  const pad = big ? 8 : 4;
+  c.fillText('L', x0 + pad, y0 + 2); c.textAlign = 'right'; c.fillText('R', x0 + w - pad, y0 + 2); c.textAlign = 'left';
+  c.fillText('M', x0 + m + 3, y0 + 2);
+  if (big) { c.textBaseline = 'bottom'; c.fillText('\u2212S', x0 + pad, y0 + m - 4); c.textAlign = 'right'; c.fillText('+S', x0 + w - pad, y0 + m - 4); c.textAlign = 'left'; }
+  const all = (frames || []).concat(data ? [data] : []);
+  if (!all.length) return;
+  const s2 = Math.SQRT2, ms = all.map(([l, r]) => [l.map((v, i) => (v + r[i]) / s2), l.map((v, i) => (r[i] - v) / s2)]);
+  let peak = 1e-4;
+  for (const [mid, side] of ms) for (let i = 0; i < mid.length; i++) peak = Math.max(peak, Math.abs(mid[i]), Math.abs(side[i]));
+  const k = 0.45 * w / peak, dot = big ? 2 : 1.4;
+  ms.forEach(([mid, side], f) => {
+    c.globalAlpha = ms.length > 1 ? 0.25 + 0.75 * (f + 1) / ms.length : 1;
+    c.fillStyle = '#66ff66';
+    for (let i = 0; i < mid.length; i++) c.fillRect(x0 + m + side[i] * k, y0 + m - mid[i] * k, dot, dot);
+  });
+  c.globalAlpha = 1;
+}
+// The large stereo-image view: the goniometer with afterglow (the last 10 updates),
+// the phase bar and the stereo readouts, following one receiver until closed.
+const stereo = {panel: null, frames: []};
+function openStereo(p) {
+  stereo.panel = p; stereo.frames = [];
+  $('#stereo').showModal();
+  if (p.r) followStereo(p, p.r);
+}
+function followStereo(p, r) {
+  setText($('#stereo-title'), `${r.title} – stereo image`);
+  drawGonio($('#stereo-scope'), r.gonio, stereo.frames);
+  if (r.gonio) { stereo.frames.push(r.gonio); if (stereo.frames.length > 9) stereo.frames.shift(); }
+  const phase = r.meters.find(m => m.name === 'Phase'), el = $('#stereo-phase');
+  if (phase) { el._fill = el.querySelector('.fill'); el._val = el.querySelector('.val'); updateMeter(el, phase); }
+  const pairs = (r.sections.find(([t]) => t === 'Stereo image') || [, , []])[2];
+  const box = $('#stereo-readouts');
+  if (!box._spans) {
+    box._spans = {};
+    for (const [k] of pairs) { const v = h('b'); box._spans[k] = v; box.append(h('span', null, k + ': '), v, h('span', null, '   ·   ')); }
+    if (box.lastChild) box.lastChild.remove();
+  }
+  for (const [k, html] of pairs) if (box._spans[k]) setRich(box._spans[k], html);
+}
+$('#stereo-close').onclick = () => $('#stereo').close();
+$('#stereo').addEventListener('close', () => { stereo.panel = null; stereo.frames = []; });
+
+// Label widths shared by all panels: readout labels (--kw) and meter names (--mw).
+function setLabelWidths(r) {
+  if (setLabelWidths.done) return;
+  const c = document.createElement('canvas').getContext('2d');
+  const font = getComputedStyle(document.body).font;
+  c.font = font;
+  const widest = names => Math.ceil(Math.max(...names.map(t => c.measureText(t).width)));
+  const root = document.documentElement.style;
+  root.setProperty('--kw', widest(r.sections.flatMap(([, , pairs]) => pairs.map(([k]) => k + ':'))) + 4 + 'px');
+  root.setProperty('--mw', widest(r.meters.map(m => m.name)) + 4 + 'px');
+  setLabelWidths.done = true;
+}
+function updateMeter(el, m) {
+  setText(el._val, m.text);
+  const span = m.hi - m.lo, pos = v => 100 * (Math.min(Math.max(v, m.lo), m.hi) - m.lo) / span;
+  if (m.value == null) { el._fill.style.display = 'none'; return; }
+  const zone = m.zones.find(z => m.value <= z[0]) || m.zones[m.zones.length - 1];
+  const a = pos(m.origin), b = pos(m.value);
+  Object.assign(el._fill.style, {display: '', left: Math.min(a, b) + '%', width: Math.max(Math.abs(b - a), 1) + '%', background: zone[1]});
+}
+
+// ---------------------------------------------------------------- one receiver panel
+function buildPanel(r) {
+  const n = r.receiver, p = {n};
+  const el = p.el = h('div', 'panel');
+  // station selector, settings, remove
+  const top = h('div', 'top');
+  p.station = h('select', 'station');
+  p.station.onchange = () => api('select', {receiver: n, freq: JSON.parse(p.station.value)}).then(() => p.station.blur());
+  p.gear = h('button', null, '⚙'); p.gear.title = 'Settings for this receiver';
+  p.gear.onclick = () => openSettings(n);
+  p.remove = h('button', null, '✕'); p.remove.title = 'Remove this receiver';
+  p.remove.onclick = () => confirm(`Remove receiver ${n} (${p.title})?`) && api('remove', {receiver: n});
+  top.append(p.station, p.gear, p.remove);
+  el.append(top);
+  // display card: PS / RT / RT+ / IBOC / PSD / SIS / RadioDNS, logo and album art
+  const disp = h('div', 'card'), grid = h('div', 'text-grid');
+  p.ps = h('div', 'ps wide', '--------'); p.rt = h('div', 'rt wide');
+  const row = (n, title, v) => {   // explicit rows: the images span rows beside them
+    const l = h('div', 'lbl', title);
+    l.style.gridRow = v.style.gridRow = String(n); l.style.gridColumn = '1';
+    grid.append(l, v);
+    if (['IBOC', 'PSD', 'SIS'].includes(title)) p.ibocRows.push(l, v);   // shown only with IBOC
+    if (title === 'RadioDNS') p.rdnsRow = [l, v];                        // shown only while RadioDNS works
+  };
+  p.ibocRows = [];
+  row(1, 'PS', p.ps);
+  row(2, 'RT', p.rt);
+  p.lines = {};
+  r.lines.forEach(([title], i) => {
+    const v = h('div', i === 0 ? 'line wide' : 'line', '-');
+    row(3 + i, title, v);
+    p.lines[title] = v;
+    if (i === 1) {  // logo and album art beside IBOC..RadioDNS, as in the app
+      for (const kind of ['logo', 'art']) {
+        const box = h('div', 'media'); box.style.gridColumn = kind === 'logo' ? '3' : '4';
+        const img = h('img'); img.alt = kind === 'logo' ? 'Station logo' : 'Album art'; img.title = img.alt;
+        img.onclick = () => { $('#zoom img').src = img.src; $('#zoom').style.display = 'flex'; };
+        box.append(img); box.style.display = 'none'; grid.append(box);
+        p[kind] = {box, img, ver: null};
+      }
+    }
+  });
+  disp.append(grid);
+  el.append(disp);
+  // status row
+  const status = h('div', 'status-row');
+  p.alarm = h('span', 'pill ok', '●  No alarms');
+  p.dyn = h('span', 'pill dyn', 'DYNAMIC PS'); p.dyn.title = 'The PS has changed 3 or more times in the last 30 s (scrolling or block text)';
+  p.status = h('span', 'feed');
+  status.append(p.alarm, p.dyn, h('span', 'grow'), p.status);
+  el.append(status);
+  // level meters
+  const lv = h('div', 'card'); lv.append(h('div', 'card-title', 'Levels'));
+  const mg = h('div', 'meters'); p.meters = [];
+  for (const m of r.meters) {
+    const row = h('div', 'meter'), track = h('div', 'track'), fill = h('div', 'fill');
+    track.append(fill);
+    for (const t of m.ticks) { const tk = h('div', 'tick'); tk.style.left = (100 * (t - m.lo) / (m.hi - m.lo)) + '%'; track.append(tk); }
+    row._fill = fill; row._val = h('span', 'val', '-');
+    row.append(h('span', 'name', m.name), track, row._val);
+    mg.append(row); p.meters.push(row);
+  }
+  lv.append(mg); el.append(lv);
+  // sections, in the app's order
+  p.values = {};
+  setLabelWidths(r);
+  for (const [title, cols, pairs] of r.sections) {
+    const card = h('div', 'card'), head = h('div', 'card-head');
+    head.append(h('span', 'card-title', title));
+    if (title === 'Loudness') {
+      const b = h('button', null, 'reset integrated'); b.onclick = () => api('reset_integrated', {receiver: n});
+      p.ctrl = (p.ctrl || []).concat(b); head.append(b);
+    }
+    card.append(head);
+    if (!cols) { p.mpx = h('canvas', 'mpx'); card.append(p.mpx); el.append(card); continue; }
+    // one label width for every section (--kw), so values line up down the panel;
+    // long readouts ('wide') get a full-width row at the end of their section
+    const vg = h('div', 'values'); vg.style.gridTemplateColumns = Array(cols).fill('var(--kw) minmax(0, 1fr)').join(' ');
+    for (const [k, , wide] of pairs) {
+      const label = h('span', 'k', k + ':'), v = h('span', 'v', '-');
+      if (wide) { label.style.gridColumn = '1'; v.style.gridColumn = '2 / -1'; }
+      vg.append(label, v); p.values[k] = v;
+    }
+    if (title === 'Stereo image') {
+      const row = h('div', 'stereo'); p.gonio = h('canvas', 'gonio'); row.append(vg, p.gonio); card.append(row);
+      p.gonio.title = 'Click for a larger view';
+      p.gonio.onclick = () => openStereo(p);
+    } else card.append(vg);
+    el.append(card);
+  }
+  // audio: source (shared with the app) and the browser's MP3 player
+  const ar = h('div', 'audio-row');
+  p.source = h('select'); p.source.title = 'Audio source (the app and this player)';
+  p.source.onchange = () => api('source', {receiver: n, source: JSON.parse(p.source.value)}).then(() => p.source.blur());
+  // The player gets its stream only once Listen is pressed (browsers probe
+  // any src they're given), and shows while listening, for volume and pause.
+  p.listen = h('button', null, '▶  Listen');
+  p.listen.title = 'Play this receiver in this browser (a few seconds behind the air)';
+  p.format = h('select'); p.format.title = 'Audio format for this browser (remembered)';
+  p.format.onchange = () => {
+    setAudioFormat(JSON.parse(p.format.value));
+    if (p.listening) { p.stop(); p.listen.onclick(); }   // switch the stream now
+  };
+  // The player: our own controls over a hidden <audio>, styled like the app.
+  // A live stream can't pause and resume, so Listen / Stop starts and ends it.
+  p.player = h('audio'); p.player.preload = 'none';
+  p.listening = false;
+  p.live = h('span', 'live');
+  p.mute = h('button', 'mute'); p.mute.title = 'Mute';
+  p.vol = h('input', 'vol'); p.vol.type = 'range'; p.vol.min = 0; p.vol.max = 100; p.vol.title = 'Volume';
+  p.mute.onclick = () => setVolume(volume.level, !volume.muted);
+  p.vol.oninput = () => setVolume(+p.vol.value, false);
+  const playerUi = h('span', 'player'); playerUi.append(p.live, p.mute, p.vol);
+  p.stop = () => {
+    if (!p.listening) return;
+    p.listening = false;
+    p.player.pause(); p.player.removeAttribute('src'); p.player.load();  // closes the stream
+    p.listen.classList.remove('on'); setText(p.listen, '▶  Listen');
+    playerUi.classList.remove('on');
+    clearInterval(p.liveTimer);
+  };
+  p.listen.onclick = () => {
+    if (p.listening) { p.stop(); return; }
+    for (const q of panels.values()) if (q !== p) q.stop();  // one at a time
+    p.listening = true; p.since = null; p.status = 'connecting…';
+    p.listen.classList.add('on'); setText(p.listen, '■  Stop');
+    playerUi.classList.add('on');
+    applyVolume(p);
+    const src = p.player.src = `audio/${n}.${audioFormat}?t=${Date.now()}`;
+    p.player.play().catch(e => {
+      // Stop (or a format change) while it was still buffering cancels the start:
+      // that's on purpose, not a fault, so say nothing.
+      if (e.name === 'AbortError' || !p.listening || !p.player.src.endsWith(src)) return;
+      p.stop(); toast(`receiver ${n}: ${e.message}`);
+    });
+    showLive(p);
+    clearInterval(p.liveTimer);
+    p.liveTimer = setInterval(() => showLive(p), 500);   // the LIVE clock, whatever the data rate
+  };
+  p.player.addEventListener('playing', () => { p.since = p.since || Date.now(); p.status = null; showLive(p); });
+  p.player.addEventListener('waiting', () => { if (p.listening) { p.status = 'buffering…'; showLive(p); } });
+  p.player.addEventListener('error', () => { if (p.listening) { p.stop(); toast(`receiver ${n}: the audio stream failed`); } });
+  p.note = h('span', 'note');
+  ar.append(p.source, p.format, p.listen, playerUi, p.note);
+  applyVolume(p);
+  el.append(ar);
+  p.ctrl = (p.ctrl || []).concat([p.station, p.gear, p.remove, p.source]);
+  return p;
+}
+
+function updatePanel(p, r) {
+  p.r = r; p.title = r.title;
+  fillSelect(p.station, r.stations, r.freq);
+  fillSelect(p.source, r.sources, r.source);
+  for (const c of p.ctrl) c.disabled = !control;
+  p.remove.disabled = !control || !r.removable;
+  setText(p.ps, r.ps);
+  setText(p.rt, r.rt);
+  p.dyn.style.display = r.ps_dynamic ? '' : 'none';
+  for (const [title, html] of r.lines) setRich(p.lines[title], html);
+  for (const kind of ['logo', 'art']) {
+    const m = p[kind], ver = r.images[kind];
+    if (ver !== m.ver) {
+      m.ver = ver;
+      m.box.style.display = ver ? 'flex' : 'none';
+      if (ver) m.img.src = `img/${p.n}/${kind}?v=${ver}`;
+    }
+  }
+  const alarms = r.alarms;
+  setText(p.alarm, alarms.length ? '⚠  ' + alarms.join(', ') : '●  No alarms');
+  p.alarm.className = 'pill ' + (alarms.length ? 'alarm' : 'ok');
+  setText(p.status, r.status + (r.listeners ? ` · ${r.listeners} web listener${r.listeners === 1 ? '' : 's'}` : ''));
+  for (const w of p.ibocRows) w.style.display = r.iboc_lines ? '' : 'none';
+  for (const w of p.rdnsRow || []) w.style.display = r.rdns_line ? '' : 'none';
+  r.meters.forEach((m, i) => updateMeter(p.meters[i], m));
+  for (const [, , pairs] of r.sections) for (const [k, html] of pairs) setRich(p.values[k], html);
+  drawMpx(p.mpx, r.mpx);
+  drawGonio(p.gonio, r.gonio);
+  if (stereo.panel === p) followStereo(p, r);
+  const iboc = r.source.startsWith('iboc');
+  const fmts = playableFormats(), can = fmts.length > 0 && !iboc;
+  fillSelect(p.format, fmts.map(f => ({value: f.key, label: f.label, enabled: true})), audioFormat);
+  p.format.style.display = can ? '' : 'none';
+  if (!can) p.stop();
+  p.listen.style.display = can ? '' : 'none';
+  showLive(p);
+  setText(p.note, !state.audio_formats.length ? 'no audio encoder on the FM-Modmon-ms PC: audio plays there only'
+                  : !fmts.length ? 'this browser can play none of the audio formats offered'
+                  : iboc ? 'IBOC audio plays on the FM-Modmon-ms PC only' : '');
+}
+
+// Player volume: one setting for all receivers, remembered in this browser.
+const volume = (() => {
+  try { return Object.assign({level: 80, muted: false}, JSON.parse(localStorage.getItem('fm-modmon-ms-volume') || '{}')); }
+  catch (e) { return {level: 80, muted: false}; }
+})();
+function setVolume(level, muted) {
+  volume.level = Math.max(0, Math.min(100, level)); volume.muted = muted;
+  try { localStorage.setItem('fm-modmon-ms-volume', JSON.stringify(volume)); } catch (e) {}
+  for (const q of panels.values()) applyVolume(q);
+}
+function applyVolume(p) {
+  p.player.volume = volume.level / 100; p.player.muted = volume.muted;
+  if (document.activeElement !== p.vol) p.vol.value = volume.level;
+  p.vol.style.setProperty('--fill', (volume.muted ? 0 : volume.level) + '%');
+  setText(p.mute, volume.muted || !volume.level ? '\u{1F507}' : volume.level < 50 ? '\u{1F509}' : '\u{1F50A}');
+  p.mute.title = volume.muted ? 'Unmute' : 'Mute';
+}
+function showLive(p) {
+  if (!p.listening) { setText(p.live, ''); p.live.className = 'live'; return; }
+  if (p.status || !p.since) { setText(p.live, p.status || 'connecting…'); p.live.className = 'live wait'; return; }
+  const s = Math.floor((Date.now() - p.since) / 1000);
+  setText(p.live, `● LIVE ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`);
+  p.live.className = 'live on';
+}
+
+// Browser audio format: one choice for all receivers, remembered in this browser.
+let audioFormat = (() => { try { return localStorage.getItem('fm-modmon-ms-format') || ''; } catch (e) { return ''; } })();
+function setAudioFormat(key) {
+  audioFormat = key;
+  try { localStorage.setItem('fm-modmon-ms-format', key); } catch (e) {}
+  for (const q of panels.values()) if (document.activeElement !== q.format) q.format.value = JSON.stringify(key);
+}
+const canPlay = {};
+function playableFormats() {
+  const probe = playableFormats.probe || (playableFormats.probe = document.createElement('audio'));
+  const fmts = (state.audio_formats || []).filter(f => (canPlay[f.canplay] ??= probe.canPlayType(f.canplay) !== ''));
+  if (fmts.length && !fmts.some(f => f.key === audioFormat)) audioFormat = fmts[0].key;   // the server's first, or what's left
+  return fmts;
+}
+
+// ---------------------------------------------------------------- settings dialog
+function openSettings(n) {
+  const p = panels.get(n); if (!p) return;
+  const r = p.r, s = r.settings, dlg = $('#settings');
+  $('#settings-title').textContent = `Receiver ${n} settings`;
+  $('#s-name').value = s.name; $('#s-deemph').value = String(s.deemphasis_us); $('#s-stereo').value = s.stereo;
+  $('#s-volume').value = s.volume_pct; $('#s-pty').value = s.pty_names; $('#s-pi').value = s.expected_pi;
+  const feedsOn = r.default_port != null;
+  $('#s-feed').checked = s.rds_feed; $('#s-feed').disabled = !feedsOn;
+  $('#s-feed-label').textContent = feedsOn ? 'Serve raw RDS groups over TCP' : 'RDS feeds are off (--rds-port 0)';
+  $('#s-port').value = r.feed_port || r.default_port || 7711;
+  $('#s-port').title = feedsOn ? `Default ${r.default_port}` : '';
+  const syncPort = () => { $('#s-port').disabled = !feedsOn || !$('#s-feed').checked; };
+  $('#s-feed').onchange = syncPort; syncPort();
+  const ag = $('#s-alarms'); ag.replaceChildren();
+  // Every limit is editable. A rule set fills in its limits; editing one makes them custom.
+  const R = state.rules, spec = Object.fromEntries(R.limits.map(l => [l[0], l]));
+  const field = (id, lo, hi, step, unit) => {
+    const num = h('input'); num.type = 'number'; num.min = lo; num.max = hi; num.step = step; num.id = 's-' + id;
+    num.style.width = '64px';
+    return unit ? [num, ' ' + unit] : [num];
+  };
+  const limit = id => { const [, , unit, lo, hi, step] = spec[id]; const f = field(id, lo, hi, step, unit);
+                        f[0].dataset.limit = id; return f; };
+  const rows = {
+    CARRIER: ['below', field('min_snr_db', 0, 60, 'any', 'dB S/N')],
+    SILENCE: ['below', [...field('silence_lufs', -70, -10, 'any', 'LUFS'), ' for ', ...field('silence_s', 2, 300, 1, 's')]],
+    OVERMOD: ['above', [...limit('mod_base_pct'), ' + ', ...limit('mod_per_sub'), ' \u00d7 subcarriers, max ', ...limit('mod_max_pct')]],
+    PILOT_SPEC: ['outside', [...limit('pilot_min_pct'), ' \u2013 ', ...limit('pilot_max_pct'), ' or 19 kHz \u00b1 ', ...limit('pilot_tol_hz')]],
+    SUBCARRIERS: ['above', [...limit('sub_total_pct'), ' total, or ', ...limit('sub_high_pct'), ' above 75 kHz']],
+    FREQUENCY: ['beyond', ['\u00b1 ', ...limit('freq_tol_hz')]],
+  };
+  for (const [name, desc] of state.alarm_defs) {
+    const lab = h('label'); const cb = h('input'); cb.type = 'checkbox'; cb.dataset.alarm = name; cb.checked = s.alarms[name] !== false;
+    lab.append(cb, ' ' + desc[0].toUpperCase() + desc.slice(1)); ag.append(lab);
+    const row = rows[name];
+    if (!row) { ag.append(h('span'), h('span')); continue; }
+    const box = h('span', 'limit-row'); box.append(...row[1]);
+    ag.append(h('span', null, row[0]), box);
+  }
+  for (const id of ['min_snr_db', 'silence_lufs', 'silence_s']) $('#s-' + id).value = s[id];
+  const limitInputs = [...ag.querySelectorAll('input[data-limit]')];
+  const fillLimits = values => { for (const i of limitInputs) i.value = values[i.dataset.limit]; };
+  const rulesSel = $('#s-rules');
+  rulesSel.value = s.rules || '';
+  const preset = () => rulesSel.value === 'custom' ? null : R.presets[rulesSel.value || R.by_country];
+  fillLimits(preset() || s);
+  rulesSel.onchange = () => { if (preset()) fillLimits(preset()); };
+  for (const i of limitInputs) i.oninput = () => { rulesSel.value = 'custom'; };
+  $('#s-err').textContent = '';
+  dlg.returnValue = '';
+  dlg.onclose = null;
+  $('#s-ok').onclick = async ev => {
+    ev.preventDefault();
+    if (!$('#settings-form').reportValidity()) return;
+    const num = id => Number($('#s-' + id).value);
+    const settings = {
+      name: $('#s-name').value.trim(), deemphasis_us: num('deemph'), stereo: $('#s-stereo').value,
+      volume_pct: num('volume'), pty_names: $('#s-pty').value, expected_pi: $('#s-pi').value.trim().toUpperCase(),
+      rds_feed: $('#s-feed').checked, rds_port: num('port'),
+      alarms: Object.fromEntries([...ag.querySelectorAll('input[data-alarm]')].map(cb => [cb.dataset.alarm, cb.checked])),
+      min_snr_db: num('min_snr_db'), silence_lufs: num('silence_lufs'), silence_s: num('silence_s'), rules: $('#s-rules').value,
+      ...Object.fromEntries(R.limits.map(([id]) => [id, num(id)])),
+    };
+    const [ok, body] = await post('settings', {receiver: n, settings});
+    if (ok) { dlg.close(); poll(true); } else $('#s-err').textContent = body.error || 'not saved';
+  };
+  dlg.showModal();
+}
+
+// ---------------------------------------------------------------- page
+// The lock button: "View only" until signed in (click for the password),
+// green "Controls on" when signed in (click to sign out).
+const lock = $('#lock'), signin = $('#signin'), pw = $('#signin input'), signinErr = $('#signin .err');
+function closeSignin() { signin.classList.remove('open'); pw.value = ''; signinErr.textContent = ''; }
+async function login() {
+  if (!pw.value) return;
+  const [ok, body] = await post('login', {password: pw.value});
+  if (ok && body.token) { session.set(body.token); closeSignin(); poll(true); }
+  else { signinErr.textContent = body.error || 'not signed in'; pw.select(); }
+}
+lock.onclick = async () => {
+  const a = state && state.access;
+  if (!a || !a.password) return;
+  if (a.control) {                                  // signed in: sign out
+    await post('logout'); session.set(''); poll(true);
+  } else if (signin.classList.toggle('open')) {
+    pw.focus();
+  } else closeSignin();
+};
+$('#signin button').onclick = login;
+pw.onkeydown = e => { if (e.key === 'Enter') login(); else if (e.key === 'Escape') closeSignin(); };
+document.addEventListener('click', e => { if (!$('#access').contains(e.target)) closeSignin(); });
+
+function renderAccess(a) {
+  if (a.password && !a.control && session.token) session.set('');  // the session ended on the server
+  const on = a.control;
+  lock.classList.toggle('on', on);
+  lock.disabled = !a.password;   // without a password nothing to sign in or out of
+  setText(lock, on ? (a.password ? '\u{1F513}  Controls on' : '\u{1F513}  Controls on (this PC)') : '\u{1F512}  View only');
+  lock.title = on ? (a.password ? 'Signed in: click to sign out' : 'Controls work here because this browser is on the FM-Modmon-ms PC')
+             : a.password ? 'Click to sign in and use the controls'
+             : 'The controls work in a browser on the FM-Modmon-ms PC (http://localhost:' + location.port + '/), or from anywhere when FM-Modmon-ms runs with --web-password';
+  if (on) closeSignin();
+}
+
+function render(s) {
+  state = s; control = s.access.control;
+  renderAccess(s.access);
+  document.title = s.receivers.map(r => r.title).join(' · ') + ' – FM-Modmon-ms';
+  const chips = $('#chips'), sig = JSON.stringify(s.chips);
+  if (chips._sig !== sig) { chips._sig = sig; chips.replaceChildren(...s.chips.map(c => h('span', 'chip', c))); chips.style.display = 'contents'; }
+  const cal = $('#cal');
+  cal.disabled = !control || s.calibrating;
+  setText(cal, s.calibrating ? '⟲  Calibrating…' : '⟲  Recalibrate gain');
+  const add = $('#add');
+  add.disabled = !control || !s.add.enabled; add.title = s.add.tip || '';
+  // panels: add new ones in receiver order, drop removed ones
+  const want = new Set(s.receivers.map(r => r.receiver));
+  for (const [n, p] of panels) if (!want.has(n)) { p.stop(); p.el.remove(); panels.delete(n); }
+  const host = $('#panels');
+  s.receivers.forEach((r, i) => {
+    let p = panels.get(r.receiver);
+    if (!p) { p = buildPanel(r); panels.set(r.receiver, p); }
+    if (host.children[i] !== p.el) host.insertBefore(p.el, host.children[i] || null);
+    updatePanel(p, r);
+  });
+  if (s.events_seq !== eventsSeq) {
+    eventsSeq = s.events_seq;
+    fetch('events.json').then(r => r.json()).then(ev => {
+      const log = $('#log'); log.textContent = ev.slice().reverse().join('\n') || 'no events';
+    }).catch(() => {});
+  }
+}
+
+let polling = false;
+async function poll(now) {
+  if (polling && !now) return;
+  polling = true;
+  try {
+    const sent = session.token;
+    const r = await fetch('state.json', {cache: 'no-store', headers: {'X-FM-Modmon-Session': sent}});
+    const s = await r.json();
+    failures = 0; setText($('#conn'), '');
+    document.body.style.opacity = '';
+    // An answer to a request sent before signing in or out says nothing about
+    // the sign-in now: drop it (the next one, a tenth of a second on, will do).
+    if (s.ready && sent === session.token) render(s);
+  } catch (e) {
+    if (++failures > 5) { setText($('#conn'), 'FM-Modmon-ms is not answering…'); document.body.style.opacity = '0.6'; }
+  } finally { polling = false; }
+}
+$('#add').onclick = () => api('add');
+// Help: plain text from help.json, put on the page as text (never as HTML)
+$('#help-btn').onclick = async () => {
+  const dlg = $('#helpdlg');
+  dlg.showModal();
+  if (dlg._loaded) return;
+  try {
+    const {sections} = await (await fetch('help.json', {cache: 'no-store'})).json();
+    const body = $('#help-body'), toc = $('#help-toc');
+    body.replaceChildren(); toc.replaceChildren();
+    sections.forEach(([title, kind, text], i) => {
+      const hd = h('h3', null, title); body.append(hd);
+      const link = h('a', null, title); link.onclick = () => hd.scrollIntoView({behavior: 'smooth'}); toc.append(link);
+      if (kind === 'pre') body.append(h('pre', null, text));
+      else for (const par of text.split(/\n\s*\n/)) body.append(h('p', null, par.replace(/\s*\n\s*/g, ' ')));
+    });
+    dlg._loaded = true;
+  } catch (e) { $('#help-body').textContent = 'FM-Modmon-ms is not answering'; }
+};
+$('#help-close').onclick = () => $('#helpdlg').close();
+$('#cal').onclick = () => confirm('Recalibrate the RSP1A gain now? Every receiver hears gain steps for a few seconds, and the meters restart.') && api('recalibrate');
+$('#zoom').onclick = () => $('#zoom').style.display = 'none';
+// 10 updates a second while the page is visible (as the app), one a second in the background
+// (browsers slow a background tab's timers to about once a second, so go by elapsed time)
+let lastPoll = 0;
+setInterval(() => {
+  if (!document.hidden || Date.now() - lastPoll >= 1000) { lastPoll = Date.now(); poll(); }
+}, 100);
+poll();
+window.addEventListener('resize', () => { for (const p of panels.values()) if (p.r) { drawMpx(p.mpx, p.r.mpx); drawGonio(p.gonio, p.r.gonio); } });
+</script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+# Local settings and run-time output
+fm-modmon-ms_config.json
+*_config.json
+logs/
+*.log
+
+# Secrets
+.env
+.env.*
+
+# Recordings and captures
+*.wav
+*.mp3
+*.aac
+*.opus
+*.flac
+*.iq
+*.cs16
+*.cf32
+*.f32
+*.raw
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
