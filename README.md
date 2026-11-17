@@ -61,6 +61,23 @@ Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout.
 - Optional: **ffmpeg** on the PATH for web audio (MP3, AAC, Opus, FLAC)
 - Optional: **nrsc5** on the PATH (or in a sibling `../nrsc5*/build/src/` folder) for IBOC
 
+## Installing on a new PC
+
+`installer\build.ps1` builds one setup exe (about 700 MB) that brings a fresh Windows PC up to
+a running monitor: radioconda, the SDRplay API (the RSP1A's USB driver and service), the
+SoapySDRPlay3 module, nrsc5, ffmpeg (through winget, needs internet) and the monitor, with Start
+menu and desktop shortcuts. It skips what's already installed, then asks for the RSP1A to be
+plugged in and checks it's found. It needs [NSIS](https://nsis.sourceforge.io/), the radioconda
+and SDRplay API installers (newest in Downloads, or `-Radioconda` / `-Sdrplay`), and the
+SoapySDRPlay3 module and nrsc5 built beside this folder:
+
+```bash
+powershell -ExecutionPolicy Bypass -File installer\build.ps1
+```
+
+The monitor installs to `C:\Program Files\FM-Modmon-ms`; running setup again updates it and
+keeps its settings. Uninstalling leaves radioconda, the SDRplay API and ffmpeg in place.
+
 ## Running
 
 ```bash
