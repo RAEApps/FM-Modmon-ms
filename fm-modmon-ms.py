@@ -5227,10 +5227,13 @@ class WebView:
                 fut = concurrent.futures.Future()
                 view.commands.put((path[len('/api/'):], args, fut))
                 try:
-                    result = fut.result(timeout=20)
-                except concurrent.futures.TimeoutError:
-                    self._json(504, {'error': 'the app did not answer'})
-                    return
+                    try:
+                        result = fut.result(timeout=20)
+                    except concurrent.futures.TimeoutError:
+                        if fut.cancel():  # not started: it won't run later, after the page was told it failed
+                            self._json(504, {'error': 'the app did not answer'})
+                            return
+                        result = fut.result()  # it had just started: report how it went
                 except ValueError as e:
                     self._json(400, {'error': str(e)})
                     return
