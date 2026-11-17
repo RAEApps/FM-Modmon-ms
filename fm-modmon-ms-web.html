@@ -79,6 +79,8 @@ header .grow { flex: 1; }
       font: 13px Consolas, monospace; color: #cfe8cf; white-space: pre; overflow: hidden; min-height: 26px; }
 .media { grid-row: 4 / span 4; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
 .media img { max-width: 88px; max-height: 88px; border-radius: 4px; cursor: zoom-in; }
+.media { position: relative; }
+.media a { position: absolute; right: 2px; bottom: 2px; padding: 0 4px; border-radius: 4px; background: rgba(0,0,0,.65); color: var(--accent); text-decoration: none; font-size: 12px; }
 
 .status-row { display: flex; align-items: center; gap: 6px; }
 .pill { border-radius: 10px; padding: 2px 10px; font-weight: 600; white-space: nowrap; }
@@ -227,6 +229,7 @@ canvas.gonio { cursor: pointer; }
       <label class="k" for="s-pty">PTY names:</label>
       <select id="s-pty"><option value="rbds">RBDS (North America)</option><option value="rds">RDS (Europe, elsewhere)</option></select>
       <label class="k" for="s-pi">Expected PI:</label><input id="s-pi" maxlength="4" placeholder="optional, e.g. C6B2" pattern="[0-9A-Fa-f]{0,4}">
+      <label class="k" for="s-names">Data service names:</label><input id="s-names" maxlength="200" placeholder="optional, e.g. 7A=Alert FM, SCA67=Muzak" title="Names for this station's data services, by RDS group type (7A, 9A, ...) or SCA67 / SCA92">
       <label class="k">RDS feed:</label>
       <span><label><input type="checkbox" id="s-feed"> <span id="s-feed-label">Serve raw RDS groups over TCP</span></label>
             &nbsp; TCP port <input id="s-port" type="number" min="1024" max="65535" style="width:90px"></span>
@@ -475,6 +478,10 @@ function buildPanel(r) {
         img.onclick = () => { $('#zoom img').src = img.src; $('#zoom').style.display = 'flex'; };
         box.append(img); box.style.display = 'none'; grid.append(box);
         p[kind] = {box, img, ver: null};
+        if (kind === 'art') {  // a RadioDNS slide's click-through link
+          const a = p.artLink = h('a', null, '↗'); a.target = '_blank'; a.rel = 'noopener noreferrer';
+          a.style.display = 'none'; box.append(a);
+        }
       }
     }
   });
@@ -605,6 +612,11 @@ function updatePanel(p, r) {
       if (ver) m.img.src = `img/${p.n}/${kind}?v=${ver}`;
     }
   }
+  const link = /^https?:\/\//.test(r.art_link || '') ? r.art_link : '';
+  if (p.artLink.getAttribute('href') !== link) {
+    p.artLink.href = link; p.artLink.title = 'Open ' + link;
+    p.artLink.style.display = link ? '' : 'none';
+  }
   const alarms = r.alarms;
   setText(p.alarm, alarms.length ? '⚠  ' + alarms.join(', ') : '●  No alarms');
   p.alarm.className = 'pill ' + (alarms.length ? 'alarm' : 'ok');
@@ -676,6 +688,7 @@ function openSettings(n) {
   $('#settings-title').textContent = `Receiver ${n} settings`;
   $('#s-name').value = s.name; $('#s-deemph').value = String(s.deemphasis_us); $('#s-stereo').value = s.stereo;
   $('#s-volume').value = s.volume_pct; $('#s-pty').value = s.pty_names; $('#s-pi').value = s.expected_pi;
+  $('#s-names').value = s.service_names || '';
   const feedsOn = r.default_port != null;
   $('#s-feed').checked = s.rds_feed; $('#s-feed').disabled = !feedsOn;
   $('#s-feed-label').textContent = feedsOn ? 'Serve raw RDS groups over TCP' : 'RDS feeds are off (--rds-port 0)';
@@ -728,6 +741,7 @@ function openSettings(n) {
     const settings = {
       name: $('#s-name').value.trim(), deemphasis_us: num('deemph'), stereo: $('#s-stereo').value,
       volume_pct: num('volume'), pty_names: $('#s-pty').value, expected_pi: $('#s-pi').value.trim().toUpperCase(),
+      service_names: $('#s-names').value.trim(),
       rds_feed: $('#s-feed').checked, rds_port: num('port'),
       alarms: Object.fromEntries([...ag.querySelectorAll('input[data-alarm]')].map(cb => [cb.dataset.alarm, cb.checked])),
       min_snr_db: num('min_snr_db'), silence_lufs: num('silence_lufs'), silence_s: num('silence_s'), rules: $('#s-rules').value,

@@ -73,5 +73,54 @@ for title, kw, expect in cases:
         ok = got == sorted(want)
         bad += not ok
         print(f'   {"ok   " if ok else "WRONG"} {rules:<7} alarms {str(got or "none"):<16} expected {str(want or "none"):<16} limit shown: {shown}')
+
+
+def check(title, got, want):
+    global bad
+    ok = got == want
+    bad += not ok
+    print(f'   {"ok   " if ok else "WRONG"} {title}: {got!r}' + ('' if ok else f', expected {want!r}'))
+
+
+print('--- data services and RT+ Alarm (raw groups, no SDR)')
+rm.time = fake
+try:
+    rs = rm.RdsState()
+    rs._decode(0xC6B2, (0 << 11) | 0, 0, 0x4142)                    # 0A: programme, not data
+    rs._decode(0xC6B2, (14 << 11), 0x1234, 0x5678)                  # 7A, nothing announced on it
+    rs._decode(0xC6B2, (2 << 11) | 0x05, 0x03A1, 0)                 # 1A v0: paging codes 05, OPC 3, ECC A1
+    rs._decode(0xC6B2, (2 << 11) | 0x05, 0x22B4, 0)                 # 1A v2: paging ID 2B4
+    rs._decode(0xC6B2, (26 << 11), 0, 0)                            # 13A: enhanced paging
+    rs._decode(0xC6B2, (6 << 11) | 22, 0, 0x4BD7)                   # 3A: RT+ on 11A
+    rs._decode(0xC6B2, (6 << 11) | 18, 0, 0x1234)                   # 3A: ODA 1234 on 9A
+    rs._decode(0xC6B2, (18 << 11), 0, 0)                            # 9A: that ODA, not EWS
+    text = 'EVACUATE NOW'
+    for seg in range(4):                                             # 2A: RadioText, then an RT+ Alarm tag
+        chunk = (text + '\r').ljust(16)[seg * 4:seg * 4 + 4].encode('latin-1')
+        rs._decode(0xC6B2, (4 << 11) | seg, (chunk[0] << 8) | chunk[1], (chunk[2] << 8) | chunk[3])
+    n = len(text) - 1
+    rs._decode(0xC6B2, (22 << 11) | (1 << 4) | (1 << 3) | (27 >> 3), ((27 & 7) << 13) | (n << 1), 0)
+    snap = rs.snapshot()
+    check('services seen', sorted(snap['data']), ['ODA 1234', 'Paging (13A)', 'Paging (7A)'])
+    check('1A paging codes / OPC / paging ID / ECC', (snap['rp_codes'], snap['opc'], snap['paging_id'], snap['ecc']),
+          (5, 3, 0x2B4, 0xA1))
+    check('service names', rm.parse_service_names(' 7a = Alert FM; sca67=Muzak, bad, 9A='),
+          {'7A': 'Alert FM', 'SCA67': 'Muzak'})
+    check('saved names normalised', rm.ReceiverSettings.from_dict({'service_names': '7a=Alert FM;x'}).service_names,
+          '7A=Alert FM')
+    check('RT+ Alarm', snap['rtplus'], [(27, text)])
+
+    ds = rm.DataServices()
+    for _ in range(int(rm.DATA_STEADY_S) + 1):                      # paging on air for 5 min: steady
+        clock['t'] += 1.0
+        lost = ds.update({'Paging (7A)': '7A', 'EWS (9A)': '9A'} if clock['t'] % 600 < 60 else
+                         {'Paging (7A)': '7A'})                    # EWS only in a short burst
+    check('nothing lost while on air', lost, [])
+    clock['t'] += 1.0
+    check('steady service gone', ds.update({}), ['Paging (7A)'])
+    check('burst service never alarms', 'EWS (9A)' in ds.steady, False)
+finally:
+    rm.time = real_time
+
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
 sys.exit(1 if bad else 0)

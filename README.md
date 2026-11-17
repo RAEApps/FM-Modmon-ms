@@ -19,7 +19,8 @@ Per station, refreshed 10× a second:
 - **RDS** – PI, PS, RT, RT+, PTY / PTYN, flags, AF, ECC, ODA, CT, group rate and loss, group types
 - **IBOC** – via [nrsc5](https://github.com/theori-io/nrsc5): status, MER/BER, PSD, SIS,
   station logo and album art, emergency alerts
-- **RadioDNS** – service information and RadioVIS slides (ETSI TS 103 270 / TS 101 499)
+- **RadioDNS** – service information and slideshow (RadioVIS) slides, text and links over
+  Server-sent Events, Stomp or HTTP (ETSI TS 103 270 / TS 101 499)
 
 ## Alarms
 

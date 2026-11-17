@@ -8,5 +8,6 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
 - Test (no SDR needed; synthetic transmitter): `tests\verify_meas.py` and `tests\rules_test.py`;
   both exit non-zero on a wrong reading. Run both after touching measurements or alarms.
   `tests\setup_test.py` covers the setup wizard, password hashing and Credential Manager.
+  `tests\radiovis_test.py` covers the RadioDNS slideshow against local fake servers.
 - Public repo, GPL-3.0-or-later: no secrets, personal data, local paths or captured audio/IQ
   in commits. Config and logs are git-ignored.
