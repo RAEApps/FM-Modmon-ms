@@ -89,8 +89,16 @@ C:\ProgramData\radioconda\python.exe fm-modmon-ms.py --freqs 94.5 101.7 --countr
 | `--web-bind ADDR` | `127.0.0.1` keeps the web version on this PC |
 | `--web-password PW` | web controls password, instead of the one set in setup |
 | `--rds-port N` | first raw RDS group feed port (default 7711; `0` = off) |
+| `--rds-bind ADDR` | `127.0.0.1` keeps the RDS feeds on this PC |
+| `--web-audio FORMATS` | web audio formats to offer, first is the default (`mp3,aac,opus,flac`) |
+| `--ffmpeg PATH` | ffmpeg for the web audio (default: on the PATH, or a WinGet install) |
+| `--nrsc5 PATH` | nrsc5 executable for IBOC |
+| `--no-radiodns` | no RadioDNS lookups |
+| `--radiodns-client-id ID` | RadioDNS client identifier, for providers that need one |
+| `--no-scan` | skip the band scan; the station lists then show every channel |
+| `--config PATH` | where receivers and settings are saved |
 
-Run with `--help` for the full list. Command-line options override what setup chose.
+Run with `--help` for details. Command-line options override what setup chose.
 Receivers and settings are saved to `fm-modmon-ms_config.json`; events are logged to `logs/`.
 
 ### Passwords
@@ -120,8 +128,10 @@ proxy, or reach it over a VPN. Don't expose it directly to the internet.
 
 ## RDS group feed
 
-Each receiver serves its error-free RDS groups over TCP (ports 7711–7714) as hex text, one
-group per line – the format of an Inovonics INOmini 633 or RDS Spy – for other RDS software.
+Each receiver serves its error-free RDS groups over TCP (by default ports 7711–7714 for
+receivers 1–4; each receiver's port can be changed or the feed turned off in its settings) as
+hex text, one group per line – the format of an Inovonics INOmini 633 or RDS Spy – for other
+RDS software.
 
 ## Tests
 

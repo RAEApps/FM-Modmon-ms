@@ -22,10 +22,11 @@ fake = types.SimpleNamespace(monotonic=lambda: clock['t'], time=real_time.time, 
                              sleep=real_time.sleep)
 
 
-def judge(st, rules, country='CA'):
-    """Alarms a panel raises for this station after 60 s of the same readings."""
+def judge(st, rules, country='CA', keep=(), **settings):
+    """Alarms a panel raises for this station after 60 s of the same readings
+    (RDS, PILOT and SILENCE left out unless in keep)."""
     p = rm.StationPanel(st, [(st.freq_hz, None)], lambda *a: None, lambda *a: None, country=country)
-    p.settings = rm.ReceiverSettings.from_dict(CUSTOM.get(rules, {'rules': rules}))
+    p.settings = rm.ReceiverSettings.from_dict({**CUSTOM.get(rules, {'rules': rules}), **settings})
     rm.time = fake
     try:
         p.alarms.reset()
@@ -37,13 +38,13 @@ def judge(st, rules, country='CA'):
         rm.time = real_time
     s = st.meter.stats
     plain = QtGui.QTextDocumentFragment.fromHtml(p.values['Limit'].text()).toPlainText()
-    return sorted(p.alarms.active - {'RDS', 'PILOT', 'SILENCE'}), s, None, plain
+    return sorted(p.alarms.active - ({'RDS', 'PILOT', 'SILENCE'} - set(keep))), s, None, plain
 
 
-def station(seconds=6.0, **kw):
+def station(seconds=6.0, rf_amp=0.1, **kw):
     dc = kw.pop('dc_hz', 0.0)
     x, _ = fmtx.mpx(rm, seconds, dc_hz=dc, **kw)
-    return fmtx.run(rm, x, rf_amp=0.1, noise=0.0003)
+    return fmtx.run(rm, x, rf_amp=rf_amp, noise=0.0003)
 
 
 cases = [
@@ -82,6 +83,35 @@ def check(title, got, want):
     print(f'   {"ok   " if ok else "WRONG"} {title}: {got!r}' + ('' if ok else f', expected {want!r}'))
 
 
+print('--- station alarms')
+music = dict(left=[(997, 0.42)], right=[(1600, 0.42)], pilot=0.09, rds=0.04)
+st = station(**music)
+check('PI as expected: no alarm', judge(st, '', expected_pi='C6B2')[0], [])
+check('PI differs', judge(st, '', expected_pi='ABCD')[0], ['PI'])
+check('PI differs, alarm switched off', judge(st, '', expected_pi='ABCD', alarms={'PI': False})[0], [])
+check('silent programme', judge(station(pilot=0.09, rds=0.04), '', keep=('SILENCE',))[0], ['SILENCE'])
+check('carrier below -75 dBFS', judge(station(rf_amp=0.0001, **music), '')[0], ['CARRIER'])
+check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
+
+rm.time = fake
+try:
+    al = rm.StationAlarms()
+    clock['t'] += rm.ALARM_GRACE_S
+    def step(seconds, **on):
+        out = []
+        for _ in range(seconds):
+            clock['t'] += 1.0
+            out += al.update(on)
+        return [(name, raised) for name, _, raised in out]
+    check('raised once its hold has passed', step(6, CARRIER=True), [('CARRIER', True)])
+    check('a dip shorter than the hold does not clear', step(3), [])
+    check('cleared once the hold has passed again', step(1, CARRIER=True) + step(6), [('CARRIER', False)])
+    check('emergency alert raised at once', step(1, ALERT=True), [('ALERT', True)])
+    check('silence hold is the receiver setting', al.update({'SILENCE': True, 'ALERT': True}, holds={'SILENCE': 0}),
+          [('SILENCE', 'audio silence', True)])
+finally:
+    rm.time = real_time
+
 print('--- data services and RT+ Alarm (raw groups, no SDR)')
 rm.time = fake
 try:
@@ -109,6 +139,14 @@ try:
     check('saved names normalised', rm.ReceiverSettings.from_dict({'service_names': '7a=Alert FM;x'}).service_names,
           '7A=Alert FM')
     check('RT+ Alarm', snap['rtplus'], [(27, text)])
+    bad_cfg = rm.ReceiverSettings.from_dict({'volume_pct': 'loud', 'silence_s': None, 'min_snr_db': 'x',
+                                             'silence_lufs': float('nan'), 'rds_port': '7712', 'alarms': [1],
+                                             'name': None})
+    d = rm.ReceiverSettings()
+    check('hand-edited config: bad values back to defaults',
+          (bad_cfg.volume_pct, bad_cfg.silence_s, bad_cfg.min_snr_db, bad_cfg.silence_lufs, bad_cfg.rds_port,
+           all(bad_cfg.alarms.values()), bad_cfg.name),
+          (d.volume_pct, d.silence_s, d.min_snr_db, d.silence_lufs, 7712, True, ''))
 
     ds = rm.DataServices()
     for _ in range(int(rm.DATA_STEADY_S) + 1):                      # paging on air for 5 min: steady

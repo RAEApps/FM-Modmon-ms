@@ -2486,6 +2486,7 @@ class FmMonitor(gr.top_block):
         self.gain_auto = False         # set by whoever calibrated the gain
         self.cal_center_hz = None      # where it was calibrated
         self._source_factory = source_factory  # () -> a new source, for reopening (tests); else the RSP1A
+        self._sdr_lock = threading.RLock()  # the SDR reopening thread vs IBOC changes on the GUI thread
         self.src = _min_buffer(source or make_rsp1a(self.center_hz, lna_state, if_gain_reduction), SRC_BUFFER)
         self.slots = [None] * MAX_RECEIVERS
         self._mix = [blocks.add_ff(), blocks.add_ff()]
@@ -2525,28 +2526,31 @@ class FmMonitor(gr.top_block):
         return slot, st
 
     def start_iboc(self, slot, program, nrsc5):
-        """Attach an IbocDecoder for slot's station, playing `program` (0 = MPS)."""
-        self.stop_iboc(slot)
-        st = self.slots[slot]
-        dec = IbocDecoder(nrsc5, st.freq_hz - self.center_hz, program)
-        self.lock()
-        try:
-            self.connect(self.src, *dec.blocks)
-        finally:
-            self.unlock()
-        st.iboc = dec
+        """Attach an IbocDecoder for slot's station, playing `program` (0 = MPS).
+        While the SDR is being reopened (no source) attach_sdr wires it up."""
+        with self._sdr_lock:
+            self.stop_iboc(slot)
+            st = self.slots[slot]
+            dec = IbocDecoder(nrsc5, st.freq_hz - self.center_hz, program)
+            self.lock()
+            try:
+                self.connect(*((self.src,) if self.src else ()), *dec.blocks)
+            finally:
+                self.unlock()
+            st.iboc = dec
 
     def stop_iboc(self, slot):
-        st = self.slots[slot]
-        dec = st.iboc if st else None
-        if not dec:
-            return
-        st.iboc = None
-        self.lock()
-        try:
-            self.disconnect(self.src, *dec.blocks)
-        finally:
-            self.unlock()
+        with self._sdr_lock:
+            st = self.slots[slot]
+            dec = st.iboc if st else None
+            if not dec:
+                return
+            st.iboc = None
+            self.lock()
+            try:
+                self.disconnect(*((self.src,) if self.src else ()), *dec.blocks)
+            finally:
+                self.unlock()
         dec.stop()
 
     def recalibrate(self, progress=None):
@@ -2583,27 +2587,29 @@ class FmMonitor(gr.top_block):
 
     def detach_sdr(self):
         """Stop the flowgraph and let go of the SDR (before reopening it)."""
-        self.stop()
-        self.wait()
-        if self.src is None:
-            return
-        for st in self.stations:
-            self.disconnect(self.src, st)
-            if st.iboc:
-                self.disconnect(self.src, st.iboc.blocks[0])
-        self.src = None
-        gc.collect()  # the source block closes the device when it goes
+        with self._sdr_lock:
+            self.stop()
+            self.wait()
+            if self.src is None:
+                return
+            for st in self.stations:
+                self.disconnect(self.src, st)
+                if st.iboc:
+                    self.disconnect(self.src, st.iboc.blocks[0])
+            self.src = None
+            gc.collect()  # the source block closes the device when it goes
 
     def attach_sdr(self):
         """Open the SDR again, wire it to the receivers and start. Raises if it can't be opened."""
         src = self._source_factory() if self._source_factory else make_rsp1a(self.center_hz, self.lna, self.ifgr)
         src = _min_buffer(src, SRC_BUFFER)
-        for st in self.stations:
-            self.connect(src, st)
-            if st.iboc:
-                self.connect(src, st.iboc.blocks[0])
-        self.src = src
-        self.start()
+        with self._sdr_lock:
+            for st in self.stations:
+                self.connect(src, st)
+                if st.iboc:
+                    self.connect(src, st.iboc.blocks[0])
+            self.src = src
+            self.start()
 
     def stop_all_iboc(self):
         for slot in range(MAX_RECEIVERS):
@@ -3228,11 +3234,24 @@ class ReceiverSettings:
         if out.expected_pi and not (len(out.expected_pi) == 4 and
                                     all(c in '0123456789ABCDEF' for c in out.expected_pi)):
             out.expected_pi = ''
-        out.alarms = {name: bool((out.alarms or {}).get(name, True)) for name, *_ in ALARM_DEFS}
-        out.volume_pct = int(min(max(out.volume_pct, 0), 200))
-        if not (out.rds_port == 0 or 1024 <= int(out.rds_port) <= 65535):
+        alarms = out.alarms if isinstance(out.alarms, dict) else {}
+        out.alarms = {name: bool(alarms.get(name, True)) for name, *_ in ALARM_DEFS}
+        out.name = str(out.name or '')
+        out.rds_feed = bool(out.rds_feed)
+
+        def number(name, lo, hi, kind=float):  # a hand-edited value of the wrong type: the default
+            try:
+                v = float(getattr(out, name))
+                setattr(out, name, kind(min(max(v, lo), hi)) if math.isfinite(v) else getattr(default, name))
+            except (TypeError, ValueError):
+                setattr(out, name, getattr(default, name))
+        number('volume_pct', 0, 200, int)
+        number('silence_s', 2, 300, int)
+        number('silence_lufs', -70, -10)
+        number('min_snr_db', 0, 60)
+        number('rds_port', 0, 65535, int)
+        if not (out.rds_port == 0 or out.rds_port >= 1024):
             out.rds_port = 0
-        out.silence_s = int(min(max(out.silence_s, 2), 300))
         if out.rules not in ('', 'ised', 'fcc', 'custom'):
             out.rules = ''
         for name, _, _, lo, hi, _ in LIMITS:
@@ -6052,6 +6071,11 @@ class MainWindow(QtWidgets.QWidget):
         self._update_window()
         self._apply_audio(panel)
         self.log(f'receiver {panel.slot + 1}: {old} -> {freq / 1e6:.1f}')
+        if panel.settings.expected_pi or panel.settings.service_names:
+            # they described the old station: kept, the PI alarm would call the new one wrong
+            panel.settings.expected_pi = panel.settings.service_names = ''
+            panel.station.apply_settings(panel.settings)
+            self.log(f'receiver {panel.slot + 1}: expected PI and data service names cleared for the new station')
         self.save()
 
     def _on_play(self, panel, on):
