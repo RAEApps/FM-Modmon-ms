@@ -234,6 +234,9 @@ CHAN_PASS_HZ = 150e3       # channel filter: flat to +/-150 kHz, stop by +/-185 
 AUDIO_RATE = int(QUAD_RATE / AUDIO_DECIM)
 MAX_DEV = 75e3             # FM broadcast 100% deviation
 MAX_SPAN = 7.2e6           # widest station spread that fits the 8 MHz IF filter
+EDGE_HZ = MAX_SPAN / 2 + 150e3  # a station at most this far from the SDR centre (room to move off the midpoint)
+DC_CLEAR_HZ = 250e3        # SDR centre this far from every carrier: the RSP1A's DC offset stays out of the channel
+IMAGE_CLEAR_HZ = 300e3     # each station's IQ image (mirrored about the centre) this far from every other carrier
 PLAY_GAIN = 0.7
 UPDATE_HZ = 10             # measurement and display rate
 MAX_RECEIVERS = 4          # receivers the app runs at once
@@ -2471,8 +2474,22 @@ class FmStation(gr.hier_block2):
 
 
 def _centre(freqs_hz):
-    freqs_hz = list(freqs_hz)
-    return (min(freqs_hz) + max(freqs_hz)) / 2
+    """SDR centre for these stations: as near their midpoint as keeps every
+    carrier DC_CLEAR_HZ off the RSP1A's DC offset and IMAGE_CLEAR_HZ off every
+    other station's IQ image, with no station more than EDGE_HZ out. On the
+    midpoint itself a lone station sits on the DC offset, and the two end
+    stations sit on each other's images."""
+    freqs = sorted(set(freqs_hz))
+    mid = (freqs[0] + freqs[-1]) / 2
+    room = max(0.0, EDGE_HZ - (freqs[-1] - freqs[0]) / 2)
+
+    def clearance(c):
+        dc = min(abs(f - c) for f in freqs) / DC_CLEAR_HZ
+        image = min((abs(2 * c - a - b) for a in freqs for b in freqs if a < b), default=math.inf) / IMAGE_CLEAR_HZ
+        return min(dc, image, 1.0)
+
+    shifts = sorted((k * 25e3 for k in range(-int(room // 25e3), int(room // 25e3) + 1)), key=lambda s: (abs(s), -s))
+    return max((mid + s for s in shifts), key=clearance)  # first (smallest shift) of the best
 
 
 class FmMonitor(gr.top_block):
@@ -2635,6 +2652,12 @@ class FmMonitor(gr.top_block):
     def set_freq(self, slot, freq_hz):
         """Move one receiver to another station; the SDR re-centres so all fit."""
         self._recentre({slot: freq_hz})
+
+    def window_hz(self):
+        """The band the receivers' stations can be chosen from (MAX_SPAN around their midpoint)."""
+        freqs = [st.freq_hz for st in self.slots if st] or [self.center_hz]
+        mid = (min(freqs) + max(freqs)) / 2
+        return mid - MAX_SPAN / 2, mid + MAX_SPAN / 2
 
     def _recentre(self, changes=None):
         freqs = {i: st.freq_hz for i, st in enumerate(self.slots) if st}
@@ -5966,9 +5989,10 @@ class MainWindow(QtWidgets.QWidget):
     def _session_text(self):
         """What this run of FM-Modmon-ms is using, for the help."""
         a, tb, c = self.args, self.tb, self.tb.center_hz
+        lo, hi = tb.window_hz()
         rows = [('Start command', subprocess.list2cmdline([sys.executable] + sys.argv)),
-                ('SDR', f'RSP1A centred on {c / 1e6:.2f} MHz, window {(c - MAX_SPAN / 2) / 1e6:.1f}-'
-                        f'{(c + MAX_SPAN / 2) / 1e6:.1f} MHz, {SAMP_RATE / 1e6:.1f} MS/s'),
+                ('SDR', f'RSP1A centred on {c / 1e6:.2f} MHz, window {lo / 1e6:.1f}-'
+                        f'{hi / 1e6:.1f} MHz, {SAMP_RATE / 1e6:.1f} MS/s'),
                 ('Gain', self._gain_text() + ('' if tb.gain_auto else
                                               ' (set by --lna / --ifgr)' if a and a.gain_manual else
                                               ' (default, not calibrated)'))]
@@ -6088,7 +6112,8 @@ class MainWindow(QtWidgets.QWidget):
 
     def _update_window(self):
         c = self.tb.center_hz
-        window = f'{(c - MAX_SPAN / 2) / 1e6:.1f}\u2013{(c + MAX_SPAN / 2) / 1e6:.1f} MHz'
+        lo, hi = self.tb.window_hz()
+        window = f'{lo / 1e6:.1f}\u2013{hi / 1e6:.1f} MHz'
         chips = {'sdr': f'RSP1A  {c / 1e6:.2f} MHz', 'window': f'Window {window}',
                  'rate': f'{SAMP_RATE / 1e6:.1f} MS/s', 'gain': self._gain_text(),
                  'found': f'{self.n_found} stations found' if self.scanned else 'no scan'}

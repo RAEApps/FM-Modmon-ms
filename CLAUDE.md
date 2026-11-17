@@ -9,6 +9,7 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   both exit non-zero on a wrong reading. Run both after touching measurements or alarms.
   `tests\setup_test.py` covers the setup wizard, password hashing and Credential Manager.
   `tests\radiovis_test.py` covers the RadioDNS slideshow against local fake servers.
+  `tests\centre_test.py` covers where the SDR centres (off DC, off IQ images, inside the IF filter).
 - Install on a new PC: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins
   download URLs + SHA-256; the SoapySDRPlay3 module and nrsc5 come from the `deps-2026.11`
   release. Rebuilt either? Publish a new release and update the URLs and hashes.

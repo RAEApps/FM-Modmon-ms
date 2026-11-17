@@ -195,6 +195,8 @@ C:\ProgramData\radioconda\python.exe tests\rules_test.py
 `tests\setup_test.py` checks the setup wizard, the password hash, Credential Manager and
 the web sign-in. `tests\radiovis_test.py` checks the RadioDNS slideshow (SSE, HTTP and
 Stomp, SRV failover, trigger times, bad slides) against local fake servers.
+`tests\centre_test.py` checks where the RSP1A centres: no carrier on its DC offset or on
+another station's IQ image, and none past the IF filter's usable edge.
 
 ## Examples
 
