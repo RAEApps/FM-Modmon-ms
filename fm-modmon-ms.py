@@ -5558,6 +5558,66 @@ class WebView:
         return Handler
 
 
+class ChipRow(QtWidgets.QWidget):
+    """The header's status chips. When the window is too narrow for them all, the least
+    important (sample rate, SDR window, stations found) are hidden; the SDR and gain
+    chips (which shows SDR LOST) always stay."""
+    HIDE_FIRST = ('rate', 'window', 'found')
+
+    def __init__(self, keys):
+        super().__init__()
+        self.box = QtWidgets.QHBoxLayout(self)
+        self.box.setContentsMargins(0, 0, 0, 0)
+        self.box.setSpacing(6)
+        self.chips = {}
+        for key in keys:
+            chip = self.chips[key] = QtWidgets.QLabel()
+            chip.setObjectName('chip')
+            self.box.addWidget(chip)
+        self.box.addStretch(1)
+
+    def sizeHint(self):
+        hints = [chip.sizeHint() for chip in self.chips.values()]
+        return QtCore.QSize(sum(h.width() for h in hints) + self.box.spacing() * (len(hints) - 1),
+                            max(h.height() for h in hints))
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, self.sizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit()
+
+    def fit(self):
+        """Show the chips that fit the row's width; call after changing their text."""
+        spare = self.width() - self.sizeHint().width()
+        for key in self.HIDE_FIRST:
+            chip = self.chips[key]
+            chip.setVisible(spare >= 0)
+            if spare < 0:
+                spare += chip.sizeHint().width() + self.box.spacing()
+
+
+class ReceiverScroll(QtWidgets.QScrollArea):
+    """The receiver panels, scrolling when the window is smaller than them (a receiver
+    is taller than a laptop screen). Its size hint is the panels' own, so the window
+    still opens at full size on a screen that has room."""
+
+    def __init__(self, widget):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.setWidget(widget)
+        self.viewport().setAutoFillBackground(False)
+        widget.setAutoFillBackground(False)
+
+    def sizeHint(self):
+        return self.widget().sizeHint()
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, 0)
+
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(self, tb, stations, gain_info, iboc_scan=None, web=None, open_feed=None,
                  settings=None, config_path=None, nrsc5=None, radiodns=None, country='CA', ffmpeg=None):
@@ -5594,12 +5654,9 @@ class MainWindow(QtWidgets.QWidget):
         title = QtWidgets.QLabel(APP_NAME)
         title.setObjectName('appTitle')
         top.addWidget(title)
-        self.chips = {}
-        for key in ('sdr', 'window', 'rate', 'gain', 'found'):
-            chip = self.chips[key] = QtWidgets.QLabel()
-            chip.setObjectName('chip')
-            top.addWidget(chip)
-        top.addStretch(1)
+        self.chip_row = ChipRow(('sdr', 'window', 'rate', 'gain', 'found'))
+        self.chips = self.chip_row.chips
+        top.addWidget(self.chip_row, 1)
         self.help_btn = QtWidgets.QPushButton('?')
         self.help_btn.setObjectName('help')
         self.help_btn.setFixedSize(32, 32)
@@ -5630,9 +5687,12 @@ class MainWindow(QtWidgets.QWidget):
         top.addWidget(self.add_btn)
         layout.addLayout(top)
         self.header_text = ''
-        self.row = QtWidgets.QHBoxLayout()
+        receivers = QtWidgets.QWidget()
+        self.row = QtWidgets.QHBoxLayout(receivers)
+        self.row.setContentsMargins(0, 0, 0, 0)
         self.row.setSpacing(12)
-        layout.addLayout(self.row, 1)   # spare height goes to the receivers, not the event log
+        self.scroll = ReceiverScroll(receivers)
+        layout.addWidget(self.scroll, 1)   # spare height goes to the receivers, not the event log
         events, events_box = card('Events')
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -5874,8 +5934,11 @@ class MainWindow(QtWidgets.QWidget):
         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         self.adjustSize()
         frame_extra = self.frameGeometry().size() - self.geometry().size()
-        self.resize(min(self.width(), screen.width() - frame_extra.width()),
-                    min(self.height(), screen.height() - frame_extra.height()))
+        width, height = self.width(), self.height()
+        max_width, max_height = screen.width() - frame_extra.width(), screen.height() - frame_extra.height()
+        if height > max_height:   # the receivers will scroll: leave room for the scroll bar
+            width += self.scroll.verticalScrollBar().sizeHint().width()
+        self.resize(min(width, max_width), min(height, max_height))
         frame = self.frameGeometry()
         if centre:
             frame.moveCenter(screen.center())
@@ -6031,6 +6094,8 @@ class MainWindow(QtWidgets.QWidget):
                  'found': f'{self.n_found} stations found' if self.scanned else 'no scan'}
         for key, text in chips.items():
             self.chips[key].setText(text)
+        self.chip_row.updateGeometry()
+        self.chip_row.fit()
         self.header_text = f'RSP1A centred on {c / 1e6:.2f} MHz (window {window})  \u00b7  ' + '  \u00b7  '.join(
             chips[k] for k in ('rate', 'gain', 'found'))
         for p in self.panels:
