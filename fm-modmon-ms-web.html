@@ -227,6 +227,7 @@ canvas.gonio { cursor: pointer; }
       <label class="k" for="s-pty">PTY names:</label>
       <select id="s-pty"><option value="rbds">RBDS (North America)</option><option value="rds">RDS (Europe, elsewhere)</option></select>
       <label class="k" for="s-pi">Expected PI:</label><input id="s-pi" maxlength="4" placeholder="optional, e.g. C6B2" pattern="[0-9A-Fa-f]{0,4}">
+      <label class="k" for="s-names">Data service names:</label><input id="s-names" maxlength="200" placeholder="optional, e.g. 7A=Alert FM, SCA67=Muzak" title="Names for this station's data services, by RDS group type (7A, 9A, ...) or SCA67 / SCA92">
       <label class="k">RDS feed:</label>
       <span><label><input type="checkbox" id="s-feed"> <span id="s-feed-label">Serve raw RDS groups over TCP</span></label>
             &nbsp; TCP port <input id="s-port" type="number" min="1024" max="65535" style="width:90px"></span>
@@ -676,6 +677,7 @@ function openSettings(n) {
   $('#settings-title').textContent = `Receiver ${n} settings`;
   $('#s-name').value = s.name; $('#s-deemph').value = String(s.deemphasis_us); $('#s-stereo').value = s.stereo;
   $('#s-volume').value = s.volume_pct; $('#s-pty').value = s.pty_names; $('#s-pi').value = s.expected_pi;
+  $('#s-names').value = s.service_names || '';
   const feedsOn = r.default_port != null;
   $('#s-feed').checked = s.rds_feed; $('#s-feed').disabled = !feedsOn;
   $('#s-feed-label').textContent = feedsOn ? 'Serve raw RDS groups over TCP' : 'RDS feeds are off (--rds-port 0)';
@@ -728,6 +730,7 @@ function openSettings(n) {
     const settings = {
       name: $('#s-name').value.trim(), deemphasis_us: num('deemph'), stereo: $('#s-stereo').value,
       volume_pct: num('volume'), pty_names: $('#s-pty').value, expected_pi: $('#s-pi').value.trim().toUpperCase(),
+      service_names: $('#s-names').value.trim(),
       rds_feed: $('#s-feed').checked, rds_port: num('port'),
       alarms: Object.fromEntries([...ag.querySelectorAll('input[data-alarm]')].map(cb => [cb.dataset.alarm, cb.checked])),
       min_snr_db: num('min_snr_db'), silence_lufs: num('silence_lufs'), silence_s: num('silence_s'), rules: $('#s-rules').value,

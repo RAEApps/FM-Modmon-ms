@@ -115,7 +115,11 @@ Measurements (refreshed 10x per second):
                                     ODAs and SCA data: present or lost, with
                                     their share; identified, never decoded
                                     (addressed, often encrypted, and not to be
-                                    divulged: Radiocommunication Act s. 9(2))
+                                    divulged: Radiocommunication Act s. 9(2)).
+                                    Paging shows its 1A fields (paging codes,
+                                    operator code, paging ID); no field names
+                                    the provider, so each receiver can name its
+                                    services (e.g. 7A=Alert FM)
   Signal (each receiver passes +/-150 kHz of the FM signal, as a modulation
   monitor's wide IF does, so subcarriers and L-R aren't cut)
     RF level        channel power, dBFS (uncalibrated, depends on gain)
@@ -332,10 +336,23 @@ RTPLUS_ALARM = 27          # INFO.ALARM: public alert text (Alert FM's RadioText
 # encrypted, so they are identified, never decoded (the Radiocommunication Act
 # s. 9(2) bars divulging them); only public alert text (RT+ Alarm) is shown.
 PROGRAMME_ODAS = {0x4BD7, 0x6552, 0xC3B0}   # RT+, eRT, iTunes tagging: programme metadata
-UNANNOUNCED_DATA = {14: 'Paging (7A)', 16: 'TMC (8A)', 18: 'EWS (9A)'}  # group type code: label
+UNANNOUNCED_DATA = {14: 'Paging (7A)', 16: 'TMC (8A)', 18: 'EWS (9A)',  # group type code: label
+                    26: 'Paging (13A)'}
 DATA_GAP_S = 15.0          # a service unseen this long is absent
 DATA_STEADY_S = 300.0      # present this long without a gap: the station carries it, its loss alarms
                            # (shorter bursts, e.g. paging only during an alert, never alarm)
+
+
+def parse_service_names(text):
+    """'7A=Alert FM, SCA67=Muzak' -> {'7A': 'Alert FM', 'SCA67': 'Muzak'}: names for the
+    data services by group type (or SCA67 / SCA92), since nothing on air names them."""
+    out = {}
+    for part in re.split(r'[,;]', text or ''):
+        code, sep, name = part.partition('=')
+        code = re.sub(r'\s+', '', code).upper()
+        if sep and code and name.strip():
+            out[code] = name.strip()
+    return out
 
 # Band scan: North American 200 kHz raster (88.1 ... 107.9 MHz), in tenths of MHz.
 CHANNELS_MHZ10 = range(881, 1080, 2)
@@ -1049,7 +1066,7 @@ class RdsState(gr.sync_block):
                 'rtplus': {}, 'rtplus_toggle': None, 'rtplus_at': 0.0, 'rtplus_for': None,
                 'rt': '', 'rt_ab': None, 'rt_seg': {}, 'rt_flip_at': 0.0, 'pty': None, 'ct': None,
                 'ps': '', 'ps_buf': [' '] * 8, 'ps_mask': 0, 'ps_changes': deque(), 'ps_at': 0.0,
-                'data_seen': {}, 'rp_codes': 0}
+                'data_seen': {}, 'rp_codes': 0, 'opc': 0, 'paging_id': None}
 
     def snapshot(self):
         """Thread-safe copy of the raw-group decode for the GUI."""
@@ -1060,7 +1077,7 @@ class RdsState(gr.sync_block):
                     'rtplus': self._rtplus_items(r), 'pty': r['pty'], 'ps': r['ps'], 'ct': r['ct'],
                     'ps_dynamic': self._ps_dynamic(r), 'ps_age': time.monotonic() - r['ps_at'],
                     'data': {k: (time.monotonic() - t, g) for k, (t, g) in r['data_seen'].items()},
-                    'rp_codes': r['rp_codes']}
+                    'rp_codes': r['rp_codes'], 'opc': r['opc'], 'paging_id': r['paging_id']}
 
     @staticmethod
     def _data_key(raw, gtype):
@@ -1148,7 +1165,10 @@ class RdsState(gr.sync_block):
                 raw['ps_mask'] = 0                           # a segment was missed: wait for the next 0
         if gtype == 2:                                       # 1A: radio paging codes (EN 50067 Annex M)
             raw['rp_codes'] = b & 0x1F
-        if gtype == 2 and (c >> 12) & 7 == 0:              # 1A variant 0: ECC
+            if (c >> 12) & 7 == 2:                           # 1A variant 2: paging identification
+                raw['paging_id'] = c & 0xFFF
+        if gtype == 2 and (c >> 12) & 7 == 0:              # 1A variant 0: paging operator code + ECC
+            raw['opc'] = (c >> 8) & 0xF
             raw['ecc'] = c & 0xFF
         elif gtype == 6:                                     # 3A: ODA announcement
             raw['oda'][d] = b & 0x1F
@@ -2888,6 +2908,7 @@ class ReceiverSettings:
     volume_pct: int = 100            # play volume
     pty_names: str = 'rbds'          # 'rbds' (North America) or 'rds'
     expected_pi: str = ''            # 4 hex digits; the PI alarm compares with it
+    service_names: str = ''          # names for data services, e.g. '7A=Alert FM' (parse_service_names)
     rds_feed: bool = True            # serve raw RDS groups over TCP
     rds_port: int = 0                # 0: the default, --rds-port + receiver number - 1
     audio_source: str = 'analog'     # an AUDIO_SOURCES key
@@ -2926,6 +2947,7 @@ class ReceiverSettings:
         if out.audio_source not in dict(AUDIO_SOURCES):
             out.audio_source = default.audio_source
         out.expected_pi = str(out.expected_pi).strip().upper()
+        out.service_names = ', '.join(f'{k}={v}' for k, v in parse_service_names(str(out.service_names)).items())
         if out.expected_pi and not (len(out.expected_pi) == 4 and
                                     all(c in '0123456789ABCDEF' for c in out.expected_pi)):
             out.expected_pi = ''
@@ -3071,6 +3093,7 @@ class StationPanel(QtWidgets.QGroupBox):
         self.alarms = StationAlarms()
         self.data_services = DataServices()
         self._data_lost = []
+        self._data_codes = {}  # service: its code for a name ('7A', 'SCA67')
         self._rt_alarm = ''
         self.rate = 0.0
         self._groups = deque()
@@ -3460,6 +3483,7 @@ class StationPanel(QtWidgets.QGroupBox):
         self.alarms.reset()
         self.data_services.reset()
         self._data_lost = []
+        self._data_codes = {}
         self._rt_alarm = ''
         for m in self.meters.values():
             m.set_value(None, '-')
@@ -3729,17 +3753,29 @@ class StationPanel(QtWidgets.QGroupBox):
         for khz in (67, 92):
             if s and self._sca_kind(khz, s) == 'data':
                 present[f'SCA {khz} kHz data'] = None
+                self._data_codes[f'SCA {khz} kHz data'] = f'SCA{khz}'
+        self._data_codes.update((k, g) for k, g in present.items() if g)
         self._data_lost = self.data_services.update(present)
+        paging = [f'1A paging codes {raw["rp_codes"]:02X}'] if raw['rp_codes'] else []
+        paging += [f'operator code {raw["opc"]}'] if raw['opc'] else []
+        paging += [f'paging ID {raw["paging_id"]:03X}'] if raw['paging_id'] is not None else []
         parts = []
         for key, g in sorted(present.items()):
-            text = _html(key)
-            if key == UNANNOUNCED_DATA[14] and raw['rp_codes']:
-                text += f' <span style="color:{DIM}">(1A paging codes {raw["rp_codes"]:02X})</span>'
+            text = self._service_label(key, html=True)
+            if key == UNANNOUNCED_DATA[14] and paging:
+                text += f' <span style="color:{DIM}">({", ".join(paging)})</span>'
             if g and total:
                 text += f' {raw["types"].get(g, 0) * 100 / total:.0f}%'
             parts.append(text)
-        parts += [f'<span style="color:{RED}">{_html(k)} lost</span>' for k in self._data_lost]
+        parts += [f'<span style="color:{RED}">{self._service_label(k, html=True)} lost</span>' for k in self._data_lost]
         self.values['Data services'].setText('  ·  '.join(parts) or '-')
+
+    def _service_label(self, key, html=False):
+        """A data service as shown: the name this receiver gives it, with what it is."""
+        name = parse_service_names(self.settings.service_names).get(self._data_codes.get(key, ''))
+        if not html:
+            return f'{name} ({key})' if name else key
+        return f'{_html(name)} <span style="color:{DIM}">{_html(key)}</span>' if name else _html(key)
 
     def _alarm_details(self, s, a, lim, limit, subcarriers, rate, pi):
         """What each alarm measured, against its limit, for the event log and notifications."""
@@ -3764,7 +3800,8 @@ class StationPanel(QtWidgets.QGroupBox):
             'RDS': f'RDS {num(rate)} groups/s',
             'PI': f'PI {pi or "-"}, expected {cfg.expected_pi}',
             'ALERT': f'RT+ Alarm: {self._rt_alarm}' if self._rt_alarm else '',
-            'DATA': f'not on air for {DATA_GAP_S:.0f}+ s: {", ".join(self._data_lost)}' if self._data_lost else '',
+            'DATA': (f'not on air for {DATA_GAP_S:.0f}+ s: {", ".join(map(self._service_label, self._data_lost))}'
+                     if self._data_lost else ''),
         }
 
     def web_state(self, feed_port, default_port, listeners):
@@ -4311,6 +4348,13 @@ class ReceiverDialog(QtWidgets.QDialog):
         self.pi.setValidator(QtGui.QRegularExpressionValidator(QtCore.QRegularExpression('[0-9A-Fa-f]{0,4}')))
         form.addRow('Expected PI:', self.pi)
 
+        self.service_names = QtWidgets.QLineEdit(settings.service_names)
+        self.service_names.setPlaceholderText('optional, e.g. 7A=Alert FM, SCA67=Muzak')
+        self.service_names.setToolTip("Names for this station's data services, by RDS group type (7A, 9A, ...)\n"
+                                      'or SCA67 / SCA92. Nothing on air names them; these are shown\n'
+                                      'in the Data services row and the "data service lost" alarm.')
+        form.addRow('Data service names:', self.service_names)
+
         self.default_port, self.taken_ports = default_port, set(taken_ports)
         self.feed = QtWidgets.QCheckBox('Serve raw RDS groups over TCP' if feed_port
                                         else 'RDS feeds are off (--rds-port 0)')
@@ -4449,6 +4493,7 @@ class ReceiverDialog(QtWidgets.QDialog):
             'volume_pct': self.volume.value(),
             'pty_names': self.pty.currentData(),
             'expected_pi': self.pi.text(),
+            'service_names': self.service_names.text(),
             'rds_feed': self.feed.isChecked(),
             'rds_port': 0 if self.port.value() == self.default_port else self.port.value(),
             'alarms': {name: box.isChecked() for name, box in self.alarm_checks.items()},
