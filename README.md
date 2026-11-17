@@ -83,8 +83,28 @@ each piece from its source and skipping what's already installed:
 
 Pinned downloads are checked against their SHA-256. At the end it asks for the RSP1A to be
 plugged in and checks it's found. The monitor goes to `C:\Program Files\FM-Modmon-ms`; running
-setup again updates it to the latest `main` and keeps its settings. Uninstall it from
-*Settings → Apps*, which leaves radioconda and the SDRplay API in place.
+setup again updates it to the latest `main` and keeps its settings; anything else already
+installed and current (checked by version or SHA-256) isn't downloaded again.
+
+| Installed | Where |
+|---|---|
+| The monitor, SoapySDRPlay3, nrsc5, ffmpeg | `C:\Program Files\FM-Modmon-ms` |
+| radioconda | `C:\ProgramData\radioconda` (its default for all users) |
+| SDRplay API | `C:\Program Files\SDRplay` (its default) |
+
+### Uninstalling
+
+*Settings → Apps → Installed apps → FM-Modmon-ms → Uninstall*, or:
+
+```bash
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\FM-Modmon-ms\install.ps1" -Uninstall
+```
+
+It asks for administrator rights, then removes the shortcuts (and the start-with-Windows one),
+the monitor, SoapySDRPlay3, nrsc5 and ffmpeg, and asks whether to delete the settings and event
+logs too (kept by default, for a later reinstall). radioconda and the SDRplay API stay
+installed, as other SDR software may use them; remove them from *Settings → Apps* as
+*radioconda* and *SDRplay API* (the latter also removes the RSP1A's driver).
 
 ## Running
 

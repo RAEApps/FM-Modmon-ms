@@ -8,7 +8,8 @@
 # SDRplay API comes from sdrplay.com through the browser and is checked by its signature.
 param(
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'FM-Modmon-ms'),
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Launcher   # internal: the unelevated window that started setup will start the monitor
 )
 
 $App = 'FM-Modmon-ms'
@@ -31,6 +32,7 @@ $Pinned = @{
         File = 'ffmpeg-8.0.1-essentials_build.zip'
         Url = 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip'
         Sha256 = 'e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673'
+        ExeSha256 = '5af82a0d4fe2b9eae211b967332ea97edfc51c6b328ca35b827e73eac560dc0d'   # its bin\ffmpeg.exe
     }
     soapy = @{
         File = 'sdrPlaySupport.dll'
@@ -83,6 +85,11 @@ function Get-Pinned($name) {
         throw "$($p.File) doesn't match its pinned SHA-256 (got $hash); not installing it."
     }
     $path
+}
+
+# Is the file there with this SHA-256 (already installed, nothing to download)?
+function Test-Current($path, $sha256) {
+    (Test-Path $path) -and (Get-FileHash $path -Algorithm SHA256).Hash -eq $sha256
 }
 
 function Install-Radioconda {
@@ -171,8 +178,12 @@ function Install-Helpers {
     $nrsc5 = Join-Path $InstallDir 'nrsc5\build\src'
     $ffmpeg = Join-Path $InstallDir 'ffmpeg'
     New-Item -ItemType Directory -Force $modules, $nrsc5, $ffmpeg | Out-Null
-    Copy-Item (Get-Pinned 'soapy') $modules -Force
-    Copy-Item (Get-Pinned 'nrsc5') $nrsc5 -Force
+    foreach ($item in @(@('soapy', $modules, 'SoapySDRPlay3'), @('nrsc5', $nrsc5, 'nrsc5'))) {
+        $name, $dir, $label = $item
+        if (Test-Current (Join-Path $dir $Pinned[$name].File) $Pinned[$name].Sha256) { Note "$label is up to date" }
+        else { Copy-Item (Get-Pinned $name) $dir -Force }
+    }
+    if (Test-Current (Join-Path $ffmpeg 'ffmpeg.exe') $Pinned.ffmpeg.ExeSha256) { Note 'ffmpeg is up to date'; return }
     $zip = Get-Pinned 'ffmpeg'
     $out = Join-Path $Cache 'ffmpeg'
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
@@ -240,11 +251,28 @@ function Install-All {
     Test-Rsp
     Step "$App is installed in $InstallDir"
     Note 'Start it from the Start menu or the desktop shortcut. Run this setup again to update it.'
-    if ((Read-Host '    Start it now? [Y/n]') -notmatch '^[nN]') {
-        # Through Explorer, so the monitor runs as the signed-in user, not elevated.
-        Start-Process explorer.exe (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) "$App.lnk")
-    }
     Remove-Item $Cache -Recurse -Force -ErrorAction SilentlyContinue
+    (Read-Host '    Start it now? [Y/n]') -notmatch '^[nN]'
+}
+
+function Get-MonitorProcess {
+    Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe' OR Name = 'python.exe'" |
+        Where-Object { $_.CommandLine -like '*fm-modmon-ms.py*' }
+}
+
+# Start the monitor from its shortcut and wait to see it running. Unelevated, it starts as
+# this user; elevated (no window to hand it back to), through Explorer, which runs as the
+# signed-in user.
+function Start-Monitor {
+    $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) "$App.lnk"
+    Step "Starting $App (its window opens in a few seconds)"
+    if (Test-Admin) { Start-Process explorer.exe "`"$lnk`"" } else { Start-Process $lnk }
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not (Get-MonitorProcess) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    Start-Sleep -Seconds 5   # still there once GNU Radio has loaded?
+    if (Get-MonitorProcess) { Note "$App is running."; return }
+    Write-Host "    $App didn't start. To see why, run in a terminal:" -ForegroundColor Yellow
+    Note "& '$(Join-Path $Conda 'python.exe')' '$(Join-Path $InstallDir 'app\fm-modmon-ms.py')'"
 }
 
 function Uninstall-All {
@@ -282,17 +310,23 @@ function Main {
             Get-Download $ScriptUrl $self
         }
         $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -InstallDir `"$InstallDir`""
-        if ($Uninstall) { $argList += ' -Uninstall' }
+        $argList += if ($Uninstall) { ' -Uninstall' } else { ' -Launcher' }
         Write-Host "$App setup needs administrator rights; continuing in a new window."
-        Start-Process powershell.exe $argList -Verb RunAs
+        try { $p = Start-Process powershell.exe $argList -Verb RunAs -PassThru -Wait }
+        catch { Write-Host "Setup needs administrator rights: $($_.Exception.Message)" -ForegroundColor Red; return }
+        # Exit code 10: setup finished and the monitor should start, here, as this user.
+        if ($p.ExitCode -eq 10) { Start-Monitor }
         return
     }
     if ($Uninstall -and $PSCommandPath) { $script:InstallDir = Split-Path $PSCommandPath }
+    $start = $false
     try {
-        if ($Uninstall) { Uninstall-All } else { Install-All }
+        if ($Uninstall) { Uninstall-All } else { $start = [bool](Install-All | Select-Object -Last 1) }
     } catch {
         Write-Host "`nSetup stopped: $_" -ForegroundColor Red
     }
+    if ($start -and $Launcher) { exit 10 }   # the window that started setup starts the monitor
+    if ($start) { Start-Monitor }
     if ($PSCommandPath) { Read-Host "`nPress Enter to close" | Out-Null }
 }
 
