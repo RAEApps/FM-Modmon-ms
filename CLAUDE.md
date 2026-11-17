@@ -9,5 +9,7 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   both exit non-zero on a wrong reading. Run both after touching measurements or alarms.
   `tests\setup_test.py` covers the setup wizard, password hashing and Credential Manager.
   `tests\radiovis_test.py` covers the RadioDNS slideshow against local fake servers.
+- Installer: `powershell -ExecutionPolicy Bypass -File installer\build.ps1` (NSIS) →
+  `installer\dist\`. Bundles radioconda + SDRplay API installers; payload/dist are git-ignored.
 - Public repo, GPL-3.0-or-later: no secrets, personal data, local paths or captured audio/IQ
   in commits. Config and logs are git-ignored.
