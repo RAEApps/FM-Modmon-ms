@@ -198,6 +198,46 @@ function Install-Helpers {
     Remove-Item $out -Recurse -Force
 }
 
+# The monitor sets this taskbar ID (APP_ID in fm-modmon-ms.py); its shortcuts must carry it
+# too, or the taskbar can't match the window to them and may show no icon.
+$AppId = 'fm-modmon-ms.monitor'
+$LnkAppIdCode = @'
+using System;
+using System.Runtime.InteropServices;
+public static class LnkAppId {
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int GetAt(uint index, out PropertyKey key);
+        [PreserveSig] int GetValue(ref PropertyKey key, out PropVariant value);
+        [PreserveSig] int SetValue(ref PropertyKey key, ref PropVariant value);
+        [PreserveSig] int Commit();
+    }
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    struct PropertyKey { public Guid fmtid; public uint pid; }
+    [StructLayout(LayoutKind.Explicit, Size = 16)]
+    struct PropVariant { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr ptr; }
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    static extern int SHGetPropertyStoreFromParsingName(string path, IntPtr bindCtx, int flags, ref Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out IPropertyStore store);
+    // Sets System.AppUserModel.ID on a .lnk file.
+    public static void Set(string lnk, string appId) {
+        Guid iid = typeof(IPropertyStore).GUID;
+        IPropertyStore store;
+        Marshal.ThrowExceptionForHR(SHGetPropertyStoreFromParsingName(lnk, IntPtr.Zero, 2, ref iid, out store));
+        PropertyKey key = new PropertyKey { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };
+        PropVariant value = new PropVariant { vt = 31, ptr = Marshal.StringToCoTaskMemUni(appId) };  // VT_LPWSTR
+        try {
+            Marshal.ThrowExceptionForHR(store.SetValue(ref key, ref value));
+            Marshal.ThrowExceptionForHR(store.Commit());
+        } finally {
+            Marshal.FreeCoTaskMem(value.ptr);
+            Marshal.ReleaseComObject(store);
+        }
+    }
+}
+'@
+
 function New-Shortcut($path) {
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
     $s.TargetPath = Join-Path $Conda 'pythonw.exe'
@@ -206,6 +246,8 @@ function New-Shortcut($path) {
     $s.IconLocation = Join-Path $InstallDir 'app\fm-modmon-ms.ico'
     $s.Description = 'FM modulation and RDS monitor'
     $s.Save()
+    if (-not ('LnkAppId' -as [type])) { Add-Type -TypeDefinition $LnkAppIdCode }
+    [LnkAppId]::Set($path, $AppId)
 }
 
 function Register-Monitor($version) {
