@@ -1,0 +1,299 @@
+# FM-Modmon-ms setup for Windows 10/11: takes a new PC to a running monitor, from GitHub.
+# In PowerShell:
+#   irm https://raw.githubusercontent.com/RAEApps/FM-Modmon-ms/main/install.ps1 | iex
+# Installs radioconda (GNU Radio 3.10), the SDRplay API (RSP1A driver and service), the
+# SoapySDRPlay3 module, nrsc5, ffmpeg and the monitor from main, skipping what's already
+# there, then checks the RSP1A is found. Run it again to update the monitor (settings are
+# kept). Uninstall from Settings > Apps. Downloads are pinned and SHA-256 checked; the
+# SDRplay API comes from sdrplay.com through the browser and is checked by its signature.
+param(
+    [string]$InstallDir = (Join-Path $env:ProgramFiles 'FM-Modmon-ms'),
+    [switch]$Uninstall
+)
+
+$App = 'FM-Modmon-ms'
+$Repo = 'RAEApps/FM-Modmon-ms'
+$ScriptUrl = "https://raw.githubusercontent.com/$Repo/main/install.ps1"
+$Conda = Join-Path $env:ProgramData 'radioconda'
+$Cache = Join-Path $env:TEMP 'fm-modmon-ms-setup'
+$SdrplayMin = [version]'3.15'
+$SdrplayPage = 'https://www.sdrplay.com/api/'
+$SdrplaySigner = 'CN=SDRPLAY LIMITED,*'
+$UninstKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$App"
+$Deps = "https://github.com/$Repo/releases/download/deps-2026.11"
+$Pinned = @{
+    radioconda = @{
+        File = 'radioconda-2025.03.14-Windows-x86_64.exe'
+        Url = 'https://github.com/ryanvolz/radioconda/releases/download/2025.03.14/radioconda-2025.03.14-Windows-x86_64.exe'
+        Sha256 = 'd64c316df6f5e76d9f46eaf5e1409aa5fc633e125f5a7d49e8931fa6453b2fee'
+    }
+    ffmpeg = @{
+        File = 'ffmpeg-8.0.1-essentials_build.zip'
+        Url = 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip'
+        Sha256 = 'e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673'
+    }
+    soapy = @{
+        File = 'sdrPlaySupport.dll'
+        Url = "$Deps/sdrPlaySupport.dll"
+        Sha256 = '056db849271dc45bc4fba5ebb932f475f7a36083eac1ecdd4e0f147a48883f44'
+    }
+    nrsc5 = @{
+        File = 'nrsc5.exe'
+        Url = "$Deps/nrsc5.exe"
+        Sha256 = 'b0015835d173eaa5339511d6be0e22f04a53aaccee31d4b1e2885907aa599c3b'
+    }
+}
+# Run by radioconda's python: is an RSP visible through SoapySDR? Prints its label.
+$CheckRsp = @'
+import os, sys
+os.environ['SOAPY_SDR_PLUGIN_PATH'] = sys.argv[1]
+os.environ['PATH'] = os.pathsep.join([r'C:\Program Files\SDRplay\API\x64',
+                                      os.path.join(sys.prefix, 'Library', 'bin'), os.environ.get('PATH', '')])
+import SoapySDR
+SoapySDR.setLogLevel(SoapySDR.SOAPY_SDR_ERROR)
+found = SoapySDR.Device.enumerate('driver=sdrplay')
+if not found:
+    sys.exit(1)
+print(found[0]['label'] if 'label' in found[0] else 'SDRplay RSP')
+'@
+
+function Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
+function Note($text) { Write-Host "    $text" }
+
+function Test-Admin {
+    $id = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    $id.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-Download($url, $path) {
+    & curl.exe -fL --retry 3 --progress-bar -o $path $url
+    if ($LASTEXITCODE) { throw "Download failed (curl exit $LASTEXITCODE): $url" }
+}
+
+# A pinned download in the cache, fetched unless already there with the right SHA-256.
+function Get-Pinned($name) {
+    $p = $Pinned[$name]
+    $path = Join-Path $Cache $p.File
+    if ((Test-Path $path) -and (Get-FileHash $path -Algorithm SHA256).Hash -eq $p.Sha256) { return $path }
+    Note "Downloading $($p.File)..."
+    Get-Download $p.Url $path
+    $hash = (Get-FileHash $path -Algorithm SHA256).Hash
+    if ($hash -ne $p.Sha256) {
+        Remove-Item $path -Force
+        throw "$($p.File) doesn't match its pinned SHA-256 (got $hash); not installing it."
+    }
+    $path
+}
+
+function Install-Radioconda {
+    Step 'radioconda (GNU Radio 3.10)'
+    if (Test-Path (Join-Path $Conda 'python.exe')) { Note "Already installed in $Conda"; return }
+    $exe = Get-Pinned 'radioconda'
+    Note "Installing in $Conda (this takes several minutes)..."
+    # constructor installer: /D must be last and unquoted
+    $p = Start-Process $exe "/InstallationType=AllUsers /RegisterPython=0 /AddToPath=0 /S /D=$Conda" -Wait -PassThru
+    if (-not (Test-Path (Join-Path $Conda 'python.exe'))) { throw "radioconda didn't install (exit $($p.ExitCode))." }
+}
+
+function Get-SdrplayVersion {
+    $v = (Get-ItemProperty 'HKLM:\SOFTWARE\SDRplay\Service\API' -ErrorAction SilentlyContinue).Version
+    if ($v) { [version]$v } else { $null }
+}
+
+# The newest SDRplay API installer in Downloads that's new enough and signed by SDRplay.
+function Find-SdrplayInstaller {
+    $downloads = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+    Get-ChildItem $downloads -Filter 'SDRplay_RSP_API-Windows-*.exe' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match 'Windows-([\d.]+)\.exe$' -and [version]$Matches[1] -ge $SdrplayMin } |
+        Sort-Object LastWriteTime -Descending |
+        Where-Object {
+            $sig = Get-AuthenticodeSignature $_.FullName
+            $sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -like $SdrplaySigner
+        } | Select-Object -First 1
+}
+
+function Install-Sdrplay {
+    Step 'SDRplay API (RSP1A driver and service)'
+    $have = Get-SdrplayVersion
+    if ($have -and $have -ge $SdrplayMin) {
+        Note "SDRplay API $have is already installed"
+    } else {
+        $exe = Find-SdrplayInstaller
+        if (-not $exe) {
+            Note "SDRplay only offers the API from its website, after its licence."
+            Note "Opening $SdrplayPage in your browser:"
+            Note "  download the Windows API $SdrplayMin or newer to your Downloads folder."
+            Note "Setup carries on by itself when the download finishes (Ctrl+C to stop)."
+            Start-Process $SdrplayPage
+            while (-not ($exe = Find-SdrplayInstaller)) { Start-Sleep -Seconds 3 }
+        }
+        Note "Installing $($exe.Name)..."
+        $p = Start-Process $exe.FullName '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-' -Wait -PassThru
+        if (-not (Get-SdrplayVersion)) { throw "The SDRplay API didn't install (exit $($p.ExitCode))." }
+    }
+    # The monitor reaches the RSP1A through this service: run it now and at boot.
+    & sc.exe config SDRplayAPIService start= auto | Out-Null
+    & sc.exe start SDRplayAPIService | Out-Null   # fails harmlessly if it's already running
+}
+
+function Install-Monitor {
+    Step "$App from GitHub"
+    $ref = 'main'
+    try {
+        $commit = Invoke-RestMethod "https://api.github.com/repos/$Repo/commits/main" -Headers @{ 'User-Agent' = 'fm-modmon-ms-setup' }
+        $ref = $commit.sha
+        Note "main at $($ref.Substring(0, 7)), $($commit.commit.committer.date)"
+    } catch { Note 'Using the latest main' }
+    $zip = Join-Path $Cache 'fm-modmon-ms.zip'
+    $src = Join-Path $Cache 'src'
+    Get-Download "https://codeload.github.com/$Repo/zip/$ref" $zip
+    if (Test-Path $src) { Remove-Item $src -Recurse -Force }
+    Expand-Archive $zip $src
+    $root = (Get-ChildItem $src -Directory | Select-Object -First 1).FullName
+
+    $appDir = Join-Path $InstallDir 'app'
+    New-Item -ItemType Directory -Force (Join-Path $appDir 'examples') | Out-Null
+    foreach ($f in 'fm-modmon-ms.py', 'fm-modmon-ms-web.html', 'fm-modmon-ms.ico', 'LICENSE', 'README.md') {
+        Copy-Item (Join-Path $root $f) $appDir -Force
+    }
+    Copy-Item (Join-Path $root 'examples\*') (Join-Path $appDir 'examples') -Recurse -Force
+    Copy-Item (Join-Path $root 'install.ps1') $InstallDir -Force   # for updates and uninstalling
+    # Settings and event logs are written beside the script: let users change them.
+    & icacls.exe $appDir /grant '*S-1-5-32-545:(OI)(CI)M' /T /Q | Out-Null
+    if ($ref -eq 'main') { (Get-Date).ToString('yyyy.MM.dd') } else { $ref.Substring(0, 7) }
+}
+
+function Install-Helpers {
+    Step 'SoapySDRPlay3, nrsc5 and ffmpeg'
+    # Where the monitor looks, relative to its folder: ..\soapysdrplay3-build\modules,
+    # ..\nrsc5*\build\src and ..\ffmpeg.
+    $modules = Join-Path $InstallDir 'soapysdrplay3-build\modules'
+    $nrsc5 = Join-Path $InstallDir 'nrsc5\build\src'
+    $ffmpeg = Join-Path $InstallDir 'ffmpeg'
+    New-Item -ItemType Directory -Force $modules, $nrsc5, $ffmpeg | Out-Null
+    Copy-Item (Get-Pinned 'soapy') $modules -Force
+    Copy-Item (Get-Pinned 'nrsc5') $nrsc5 -Force
+    $zip = Get-Pinned 'ffmpeg'
+    $out = Join-Path $Cache 'ffmpeg'
+    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+    Note 'Unpacking ffmpeg...'
+    Expand-Archive $zip $out
+    $exe = Get-ChildItem $out -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+    Copy-Item $exe.FullName $ffmpeg -Force
+    foreach ($f in 'LICENSE', 'README.txt') {   # ffmpeg's licence and source notice go with it
+        $doc = Join-Path (Split-Path (Split-Path $exe.FullName)) $f
+        if (Test-Path $doc) { Copy-Item $doc $ffmpeg -Force }
+    }
+    Remove-Item $out -Recurse -Force
+}
+
+function New-Shortcut($path) {
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
+    $s.TargetPath = Join-Path $Conda 'pythonw.exe'
+    $s.Arguments = '"' + (Join-Path $InstallDir 'app\fm-modmon-ms.py') + '"'
+    $s.WorkingDirectory = Join-Path $InstallDir 'app'
+    $s.IconLocation = Join-Path $InstallDir 'app\fm-modmon-ms.ico'
+    $s.Description = 'FM modulation and RDS monitor'
+    $s.Save()
+}
+
+function Register-Monitor($version) {
+    Step 'Shortcuts'
+    New-Shortcut (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) "$App.lnk")
+    New-Shortcut (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) "$App.lnk")
+    New-Item $UninstKey -Force | Out-Null
+    $script = Join-Path $InstallDir 'install.ps1'
+    $values = @{
+        DisplayName = $App; DisplayVersion = $version; Publisher = $App
+        DisplayIcon = Join-Path $InstallDir 'app\fm-modmon-ms.ico'; InstallLocation = $InstallDir
+        UninstallString = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script`" -Uninstall"
+    }
+    foreach ($k in $values.Keys) { Set-ItemProperty $UninstKey $k $values[$k] }
+    Set-ItemProperty $UninstKey NoModify 1 -Type DWord
+    Set-ItemProperty $UninstKey NoRepair 1 -Type DWord
+}
+
+function Test-Rsp {
+    Step 'Looking for the RSP1A'
+    $check = Join-Path $InstallDir 'check_rsp.py'
+    Set-Content $check $CheckRsp -Encoding ASCII
+    $python = Join-Path $Conda 'python.exe'
+    $modules = Join-Path $InstallDir 'soapysdrplay3-build\modules'
+    $ErrorActionPreference = 'Continue'   # 5.1 turns a native program's stderr into errors
+    while ($true) {
+        $label = & $python -I $check $modules 2>$null
+        if ($LASTEXITCODE -eq 0) { Note "Found: $label"; return }
+        Note 'No SDRplay RSP found. Plug the RSP1A into a USB port on the PC itself (not a hub)'
+        Note 'and wait for Windows to finish setting it up.'
+        $answer = Read-Host '    Press Enter to look again, or S to skip'
+        if ($answer -match '^[sS]') { Note "Skipped: the monitor finds the RSP1A once it's plugged in."; return }
+    }
+}
+
+function Install-All {
+    New-Item -ItemType Directory -Force $Cache | Out-Null
+    Install-Radioconda
+    Install-Sdrplay
+    $version = Install-Monitor
+    Install-Helpers
+    Register-Monitor $version
+    Test-Rsp
+    Step "$App is installed in $InstallDir"
+    Note 'Start it from the Start menu or the desktop shortcut. Run this setup again to update it.'
+    if ((Read-Host '    Start it now? [Y/n]') -notmatch '^[nN]') {
+        # Through Explorer, so the monitor runs as the signed-in user, not elevated.
+        Start-Process explorer.exe (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) "$App.lnk")
+    }
+    Remove-Item $Cache -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Uninstall-All {
+    Step "Uninstalling $App from $InstallDir"
+    # The monitor's own "start with Windows" shortcut is per user.
+    Remove-Item (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\fm-modmon-ms.lnk') -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) "$App.lnk") -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) "$App.lnk") -ErrorAction SilentlyContinue
+    foreach ($d in 'soapysdrplay3-build', 'nrsc5', 'ffmpeg', 'app\examples', 'app\__pycache__') {
+        Remove-Item (Join-Path $InstallDir $d) -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($f in 'app\fm-modmon-ms.py', 'app\fm-modmon-ms-web.html', 'app\fm-modmon-ms.ico', 'app\LICENSE',
+                   'app\README.md', 'check_rsp.py', 'install.ps1') {
+        Remove-Item (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
+    }
+    $appDir = Join-Path $InstallDir 'app'
+    if ((Test-Path $appDir) -and (Read-Host "    Also delete $App's settings and event logs? [y/N]") -match '^[yY]') {
+        Remove-Item $appDir -Recurse -Force
+    }
+    foreach ($d in $appDir, $InstallDir) {
+        if ((Test-Path $d) -and -not (Get-ChildItem $d -Force)) { Remove-Item $d -Force }
+    }
+    Remove-Item $UninstKey -Force -ErrorAction SilentlyContinue
+    Note 'radioconda and the SDRplay API are left installed; remove them in Settings > Apps if wanted.'
+}
+
+function Main {
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'   # Expand-Archive's progress bar is very slow in 5.1
+    if (-not (Test-Admin)) {
+        # Relaunch elevated; when piped through iex there's no file, so fetch it first.
+        $self = $PSCommandPath
+        if (-not $self) {
+            $self = Join-Path $env:TEMP 'fm-modmon-ms-install.ps1'
+            Get-Download $ScriptUrl $self
+        }
+        $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -InstallDir `"$InstallDir`""
+        if ($Uninstall) { $argList += ' -Uninstall' }
+        Write-Host "$App setup needs administrator rights; continuing in a new window."
+        Start-Process powershell.exe $argList -Verb RunAs
+        return
+    }
+    if ($Uninstall -and $PSCommandPath) { $script:InstallDir = Split-Path $PSCommandPath }
+    try {
+        if ($Uninstall) { Uninstall-All } else { Install-All }
+    } catch {
+        Write-Host "`nSetup stopped: $_" -ForegroundColor Red
+    }
+    if ($PSCommandPath) { Read-Host "`nPress Enter to close" | Out-Null }
+}
+
+Main

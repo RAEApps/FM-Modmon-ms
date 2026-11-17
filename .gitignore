@@ -35,7 +35,3 @@ __pycache__/
 .idea/
 Thumbs.db
 desktop.ini
-
-# Installer build output (bundles third-party installers; never commit)
-installer/payload/
-installer/dist/
