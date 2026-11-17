@@ -67,6 +67,7 @@ class Web(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/event-stream')
             self.end_headers()
             for event, data in Web.push_events:
+                data = {k: v(time.time()) if callable(v) else v for k, v in data.items()}  # times as sent
                 self.wfile.write(f'id: 1\nevent: {event}\nretry: 15000\ndata: {json.dumps(data)}\n\n'.encode())
                 self.wfile.flush()
             try:
@@ -190,14 +191,14 @@ check('trigger-time: ISO 8601 UTC', rm.RadioVis._when('2012-03-20T11:15:46.271Z'
       datetime.datetime(2012, 3, 20, 11, 15, 46, 271000, datetime.timezone.utc).timestamp())
 
 # ---- Server-sent Events, after failing over from a server that's down
-now = time.time()
+# (trigger-times relative to when the server sends them: failing over can take a few seconds)
 Web.push_events = [
     ('image', {'scope': ['fm:ce1.c479.09580'], 'src': f'{BASE}/missing.png'}),
     ('image', {'scope': ['fm:ce1.c479.09580'], 'src': f'{BASE}/a.png', 'triggerTime': 'NOW',
                'link': 'https://example.org/now'}),
-    ('image', {'scope': ['fm:ce1.c479.09580'], 'src': f'{BASE}/b.png', 'triggerTime': iso(now + 2),
+    ('image', {'scope': ['fm:ce1.c479.09580'], 'src': f'{BASE}/b.png', 'triggerTime': lambda t: iso(t + 3),
                'link': 'https://example.org/later'}),
-    ('image', {'scope': ['fm:ce1.c479.09580'], 'src': f'{BASE}/c.png', 'triggerTime': iso(now - 3600)}),
+    ('image', {'scope': ['fm:ce1.c479.09580'], 'src': f'{BASE}/c.png', 'triggerTime': lambda t: iso(t - 3600)}),
     ('text', {'scope': ['fm:ce1.c479.09580'], 'body': 'You are listening to Example FM'}),
     ('text', {'scope': ['fm:ce1.c479.09580'], 'body': 'x' * 129}),
     ('meta', {'scope': ['fm:ce1.c479.09580'], 'item': {'artist': 'A', 'title': 'B'}}),
