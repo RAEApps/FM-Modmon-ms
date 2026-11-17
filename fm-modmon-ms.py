@@ -111,6 +111,11 @@ Measurements (refreshed 10x per second):
                                     local time, with its offset from UTC)
     Groups/s, group loss            error-free groups; 11.4/s = no loss
     Group types                     share of each group type received
+    Data services                   paging (7A), TMC (8A), EWS (9A), other
+                                    ODAs and SCA data: present or lost, with
+                                    their share; identified, never decoded
+                                    (addressed, often encrypted, and not to be
+                                    divulged: Radiocommunication Act s. 9(2))
   Signal (each receiver passes +/-150 kHz of the FM signal, as a modulation
   monitor's wide IF does, so subcarriers and L-R aren't cut)
     RF level        channel power, dBFS (uncalibrated, depends on gain)
@@ -147,7 +152,9 @@ Measurements (refreshed 10x per second):
     width (side/mid energy ratio), goniometer
   Alarms (raise/clear after holding 3-30 s)
     carrier low/lost, audio silence, over-modulation, pilot lost, RDS
-    lost, wrong PI, IBOC emergency alert (while IBOC plays), and the
+    lost, wrong PI, emergency alert (IBOC while it plays, or an RT+
+    Alarm tag), data service lost (a service on air 5+ min unbroken,
+    then gone; 60 s hold), and the
     technical rules of the receiver's rule set (ISED for --country CA,
     else FCC), every limit adjustable per receiver (changing one makes
     the receiver's rules custom):
@@ -317,7 +324,18 @@ PTY_RDS = ('None', 'News', 'Current Affairs', 'Information', 'Sport', 'Education
 ODA_NAMES = {0x4BD7: 'RT+', 0x6552: 'eRT', 0xCD46: 'TMC', 0xCD47: 'TMC', 0xC3B0: 'iTunes tagging'}
 RTPLUS_TYPES = {1: 'Title', 2: 'Album', 3: 'Track', 4: 'Artist', 5: 'Composition',
                 7: 'Conductor', 8: 'Composer', 9: 'Band', 10: 'Comment', 11: 'Genre',
-                12: 'News', 31: 'Programme', 32: 'Next programme'}
+                12: 'News', 27: 'Alarm', 30: 'Info', 31: 'Programme', 32: 'Next programme'}
+RTPLUS_ALARM = 27          # INFO.ALARM: public alert text (Alert FM's RadioText copy, NRSC-G300 7.2)
+
+# Data services: non-programme data a station carries, watched for presence only.
+# Paging, EWS and leased ODAs are addressed to their own receivers and often
+# encrypted, so they are identified, never decoded (the Radiocommunication Act
+# s. 9(2) bars divulging them); only public alert text (RT+ Alarm) is shown.
+PROGRAMME_ODAS = {0x4BD7, 0x6552, 0xC3B0}   # RT+, eRT, iTunes tagging: programme metadata
+UNANNOUNCED_DATA = {14: 'Paging (7A)', 16: 'TMC (8A)', 18: 'EWS (9A)'}  # group type code: label
+DATA_GAP_S = 15.0          # a service unseen this long is absent
+DATA_STEADY_S = 300.0      # present this long without a gap: the station carries it, its loss alarms
+                           # (shorter bursts, e.g. paging only during an alert, never alarm)
 
 # Band scan: North American 200 kHz raster (88.1 ... 107.9 MHz), in tenths of MHz.
 CHANNELS_MHZ10 = range(881, 1080, 2)
@@ -1002,7 +1020,8 @@ class AudioMeter(gr.sync_block):
 class RdsState(gr.sync_block):
     """Collects gr-rds parser output into a dict, counts decoded groups, and
     decodes the raw groups for what the parser doesn't report: group-type
-    statistics, ECC (1A), ODA announcements (3A), PTYN (10A) and RT+ tags."""
+    statistics, ECC (1A), ODA announcements (3A), PTYN (10A), RT+ tags and
+    which data services (paging, EWS, ODAs) are on air."""
 
     def __init__(self):
         gr.sync_block.__init__(self, name='rds_state', in_sig=None, out_sig=None)
@@ -1029,7 +1048,8 @@ class RdsState(gr.sync_block):
         return {'types': Counter(), 'ecc': None, 'oda': {}, 'ptyn': [' '] * 8, 'ptyn_ab': None,
                 'rtplus': {}, 'rtplus_toggle': None, 'rtplus_at': 0.0, 'rtplus_for': None,
                 'rt': '', 'rt_ab': None, 'rt_seg': {}, 'rt_flip_at': 0.0, 'pty': None, 'ct': None,
-                'ps': '', 'ps_buf': [' '] * 8, 'ps_mask': 0, 'ps_changes': deque(), 'ps_at': 0.0}
+                'ps': '', 'ps_buf': [' '] * 8, 'ps_mask': 0, 'ps_changes': deque(), 'ps_at': 0.0,
+                'data_seen': {}, 'rp_codes': 0}
 
     def snapshot(self):
         """Thread-safe copy of the raw-group decode for the GUI."""
@@ -1038,7 +1058,19 @@ class RdsState(gr.sync_block):
             return {'types': dict(r['types']), 'ecc': r['ecc'], 'oda': dict(r['oda']),
                     'ptyn': ''.join(r['ptyn']).strip() if r['ptyn_ab'] is not None else '',
                     'rtplus': self._rtplus_items(r), 'pty': r['pty'], 'ps': r['ps'], 'ct': r['ct'],
-                    'ps_dynamic': self._ps_dynamic(r), 'ps_age': time.monotonic() - r['ps_at']}
+                    'ps_dynamic': self._ps_dynamic(r), 'ps_age': time.monotonic() - r['ps_at'],
+                    'data': {k: (time.monotonic() - t, g) for k, (t, g) in r['data_seen'].items()},
+                    'rp_codes': r['rp_codes']}
+
+    @staticmethod
+    def _data_key(raw, gtype):
+        """The data service a group belongs to (its label), or None for programme data."""
+        if gtype in (0, 6):
+            return None
+        for aid, g in raw['oda'].items():
+            if g == gtype:
+                return None if aid in PROGRAMME_ODAS else f'ODA {ODA_NAMES.get(aid, f"{aid:04X}")}'
+        return UNANNOUNCED_DATA.get(gtype)
 
     @staticmethod
     def _rtplus_items(raw):
@@ -1089,8 +1121,12 @@ class RdsState(gr.sync_block):
     def _decode(self, a, b, c, d):
         raw = self._raw
         gtype = b >> 11                      # group type * 2 + version (A=0, B=1)
-        raw['types'][f'{gtype >> 1}{"AB"[gtype & 1]}'] += 1
+        name = f'{gtype >> 1}{"AB"[gtype & 1]}'
+        raw['types'][name] += 1
         raw['pty'] = (b >> 5) & 0x1F
+        key = self._data_key(raw, gtype)
+        if key:
+            raw['data_seen'][key] = (time.monotonic(), name)
         if gtype in (0, 1):                                  # 0A/0B: PS, two characters per group
             # Take a PS only when segments 0-3 arrive in order within one cycle,
             # so a scrolling or block PS is shown a whole frame at a time.
@@ -1110,6 +1146,8 @@ class RdsState(gr.sync_block):
                     raw['ps_mask'] = 0
             else:
                 raw['ps_mask'] = 0                           # a segment was missed: wait for the next 0
+        if gtype == 2:                                       # 1A: radio paging codes (EN 50067 Annex M)
+            raw['rp_codes'] = b & 0x1F
         if gtype == 2 and (c >> 12) & 7 == 0:              # 1A variant 0: ECC
             raw['ecc'] = c & 0xFF
         elif gtype == 6:                                     # 3A: ODA announcement
@@ -2811,7 +2849,8 @@ ALARM_DEFS = (
     ('FREQUENCY', 'carrier frequency out of tolerance', 30),
     ('RDS', 'RDS lost', 10),
     ('PI', 'wrong station (PI differs from expected)', 5),
-    ('ALERT', 'IBOC emergency alert', 0),   # only while an IBOC programme is playing
+    ('ALERT', 'emergency alert (IBOC or RT+ Alarm)', 0),  # IBOC: only while an IBOC programme is playing
+    ('DATA', 'data service lost (paging, EWS, ODA or SCA data)', 60),
 )
 
 # FM technical rules the alarms check, per rule set. FCC: 47 CFR 73.1570(b)(2)
@@ -2965,6 +3004,29 @@ class StationAlarms:
         return changes
 
 
+class DataServices:
+    """Which data services a station carries: a service present for DATA_STEADY_S
+    without a gap of DATA_GAP_S is steady, and from then on its absence is a loss."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._since = {}     # present service: start of its current unbroken run
+        self.steady = set()
+
+    def update(self, present):
+        """present: the services on air now. Returns the steady services missing."""
+        now = time.monotonic()
+        for key in list(self._since):
+            if key not in present:
+                del self._since[key]
+        for key in present:
+            if now - self._since.setdefault(key, now) >= DATA_STEADY_S:
+                self.steady.add(key)
+        return sorted(self.steady - set(present))
+
+
 def mod_limit(rules, limits, stats):
     """(limit %, how it was worked out) for peak modulation with `limits`."""
     inj = (stats.get('rds_pct') or 0.0) + sum(stats.get(f'sca{k}_pct') or 0.0 for k in (67, 92))
@@ -2985,8 +3047,8 @@ class StationPanel(QtWidgets.QGroupBox):
     # (title, columns, readouts, readouts long enough to get a full-width row at the end)
     SECTIONS = (
         ('RDS', 2, ('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss',
-                    'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types'),
-         ('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types')),
+                    'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'),
+         ('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')),
         ('Signal', 2, ('RF level', 'MPX S/N', 'Carrier offset', 'AM / multipath',
                        'Pilot (19 kHz)', 'Pilot freq', 'RDS injection', 'IBOC signal',
                        'SCA 67 kHz', 'SCA 92 kHz'), ('SCA 67 kHz', 'SCA 92 kHz')),
@@ -3007,6 +3069,9 @@ class StationPanel(QtWidgets.QGroupBox):
         self.country = country
         self.iboc_scan = iboc_scan if iboc_scan is not None else {}
         self.alarms = StationAlarms()
+        self.data_services = DataServices()
+        self._data_lost = []
+        self._rt_alarm = ''
         self.rate = 0.0
         self._groups = deque()
         self._web_lists = None  # (stations, sources) for the web page; None = rebuild
@@ -3393,6 +3458,9 @@ class StationPanel(QtWidgets.QGroupBox):
         self._groups.clear()
         self.rate = 0.0
         self.alarms.reset()
+        self.data_services.reset()
+        self._data_lost = []
+        self._rt_alarm = ''
         for m in self.meters.values():
             m.set_value(None, '-')
         self.gonio.set_data(None)
@@ -3495,9 +3563,11 @@ class StationPanel(QtWidgets.QGroupBox):
             label.setText(text)
             label.setToolTip(QtGui.QTextDocumentFragment.fromHtml(text).toPlainText() if text != '-' else '')
         self._update_media(f, raw)
-        tags = [f'{RTPLUS_TYPES.get(t, f"type {t}")}: {text}'
-                for t, text in sorted(raw['rtplus'], key=lambda kv: (kv[0] != 4, kv[0]))]
-        self.rtplus.setText(_html('   ·   '.join(tags)) if tags else '-')
+        tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>')
+                + _html(f'{RTPLUS_TYPES.get(t, f"type {t}")}: {text}') + '</span>'
+                for t, text in sorted(raw['rtplus'], key=lambda kv: (kv[0] != RTPLUS_ALARM, kv[0] != 4, kv[0]))]
+        self.rtplus.setText('   ·   '.join(tags) if tags else '-')
+        self._rt_alarm = next((text for t, text in raw['rtplus'] if t == RTPLUS_ALARM), '')
         v['PI'].setText(f.get(0, '-'))
         if raw['pty'] is not None:
             v['PTY'].setText((PTY_RDS if self.settings.pty_names == 'rds' else PTY_RBDS)[raw['pty']])
@@ -3573,6 +3643,8 @@ class StationPanel(QtWidgets.QGroupBox):
             peak = max(s['pos_pct'], s['neg_pct'])
             self.meters['mod'].set_value(peak, f'{peak:.0f}%')
 
+        self._update_data_services(raw, s, total)
+
         a = st.audio_meter.stats
         if a:
             v['L / R'].setText(f"{_pct_html(a['mod_l'])} / {_pct_html(a['mod_r'])}")
@@ -3625,7 +3697,9 @@ class StationPanel(QtWidgets.QGroupBox):
                 'PILOT': self.alarms.seen_pilot and not st.pilot,
                 'RDS': self.alarms.seen_rds and rate < 1,
                 'PI': bool(cfg.expected_pi and pi and pi != cfg.expected_pi),
-                'ALERT': bool(st.iboc and st.iboc.status['alert']),
+                'ALERT': bool(st.iboc and st.iboc.status['alert']) or bool(self._rt_alarm),
+                # RDS services only while RDS itself is fine (else the RDS alarm says it)
+                'DATA': not carrier and any(k.startswith('SCA') or rate > 5 for k in self._data_lost),
             }
             changes = self.alarms.update({k: v and cfg.alarms.get(k, True) for k, v in conditions.items()},
                                          holds={'SILENCE': cfg.silence_s})
@@ -3649,6 +3723,24 @@ class StationPanel(QtWidgets.QGroupBox):
                  'background: #1b2f21; color: #69db7c; border: 1px solid #2c5236;'))
         return changes
 
+    def _update_data_services(self, raw, s, total):
+        """The Data services readout, and the steady services now missing (self._data_lost)."""
+        present = {k: g for k, (age, g) in raw['data'].items() if age <= DATA_GAP_S}
+        for khz in (67, 92):
+            if s and self._sca_kind(khz, s) == 'data':
+                present[f'SCA {khz} kHz data'] = None
+        self._data_lost = self.data_services.update(present)
+        parts = []
+        for key, g in sorted(present.items()):
+            text = _html(key)
+            if key == UNANNOUNCED_DATA[14] and raw['rp_codes']:
+                text += f' <span style="color:{DIM}">(1A paging codes {raw["rp_codes"]:02X})</span>'
+            if g and total:
+                text += f' {raw["types"].get(g, 0) * 100 / total:.0f}%'
+            parts.append(text)
+        parts += [f'<span style="color:{RED}">{_html(k)} lost</span>' for k in self._data_lost]
+        self.values['Data services'].setText('  ·  '.join(parts) or '-')
+
     def _alarm_details(self, s, a, lim, limit, subcarriers, rate, pi):
         """What each alarm measured, against its limit, for the event log and notifications."""
         st, cfg = self.station, self.settings
@@ -3671,6 +3763,8 @@ class StationPanel(QtWidgets.QGroupBox):
             'PILOT': f'pilot {num(s["pilot_pct"])}%',
             'RDS': f'RDS {num(rate)} groups/s',
             'PI': f'PI {pi or "-"}, expected {cfg.expected_pi}',
+            'ALERT': f'RT+ Alarm: {self._rt_alarm}' if self._rt_alarm else '',
+            'DATA': f'not on air for {DATA_GAP_S:.0f}+ s: {", ".join(self._data_lost)}' if self._data_lost else '',
         }
 
     def web_state(self, feed_port, default_port, listeners):
