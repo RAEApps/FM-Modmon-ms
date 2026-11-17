@@ -5832,7 +5832,9 @@ class MainWindow(QtWidgets.QWidget):
                                 self.country)
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
-        self._apply_settings(panel, dialog.settings())
+        new = dialog.settings()
+        new.audio_source = panel.settings.audio_source  # set with the source control, not the dialog
+        self._apply_settings(panel, new)
 
     def _apply_settings(self, panel, new):
         if new == panel.settings:
@@ -5981,6 +5983,7 @@ class MainWindow(QtWidgets.QWidget):
         if len(self.panels) <= 1:
             return
         title = panel.title
+        self._clear_alarms(panel, 'receiver removed')
         if panel.play.isChecked():
             panel.play.setChecked(False)
         self._set_feed(panel, False)
@@ -6042,6 +6045,7 @@ class MainWindow(QtWidgets.QWidget):
             panel.combo.setCurrentIndex(panel.combo.findData(panel.station.freq_hz))
             return
         old = panel.title
+        self._clear_alarms(panel, 'receiver retuned')
         self.tb.stop_iboc(panel.slot)       # nrsc5 follows one station; restarted below
         self.tb.set_freq(panel.slot, freq)  # SDR window follows the chosen stations
         panel.reset_display()
@@ -6081,6 +6085,20 @@ class MainWindow(QtWidgets.QWidget):
                 self.log(f'receiver {panel.slot + 1}: IBOC not started: {e}')
         st.set_audio(key, on)
 
+    def _alarm_event(self, panel, desc, raised, detail=''):
+        text = f'{panel.title}: {"ALARM" if raised else "cleared"} - {desc}' + (f': {detail}' if detail else '')
+        self.log(text)
+        if not self._recovery:
+            self.notifier.event('raise' if raised else 'clear', text)
+
+    def _clear_alarms(self, panel, why):
+        """Send 'cleared' for a receiver's raised alarms before it stops judging
+        them (retuned or removed), so email and webhooks see each one end."""
+        for name, desc, _ in ALARM_DEFS:
+            if name in panel.alarms.active:
+                self._alarm_event(panel, desc, False, why)
+        panel.alarms.active.clear()
+
     def _refresh(self):
         for p in self.panels:
             if p.feed and p.feed.clients != self._feed_clients.get(p.slot, 0):
@@ -6089,10 +6107,7 @@ class MainWindow(QtWidgets.QWidget):
                          f'{"client connected" if n > was else "client disconnected"}, {n} now')
                 self._feed_clients[p.slot] = n
             for desc, raised, detail in p.refresh():
-                text = f'{p.title}: {"ALARM" if raised else "cleared"} - {desc}' + (f': {detail}' if detail else '')
-                self.log(text)
-                if not self._recovery:
-                    self.notifier.event('raise' if raised else 'clear', text)
+                self._alarm_event(p, desc, raised, detail)
             alert = p.station.iboc.status['alert'] if p.station.iboc else None
             if alert != getattr(p, 'last_alert', None):
                 if alert:
@@ -6147,7 +6162,7 @@ class MainWindow(QtWidgets.QWidget):
                 action, args, fut = self.web.commands.get_nowait()
             except queue.Empty:
                 return
-            if action == 'log':
+            if fut is None:  # WebView.note(), not a page request (the page can post /api/log too)
                 self.log(args['text'])
                 continue
             if not fut.set_running_or_notify_cancel():

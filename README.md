@@ -25,7 +25,7 @@ Per station, refreshed 10× a second:
 - **IBOC** – via [nrsc5](https://github.com/theori-io/nrsc5): status, MER/BER, PSD, SIS,
   station logo and album art, emergency alerts
 - **RadioDNS** – service information and slideshow (RadioVIS) slides, text and links over
-  Server-sent Events, HTTP long polling or Stomp, tried in that order with SRV failover
+  Server-sent Events, Stomp or HTTP long polling, tried in that order with SRV failover
   (ETSI TS 103 270 / TS 101 499 v3.2)
 
 ## Alarms
