@@ -1,6 +1,6 @@
 ; FM-Modmon-ms installer: one exe for a brand-new Windows PC.
 ; Installs radioconda, the SDRplay API (RSP1A USB driver and service), the SoapySDRPlay3
-; module, nrsc5, ffmpeg (via winget) and the monitor itself, then checks the RSP1A is seen.
+; module, nrsc5, ffmpeg and the monitor itself, then checks the RSP1A is seen.
 ; Build with build.ps1, which gathers payload\ and passes the version defines.
 
 Unicode true
@@ -167,13 +167,10 @@ Section "nrsc5 (HD Radio / IBOC decoding)" SecNrsc5
   File "payload\nrsc5.exe"
 SectionEnd
 
-Section "ffmpeg for web audio (downloaded with winget)" SecFfmpeg
-  DetailPrint "Installing ffmpeg with winget (needs internet)..."
-  nsExec::ExecToLog 'cmd.exe /c winget install --id Gyan.FFmpeg.Shared --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity'
-  Pop $0
-  ${If} $0 != 0
-    DetailPrint "ffmpeg wasn't installed (winget exit $0); the web page will have no audio until it is."
-  ${EndIf}
+Section "ffmpeg (web audio)" SecFfmpeg
+  ; Found by the monitor at ..\ffmpeg, beside the app folder.
+  SetOutPath "$INSTDIR\ffmpeg"
+  File "payload\ffmpeg\*"
 SectionEnd
 
 Section "Desktop shortcut" SecDesktop
@@ -204,7 +201,7 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecSdrplay} "SDRplay's API service and the RSP1A USB driver. Skipped if this version or newer is installed."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The monitor, its web page and the SoapySDRPlay3 module."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecNrsc5} "Decodes HD Radio: status, audio, station logos and alerts."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecFfmpeg} "Audio in the web version. Downloaded from winget at install time."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecFfmpeg} "Encodes the audio in the web version (MP3, AAC, Opus, FLAC)."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "A desktop shortcut to start the monitor."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
@@ -231,6 +228,7 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\app\__pycache__"
   RMDir /r "$INSTDIR\soapysdrplay3-build"
   RMDir /r "$INSTDIR\nrsc5"
+  RMDir /r "$INSTDIR\ffmpeg"
   Delete "$INSTDIR\check_rsp.py"
   MessageBox MB_YESNO|MB_DEFBUTTON2 "Also delete ${APP}'s settings and event logs?" /SD IDNO IDNO keep
   RMDir /r "$INSTDIR\app"
@@ -239,5 +237,5 @@ keep:
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "${UNINST_KEY}"
-  DetailPrint "radioconda, the SDRplay API and ffmpeg are left installed; remove them in Settings > Apps if wanted."
+  DetailPrint "radioconda and the SDRplay API are left installed; remove them in Settings > Apps if wanted."
 SectionEnd

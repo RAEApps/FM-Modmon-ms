@@ -2147,10 +2147,14 @@ class PcmTap(gr.sync_block):
 
 
 def find_ffmpeg():
-    """ffmpeg on the PATH, else a WinGet install of it, else None."""
+    """ffmpeg on the PATH, else one beside this folder (the installer's), else a WinGet install, else None."""
     found = shutil.which('ffmpeg')
     if found:
         return found
+    bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ffmpeg',
+                           'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg')
+    if os.path.exists(bundled):
+        return os.path.normpath(bundled)
     pattern = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'WinGet', 'Packages',
                            '*FFmpeg*', '**', 'bin', 'ffmpeg.exe')
     matches = sorted(glob.glob(pattern, recursive=True))
@@ -6294,7 +6298,8 @@ def build_parser(width=100):
                          'Setup (default: the FM_MODMON_WEB_PASSWORD environment variable; with no '
                          'password at all, the controls work only in a browser on this PC)')
     ap.add_argument('--ffmpeg', default=None,
-                    help='ffmpeg for the web audio (default: ffmpeg on the PATH, or a WinGet install)')
+                    help='ffmpeg for the web audio (default: ffmpeg on the PATH, the installer\'s, '
+                         'or a WinGet install)')
     ap.add_argument('--web-audio', default=','.join(WEB_FORMATS), metavar='FORMATS',
                     help='web audio formats to offer, the first being the page default '
                          '(default: %(default)s; those ffmpeg can encode)')
