@@ -1,4 +1,4 @@
-# FM-Modmon-ms setup for Windows 10/11: takes a new PC to a running monitor, from GitHub.
+# FM-Modmon-ms setup for Windows 10/11: installs the monitor and everything it needs, from GitHub.
 # In PowerShell:
 #   irm https://raw.githubusercontent.com/RAEApps/FM-Modmon-ms/main/install.ps1 | iex
 # Installs radioconda (GNU Radio 3.10), the SDRplay API (RSP1A driver and service), the
