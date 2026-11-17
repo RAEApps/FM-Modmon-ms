@@ -63,20 +63,28 @@ Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout.
 
 ## Installing on a new PC
 
-`installer\build.ps1` builds one setup exe (about 700 MB) that brings a fresh Windows PC up to
-a running monitor: radioconda, the SDRplay API (the RSP1A's USB driver and service), the
-SoapySDRPlay3 module, nrsc5, ffmpeg (through winget, needs internet) and the monitor, with Start
-menu and desktop shortcuts. It skips what's already installed, then asks for the RSP1A to be
-plugged in and checks it's found. It needs [NSIS](https://nsis.sourceforge.io/), the radioconda
-and SDRplay API installers (newest in Downloads, or `-Radioconda` / `-Sdrplay`), and the
-SoapySDRPlay3 module and nrsc5 built beside this folder:
+In PowerShell (it asks for administrator rights):
 
 ```bash
-powershell -ExecutionPolicy Bypass -File installer\build.ps1
+irm https://raw.githubusercontent.com/RAEApps/FM-Modmon-ms/main/install.ps1 | iex
 ```
 
-The monitor installs to `C:\Program Files\FM-Modmon-ms`; running setup again updates it and
-keeps its settings. Uninstalling leaves radioconda, the SDRplay API and ffmpeg in place.
+[`install.ps1`](install.ps1) brings a fresh Windows PC up to a running monitor, downloading
+each piece from its source and skipping what's already installed:
+
+- **radioconda** 2025.03.14 from its GitHub release (about 630 MB)
+- **SDRplay API** (the RSP1A's USB driver and service): SDRplay only offers it from
+  [its website](https://www.sdrplay.com/api/) after its licence, so setup opens that page and
+  carries on once the download lands in Downloads; it must be signed by SDRplay
+- **SoapySDRPlay3** and **nrsc5** from this repo's
+  [`deps-2026.11` release](https://github.com/RAEApps/FM-Modmon-ms/releases/tag/deps-2026.11),
+  and **ffmpeg** 8.0.1 from [gyan.dev's](https://github.com/GyanD/codexffmpeg) GitHub release
+- **the monitor** from `main`, with Start menu and desktop shortcuts
+
+Pinned downloads are checked against their SHA-256. At the end it asks for the RSP1A to be
+plugged in and checks it's found. The monitor goes to `C:\Program Files\FM-Modmon-ms`; running
+setup again updates it to the latest `main` and keeps its settings. Uninstall it from
+*Settings → Apps*, which leaves radioconda and the SDRplay API in place.
 
 ## Running
 
