@@ -58,6 +58,10 @@ Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout.
 C:\ProgramData\radioconda\python.exe fm-modmon-ms.py
 ```
 
+The first start opens a short **setup**: where the monitor is (ISED rules in Canada, FCC
+elsewhere), the web version and the password for its controls, email / webhook notifications
+and starting with Windows. Run it again from *Settings → Run setup again* or with `--setup`.
+
 On start it scans 88–108 MHz, calibrates the RSP1A's gain for the stations found and opens a
 receiver on the strongest. *Add receiver* opens more (any that fit in the 7.2 MHz window).
 Useful options:
@@ -69,22 +73,29 @@ C:\ProgramData\radioconda\python.exe fm-modmon-ms.py --freqs 94.5 101.7 --countr
 | Option | |
 |---|---|
 | `--freqs MHZ …` | start on these stations instead of the saved ones |
+| `--setup` | open the setup before starting |
 | `--country CC` | ISO country (ISED rules for `CA`, FCC otherwise; RadioDNS) |
 | `--lna N --ifgr DB` | fixed gain instead of start-up calibration |
 | `--web-port N` | web version port (default 8765, `0` = off) |
 | `--web-bind ADDR` | `127.0.0.1` keeps the web version on this PC |
-| `--web-password PW` | allow the web controls from other computers |
+| `--web-password PW` | web controls password, instead of the one set in setup |
 | `--rds-port N` | first raw RDS group feed port (default 7711; `0` = off) |
 
-Run with `--help` for the full list. Receivers and their settings are saved to
-`fm-modmon-ms_config.json`; events are logged to `logs/`.
+Run with `--help` for the full list. Command-line options override what setup chose.
+Receivers and settings are saved to `fm-modmon-ms_config.json`; events are logged to `logs/`.
+
+### Passwords
+
+- **Web password** – kept in the settings file only as a salted PBKDF2-SHA256 hash.
+- **SMTP password** – it has to be sent as is, so it is kept in **Windows Credential Manager**
+  (entry `FM-Modmon-ms/smtp`, protected by your Windows sign-in), never in the settings file.
 
 ### Environment variables
 
 | Variable | Use |
 |---|---|
-| `FM_MODMON_WEB_PASSWORD` | web controls password (instead of `--web-password`) |
-| `FM_MODMON_SMTP_PASSWORD` | SMTP password for email notifications (never stored in the config) |
+| `FM_MODMON_WEB_PASSWORD` | web controls password, instead of the one set in setup |
+| `FM_MODMON_SMTP_PASSWORD` | SMTP password, instead of the one in Credential Manager |
 | `RADIODNS_CLIENT_ID` | RadioDNS client identifier, for providers that need one |
 | `SOAPY_SDR_PLUGIN_PATH` | where the SoapySDRPlay3 module is |
 
@@ -92,7 +103,7 @@ Run with `--help` for the full list. Receivers and their settings are saved to
 
 `http://<this-pc>:8765/` shows the same panels, updated 10× a second, with each receiver's
 audio in the browser. Anyone who can reach the port can watch and listen; the controls
-need `--web-password`, or, without one, a browser on the monitor PC itself.
+need the web password (set in setup), or, without one, a browser on the monitor PC itself.
 
 **Security:** the web version is plain HTTP, so the password crosses the network
 unencrypted. Use it on a trusted network, bind it to `127.0.0.1` behind a TLS reverse
@@ -116,6 +127,9 @@ C:\ProgramData\radioconda\python.exe tests\verify_meas.py
 ```bash
 C:\ProgramData\radioconda\python.exe tests\rules_test.py
 ```
+
+`tests\setup_test.py` checks the setup wizard, the password hash, Credential Manager and
+the web sign-in.
 
 ## Examples
 
