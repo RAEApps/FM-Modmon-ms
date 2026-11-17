@@ -44,9 +44,11 @@ RadioDNS (ETSI TS 103 270): each station is looked up from its frequency,
 PI and GCC (ECC, or derived from --country) and, while IBOC plays, its IBOC
 station ID. Where the station's RadioDNS service information (SPI) can be
 read, its name and logo show on the panel's RadioDNS line; where it has a
-RadioDNS slideshow (RadioVIS, ETSI TS 101 499, over STOMP), its current
-slide (usually the album art) shows as the album art (after IBOC's own), and
-its text in the slide's tooltip. The RadioDNS line shows only while RadioDNS
+RadioDNS slideshow (RadioVIS, ETSI TS 101 499: Server-sent Events, or the
+older Stomp or HTTP transports), its current slide (usually the album art)
+shows as the album art (after IBOC's own); clicking it opens the slide's
+link, and the slideshow text shows on the RadioDNS line. Slides sent ahead
+with a trigger-time show at that time. The RadioDNS line shows only while RadioDNS
 works for the station; the logo is used
 when no IBOC logo is on air. Some providers need a client identifier: set
 RADIODNS_CLIENT_ID (or --radiodns-client-id). Images and service information
@@ -164,6 +166,7 @@ Measurements (refreshed 10x per second):
 """
 
 import argparse
+import bisect
 import glob
 import concurrent.futures
 import contextlib
@@ -173,10 +176,12 @@ import gc
 import datetime
 import hashlib
 import hmac
+import itertools
 import json
 import math
 import os
 import queue
+import random
 import re
 import secrets
 import shutil
@@ -191,6 +196,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import Counter, OrderedDict, deque
@@ -299,6 +305,11 @@ MIME_STATION_LOGO = 0xD9C72536    # nrsc5: LOT component carrying the station lo
 IMAGE_KEEP_S = 1800        # cached IBOC images not in use are pruned after this
 CACHE_PREFIX = 'fm-modmon-ms_cache_'  # session cache folder in %TEMP%, deleted on exit
 RADIODNS_RETRY_S = 300     # retry a failed RadioDNS lookup after this
+RADIODNS_IMAGE_MAX = 2 << 20  # a RadioDNS logo or slide bigger than this (bytes) isn't downloaded
+# RadioDNS slideshow transports (TS 101 499 table 5), in the order they're tried:
+# Server-sent Events (current), then the deprecated Stomp and HTTP long polling
+VIS_TRANSPORTS = (('push', '_radiopush._tcp'), ('stomp', '_radiovis._tcp'), ('http', '_radiovis-http._tcp'))
+VIS_TRANSPORT_NAMES = {'push': 'Server-sent Events', 'stomp': 'Stomp', 'http': 'HTTP'}
 
 # PTY names: RBDS (North America, NRSC-4-B) and RDS (IEC 62106 / EN 50067).
 PTY_RBDS = ('None', 'News', 'Information', 'Sports', 'Talk', 'Rock', 'Classic Rock', 'Adult Hits',
@@ -1311,6 +1322,20 @@ def dns_query(name, rtype):
     return out
 
 
+def srv_order(records):
+    """SRV (priority, weight, port, target) records as [(host, port)] in the
+    order to try them (RFC 2782): lowest priority first, and within a priority
+    a shuffle weighted by weight. A target of '.' (service not offered) is dropped."""
+    out = []
+    for prio in sorted({r[0] for r in records}):
+        group = [r for r in records if r[0] == prio and r[3].rstrip('.')]
+        while group:
+            r = random.choices(group, weights=[w or 0.01 for _, w, _, _ in group])[0]
+            group.remove(r)
+            out.append((r[3].rstrip('.'), r[2]))
+    return out
+
+
 def radiodns_fm(pi, freq_hz, ecc, country):
     """(RadioDNS FQDN, bearerURI) of an FM service, or None when the GCC can't
     be known. GCC = PI country nibble + ECC; without an ECC it is derived from
@@ -1425,21 +1450,23 @@ class RadioDns:
             return None
         sub = self._vis.get(fqdn)
         if sub is None or sub.stopped:
-            host, port = result['vis']
-            topic = '/topic/' + '/'.join(reversed(fqdn.split('.radiodns.org')[0].split('.')))
-            sub = self._vis[fqdn] = RadioVis(host, port, topic, self._download)
+            service = '/'.join(reversed(fqdn.split('.radiodns.org')[0].split('.')))  # fm/ce1/c479/09580
+            sub = self._vis[fqdn] = RadioVis(result['vis'], service, self._download, self.client_id)
         sub.want()
         return sub
 
     def _resolve(self, fqdn, bearer):
         result = self._resolve_spi(fqdn, bearer)
         if result.get('target'):  # the slideshow is found the same way as the service information
-            try:
-                vis = sorted(dns_query(f'_radiovis._tcp.{result["target"]}', DNS_TYPE_SRV))
-            except OSError:
-                vis = []
+            vis = []
+            for transport, name in VIS_TRANSPORTS:
+                try:
+                    srv = dns_query(f'{name}.{result["target"]}', DNS_TYPE_SRV)
+                except OSError:
+                    continue
+                vis += [(transport, host, port) for host, port in srv_order(srv)]
             if vis:
-                result['vis'] = (vis[0][3].rstrip('.'), vis[0][2])
+                result['vis'] = vis
         return result
 
     def _resolve_spi(self, fqdn, bearer):
@@ -1447,13 +1474,17 @@ class RadioDns:
         if not targets:
             return {'state': 'not registered'}
         target = targets[0].rstrip('.')
-        srv = sorted(dns_query(f'_radiospi._tcp.{target}', DNS_TYPE_SRV))
+        srv = srv_order(dns_query(f'_radiospi._tcp.{target}', DNS_TYPE_SRV))
         if not srv:
             return {'state': 'no service information', 'target': target}
-        _, _, port, host = srv[0]
-        host = host.rstrip('.')
-        spi = host if port == 443 else f'{host}:{port}'
-        services = self._service_info(spi)
+        for i, (host, port) in enumerate(srv):  # the next server only when one can't be reached
+            spi = host if port == 443 else f'{host}:{port}'
+            try:
+                services = self._service_info(spi)
+                break
+            except (OSError, ET.ParseError):
+                if i == len(srv) - 1:
+                    raise
         if isinstance(services, str):
             return {'state': services, 'target': target, 'spi': spi}
         base = bearer.rsplit('.', 1)[0] + '.*' if bearer.startswith('fm:') else None
@@ -1493,38 +1524,80 @@ class RadioDns:
         return self._logos[url]
 
     def _download(self, url):
-        """The image at url, downloaded to a new file in the session cache."""
-        ext = os.path.splitext(url.split('?', 1)[0])[1][:5] or '.img'
-        fd, path = tempfile.mkstemp(suffix=ext, prefix='radiodns_', dir=cache_dir())
+        """The image at url, downloaded to a new file in the session cache.
+        OSError if it's over RADIODNS_IMAGE_MAX or isn't an image (by its
+        content type or, when a server labels it generically, its first bytes)."""
         req = urllib.request.Request(url, headers={'User-Agent': self.USER_AGENT})
         try:
-            with os.fdopen(fd, 'wb') as fh, urllib.request.urlopen(req, timeout=20) as resp:
-                fh.write(resp.read())
-        except BaseException:
-            os.remove(path)
-            raise
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read(RADIODNS_IMAGE_MAX + 1)
+                ctype = resp.headers.get_content_type()
+        except ValueError as e:  # not a URL urllib can fetch
+            raise OSError(str(e)) from e
+        if len(data) > RADIODNS_IMAGE_MAX:
+            raise OSError(f'image over {RADIODNS_IMAGE_MAX >> 20} MB')
+        if not ctype.startswith('image/') and not _image_type(data):
+            raise OSError(f'not an image ({ctype})')
+        ext = os.path.splitext(url.split('?', 1)[0])[1][:5] or '.img'
+        fd, path = tempfile.mkstemp(suffix=ext, prefix='radiodns_', dir=cache_dir())
+        with os.fdopen(fd, 'wb') as fh:
+            fh.write(data)
         return path
 
 
 class RadioVis:
-    """A RadioDNS slideshow (RadioVIS, ETSI TS 101 499) over STOMP 1.0: the
-    current slide image (downloaded with fetch(url) -> file), its link, and
-    the station's RadioVIS text, from <topic>/image and <topic>/text. Runs
-    while want() is called; reconnects after a dropped connection. The last
-    SLIDES slides stay cached (stations often rotate a few); older ones are deleted."""
+    """A RadioDNS slideshow (ETSI TS 101 499 clause 7): the current slide image
+    (downloaded with fetch(url) -> file), its click-through link and the
+    station's slideshow text. Uses the first of the station's servers
+    [(transport, host, port)] that works, trying them in order (VIS_TRANSPORTS:
+    Server-sent Events, then Stomp, then HTTP long polling) and staying with
+    one that worked after it drops. Runs while want() is called.
+
+    A slide with a future trigger-time is downloaded when it arrives and shown
+    at that time; one whose time has passed is not shown (5.3.2). One without
+    a trigger-time shows at once, as the original RadioVIS (RVIS01) servers
+    expect. A slide that can't be downloaded is skipped (error says why) and
+    the last one stays. The last SLIDES slides stay cached (stations often
+    rotate a few); older ones are deleted."""
 
     IDLE_S = 60
     SLIDES = 16
+    LATE_S = 10       # a trigger-time this far past (clock and network skew) still shows
+    TEXT_MAX = 128    # longer slideshow text is ignored (7.2.2)
+    URL_MAX = 512     # longer slide and link URLs are ignored (7.2.3, 5.3.3)
+    PUSH_TIMEOUT_S = 30  # Server-sent Events: reconnect after this long without a heartbeat (7.6.4)
+    HTTP_TIMEOUT_S = 90  # HTTP: a long poll held open this long isn't an error (7.4.2)
 
-    def __init__(self, host, port, topic, fetch):
-        self.host, self.port, self.topic, self.fetch = host, port, topic, fetch
+    def __init__(self, servers, service, fetch, client_id=None):
+        self.servers = list(servers)  # [(transport, host, port)], in the order to try
+        self.service = service        # ServiceIdentifier topic path, e.g. fm/ce1/c479/09580
+        self.fetch, self.client_id = fetch, client_id
         self.state = 'connecting'
-        self.image = self.link = None
+        self.transport = None  # the transport in use (a VIS_TRANSPORTS key)
         self.text = ''
+        self.error = None      # why the last slide wasn't shown, until one is
         self.stopped = False
+        self._image = self._link = None
+        self._pending = []     # (trigger time, seq, file, link) slides waiting for their time, soonest first
+        self._seq = itertools.count()
+        self._lock = threading.Lock()
+        self._done = set()     # (transport, topic) the server refused or ended: not asked again this session
+        self._worked = False   # this connection got through (so a drop retries the same server)
         self._wanted = time.monotonic()
         self._slides = OrderedDict()  # url -> cached file, oldest first
         threading.Thread(target=self._run, daemon=True).start()
+
+    @property
+    def image(self):
+        """The slide on show (a cached file), after showing any whose trigger-time has come."""
+        self._due()
+        return self._image
+
+    @property
+    def link(self):
+        """The current slide's click-through URL, or None."""
+        self._due()
+        return self._link
 
     def want(self):
         self._wanted = time.monotonic()
@@ -1532,70 +1605,271 @@ class RadioVis:
     def _idle(self):
         return time.monotonic() - self._wanted > self.IDLE_S
 
+    def _due(self):
+        now = time.time()
+        with self._lock:
+            while self._pending and self._pending[0][0] <= now:
+                _, _, self._image, self._link = self._pending.pop(0)
+
     def _run(self):
-        wait = 5
+        wait, i = 5, 0
         while not self._idle():
+            transport, host, port = self.servers[i % len(self.servers)]
+            self.transport, self.state = transport, 'connecting'
+            self._worked = False
             try:
-                self._session()
+                getattr(self, '_' + transport)(host, port)
                 wait = 5
             except (OSError, ValueError) as e:
                 self.state = f'error: {e}'
-                time.sleep(wait)
-                wait = min(wait * 2, 120)
+                if not self._worked:  # couldn't use this server: try the next one
+                    i += 1
+                if self._worked or i % len(self.servers) == 0:  # dropped, or tried them all: wait first
+                    time.sleep(wait)
+                    wait = min(wait * 2, 120)
         self.stopped = True
 
-    def _session(self):
-        with socket.create_connection((self.host, self.port), timeout=15) as sock:
-            send = lambda frame: sock.sendall(frame.encode() + b'\0')  # noqa: E731
-            send(f'CONNECT\naccept-version:1.0\nhost:{self.host}\n\n')
-            for i, kind in enumerate(('image', 'text')):
-                send(f'SUBSCRIBE\nid:{i}\ndestination:{self.topic}/{kind}\nack:auto\n\n')
-            sock.settimeout(5)
-            buf = b''
-            while not self._idle():
-                try:
-                    data = sock.recv(65536)
-                except socket.timeout:
-                    continue
-                if not data:
-                    raise OSError('the slideshow server closed the connection')
-                buf += data
-                while b'\0' in buf:
-                    frame, buf = buf.split(b'\0', 1)
-                    self._frame(frame.lstrip(b'\r\n').decode('utf-8', errors='replace'))
+    def _connected(self):
+        self.state = 'connected' if self._image is None else 'showing'
+        self._worked = True
 
-    def _frame(self, frame):
-        head, _, body = frame.partition('\n\n')
-        lines = head.splitlines()
-        if not lines:
+    # ---- messages (the same from every transport)
+
+    def _message(self, body, link=None, trigger=None):
+        """A TEXT or SHOW message body, with a SHOW's link and trigger-time."""
+        body = (body or '').strip()
+        if body.startswith('SHOW '):
+            self._show(body[5:].strip(), link, trigger)
+        elif body.startswith('TEXT '):
+            self._text(body[5:].strip())
+
+    def _text(self, text):
+        if len(text) <= self.TEXT_MAX:
+            self.text = text
+
+    @staticmethod
+    def _when(trigger):
+        """A trigger-time as a time.time() value; None for NOW, none given or unreadable."""
+        trigger = (trigger or '').strip()
+        if not trigger or trigger.upper() == 'NOW':
+            return None
+        try:
+            t = datetime.datetime.fromisoformat(trigger.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if t.tzinfo is None:  # trigger times are UTC (6.2.4)
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        return t.timestamp()
+
+    def _show(self, url, link=None, trigger=None):
+        """A slide: downloaded now, shown now or held until its trigger-time."""
+        if not re.match(r'https?://', url) or len(url) > self.URL_MAX:
             return
-        if lines[0] == 'CONNECTED':
-            self.state = 'connected'
-        elif lines[0] == 'ERROR':
-            raise ValueError(dict(line.split(':', 1) for line in lines[1:] if ':' in line).get('message', 'refused'))
-        elif lines[0] == 'MESSAGE':
-            headers = dict(line.split(':', 1) for line in lines[1:] if ':' in line)
-            body = body.strip()
-            if body.startswith('SHOW '):
-                url = body[5:].strip()
-                if re.match(r'https?://', url):
-                    self.image = self._slide(url)
-                    self.link = headers.get('link')
-                    self.state = 'showing'
-            elif body.startswith('TEXT '):
-                self.text = body[5:].strip()
+        when = self._when(trigger)
+        if when is not None and when < time.time() - self.LATE_S:
+            return  # its time has passed: held, never shown (5.3.2), so not worth downloading
+        link = (link or '').strip()
+        link = link if re.match(r'https?://', link) and len(link) <= self.URL_MAX else None
+        try:
+            path = self._slide(url)
+        except OSError as e:  # keep the connection and the slide on show
+            self.error = f'{url}: {e}'
+            return
+        self.error = None
+        with self._lock:
+            if when is None or when <= time.time():
+                self._image, self._link = path, link
+                self.state = 'showing'
+            else:
+                bisect.insort(self._pending, (when, next(self._seq), path, link))
+                del self._pending[self.SLIDES // 2:]  # a flood of future slides can't evict the cache
 
     def _slide(self, url):
         path = self._slides.pop(url, None)
         if path is None or not os.path.exists(path):
             path = self.fetch(url)
         self._slides[url] = path
-        while len(self._slides) > self.SLIDES:
+        with self._lock:
+            keep = {self._image} | {p[2] for p in self._pending}
+        old = [u for u, p in self._slides.items() if p not in keep]
+        for u in old[:max(0, len(self._slides) - self.SLIDES)]:
             try:
-                os.remove(self._slides.popitem(last=False)[1])
+                os.remove(self._slides.pop(u))
             except OSError:
                 pass
         return path
+
+    # ---- Server-sent Events (7.6)
+
+    def _push_url(self, host, port):
+        netloc = host if port in (80, 443) else f'{host}:{port}'
+        return f'{"http" if port == 80 else "https"}://{netloc}/radiodns/push/3/{self.service}'
+
+    def _push(self, host, port):
+        url = self._push_url(host, port)
+        headers = {'User-Agent': RadioDns.USER_AGENT, 'Accept': 'text/event-stream'}
+        if self.client_id:
+            headers['Authorization'] = f'ClientIdentifier {self.client_id}'
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=self.PUSH_TIMEOUT_S) as resp:
+            self._connected()
+            event, data = '', []
+            for raw in resp:  # a read that times out (no heartbeat) raises, and the caller reconnects
+                if self._idle():
+                    return
+                line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
+                if not line:  # the end of an event
+                    if data:
+                        self._push_event(event, '\n'.join(data))
+                    event, data = '', []
+                elif not line.startswith(':'):  # ':' alone is the heartbeat
+                    key, _, value = line.partition(':')
+                    value = value[1:] if value.startswith(' ') else value
+                    if key == 'event':
+                        event = value
+                    elif key == 'data':
+                        data.append(value)
+            raise OSError('the slideshow server closed the connection')
+
+    def _push_event(self, event, data):
+        try:
+            d = json.loads(data)
+        except ValueError:
+            return
+        if not isinstance(d, dict):
+            return
+        if event == 'image' and isinstance(d.get('src'), str):
+            self._show(d['src'].strip(), d.get('link'), d.get('triggerTime'))
+        elif event == 'text' and isinstance(d.get('body'), str):
+            self._text(d['body'].strip())
+
+    # ---- Stomp (7.3)
+
+    def _stomp(self, host, port):
+        with socket.create_connection((host, port), timeout=15) as sock:
+            send = lambda frame: sock.sendall(frame.encode() + b'\0')  # noqa: E731
+            sock.settimeout(1)
+            frames = self._stomp_frames(sock)
+            send(f'CONNECT\naccept-version:1.0\nhost:{host}\n\n')
+            self._stomp_wait(frames, lambda cmd, h: cmd == 'CONNECTED', 15)
+            subscribed = 0
+            for i, kind in enumerate(('image', 'text')):
+                dest = f'/topic/{self.service}/{kind}'
+                if ('stomp', dest) in self._done:
+                    continue
+                # one destination at a time, each confirmed by its receipt within 10 s (7.3.2)
+                send(f'SUBSCRIBE\nid:{i}\ndestination:{dest}\nack:auto\nreceipt:{i}\n\n')
+                if self._stomp_wait(frames, lambda cmd, h: cmd == 'RECEIPT' and h.get('receipt-id') == str(i), 10,
+                                    refused=True):
+                    subscribed += 1
+                else:
+                    self._done.add(('stomp', dest))
+            if not subscribed:
+                raise ValueError('the slideshow server refused every topic')
+            self._connected()
+            self._stomp_wait(frames, lambda cmd, h: False, None)
+
+    def _stomp_wait(self, frames, until, timeout_s, refused=False):
+        """Handles frames until one matches until(command, headers): True. False
+        when timeout_s passes first or (refused=True) on an ERROR frame; an
+        ERROR otherwise raises. Returns on going idle."""
+        end = None if timeout_s is None else time.monotonic() + timeout_s
+        for cmd, headers, body in frames:
+            if cmd is None:  # a second without a frame
+                if end is not None and time.monotonic() > end:
+                    if refused:
+                        return False
+                    raise OSError('the slideshow server did not answer')
+                continue
+            if until(cmd, headers):
+                return True
+            if cmd == 'ERROR':
+                if refused:
+                    return False
+                raise ValueError(headers.get('message') or body.strip() or 'refused')
+            if cmd == 'MESSAGE':
+                self._message(body, headers.get('link'), headers.get('trigger-time'))
+        return False
+
+    def _stomp_frames(self, sock):
+        """(command, headers, body) for each frame received; (None, None, None)
+        after a second without one. Ends on going idle."""
+        buf = b''
+        while not self._idle():
+            try:
+                data = sock.recv(65536)
+            except socket.timeout:
+                yield None, None, None
+                continue
+            if not data:
+                raise OSError('the slideshow server closed the connection')
+            buf += data
+            while b'\0' in buf:
+                frame, buf = buf.split(b'\0', 1)
+                head, _, body = frame.lstrip(b'\r\n').decode('utf-8', errors='replace').partition('\n\n')
+                lines = head.splitlines()
+                if lines:
+                    headers = {}
+                    for line in lines[1:]:
+                        key, sep, value = line.partition(':')
+                        if sep:
+                            headers.setdefault(key.strip(), value.strip())  # the first of a repeated header wins
+                    yield lines[0].strip(), headers, body
+
+    # ---- HTTP long polling (7.4)
+
+    def _http(self, host, port):
+        netloc = host if port in (80, 443) else f'{host}:{port}'
+        base = f'{"https" if port == 443 else "http"}://{netloc}/radiodns/vis/vis.json'
+        topics = [t for t in (f'/topic/{self.service}/image', f'/topic/{self.service}/text')
+                  if ('http', t) not in self._done]
+        if not topics:
+            raise ValueError('the slideshow server refused every topic')
+        errors = []
+        polls = [threading.Thread(target=self._http_poll, args=(base, t, errors), daemon=True) for t in topics]
+        for t in polls:  # one long poll per topic
+            t.start()
+        for t in polls:
+            t.join()
+        if errors:
+            raise errors[0]
+
+    def _http_poll(self, base, topic, errors):
+        try:
+            last_id = None
+            while not self._idle():
+                query = {'topic': topic} if last_id is None else {'topic': topic, 'last_id': last_id}
+                req = urllib.request.Request(f'{base}?{urllib.parse.urlencode(query)}',
+                                             headers={'User-Agent': RadioDns.USER_AGENT})
+                try:
+                    with urllib.request.urlopen(req, timeout=self.HTTP_TIMEOUT_S) as resp:
+                        self._connected()
+                        frames = resp.read(32 << 10)  # at most 16 kB (7.4.6), and some slack
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:  # the server doesn't have this topic: not asked again (7.4.7)
+                        self._done.add(('http', topic))
+                        return
+                    raise
+                except TimeoutError:  # the server had nothing to say: ask again (7.4.2)
+                    continue
+                frames = frames.decode('utf-8', errors='replace').strip()
+                if m := re.fullmatch(r'[\w$.]+\((.*)\)\s*;?', frames, re.S):  # JSONP (7.4.5)
+                    frames = m.group(1)
+                frames = json.loads(frames)
+                if isinstance(frames, dict):
+                    frames = [frames]
+                last_id = None
+                for frame in frames[:8] if isinstance(frames, list) else ():  # oldest first (7.4.4)
+                    if not isinstance(frame, dict):
+                        continue
+                    h = frame.get('headers') or {}
+                    last_id = h.get('RadioVIS-Message-ID') or last_id
+                    self._message(frame.get('body'), h.get('RadioVIS-Link'), h.get('RadioVIS-Trigger-Time'))
+                if last_id is None:  # no message ID: don't ask again this session (7.4.3.2)
+                    self._done.add(('http', topic))
+                    return
+        except (OSError, ValueError) as e:
+            errors.append(e)
 
 
 class IbocPipe(gr.sync_block):
@@ -3089,7 +3363,10 @@ class StationPanel(QtWidgets.QGroupBox):
             img.setFixedSize(IMG_PX, IMG_PX)
             img.setAlignment(QtCore.Qt.AlignCenter)
             img.hide()
-            img.path = None
+            img.path = img.link = None
+        # a RadioDNS slide's click-through link (TS 101 499 5.3.3) opens in the browser
+        self.art_img.mousePressEvent = lambda e: self.art_img.link and QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl(self.art_img.link))
         text_grid.addWidget(self.logo_img, 3, 3, 4, 1)
         text_grid.addWidget(self.art_img, 3, 4, 4, 1)
         for w in (self.rtplus, self.iboc_line, self.psd_line, self.sis_line, self.rdns_line):
@@ -3351,7 +3628,9 @@ class StationPanel(QtWidgets.QGroupBox):
         for label, r, vis in working:
             text = self._rdns_text(r) if r['state'] == 'found' else f'registered ({_html(r.get("target", ""))})'
             if vis and vis.image:
-                text += ' \u00b7 slideshow'
+                text += f' \u00b7 slideshow ({VIS_TRANSPORT_NAMES[vis.transport]})'
+                if vis.text:
+                    text += f': \u201c{_html(vis.text)}\u201d'
             parts.append(f'{label}: {text}')
         self.rdns_line.setText('  \u00b7  '.join(parts) or '-')
         self.rdns_line.setToolTip(QtGui.QTextDocumentFragment.fromHtml(self.rdns_line.text()).toPlainText())
@@ -3360,28 +3639,35 @@ class StationPanel(QtWidgets.QGroupBox):
             if w.isHidden() == self._rdns_working:
                 w.setVisible(self._rdns_working)
         logo, art = self.station.iboc.images() if self.station.iboc else (None, None)
-        art_what = 'Album art'
+        art_what, art_link = 'Album art', None
         for label, r, vis in reversed(lookups):  # IBOC's RadioDNS logo and slideshow before FM's
             logo = logo or r.get('logo')
             if not art and vis and vis.image:
-                art = vis.image
+                art, art_link = vis.image, vis.link
                 art_what = 'Album art (RadioDNS slideshow)' + (f': {_html(vis.text)}' if vis.text else '')
+                if art_link:
+                    art_what += f'<br>Click to open {_html(art_link)}'
         self._show_image(self.logo_img, logo, 'Station logo')
         self._show_image(self.art_img, art, art_what)
+        if self.art_img.link != art_link:
+            self.art_img.link = art_link
+            self.art_img.setCursor(QtCore.Qt.PointingHandCursor if art_link else QtCore.Qt.ArrowCursor)
 
     @staticmethod
     def _show_image(label, path, what):
-        if path == label.path:
-            return
-        label.path = path
-        pix = QtGui.QPixmap(path) if path and os.path.exists(path) else QtGui.QPixmap()
-        if pix.isNull():
-            label.clear()
-            label.hide()
-            return
-        label.setPixmap(pix.scaled(IMG_PX, IMG_PX, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
-        label.setToolTip(f'{what}<br><img src="{path}" width="{IMG_TIP_PX}">')
-        label.show()
+        if path != label.path:
+            label.path = path
+            pix = QtGui.QPixmap(path) if path and os.path.exists(path) else QtGui.QPixmap()
+            if pix.isNull():
+                label.clear()
+                label.hide()
+                return
+            label.setPixmap(pix.scaled(IMG_PX, IMG_PX, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+            label.show()
+        if not label.isHidden():  # the tooltip follows the slideshow text and link
+            tip = f'{what}<br><img src="{path}" width="{IMG_TIP_PX}">'
+            if label.toolTip() != tip:
+                label.setToolTip(tip)
 
     def reset_display(self):
         self.ps.setText('--------')
@@ -3711,6 +3997,7 @@ class StationPanel(QtWidgets.QGroupBox):
             'settings': self.settings.to_dict(), 'feed_port': feed_port, 'default_port': default_port,
             'images': {kind: (f'{abs(hash(label.path)):x}' if label.path and not label.isHidden() else None)
                        for kind, label in (('logo', self.logo_img), ('art', self.art_img))},
+            'art_link': self.art_img.link if not self.art_img.isHidden() else None,
             'listeners': listeners,
         }
 

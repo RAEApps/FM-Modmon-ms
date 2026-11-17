@@ -79,6 +79,8 @@ header .grow { flex: 1; }
       font: 13px Consolas, monospace; color: #cfe8cf; white-space: pre; overflow: hidden; min-height: 26px; }
 .media { grid-row: 4 / span 4; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
 .media img { max-width: 88px; max-height: 88px; border-radius: 4px; cursor: zoom-in; }
+.media { position: relative; }
+.media a { position: absolute; right: 2px; bottom: 2px; padding: 0 4px; border-radius: 4px; background: rgba(0,0,0,.65); color: var(--accent); text-decoration: none; font-size: 12px; }
 
 .status-row { display: flex; align-items: center; gap: 6px; }
 .pill { border-radius: 10px; padding: 2px 10px; font-weight: 600; white-space: nowrap; }
@@ -475,6 +477,10 @@ function buildPanel(r) {
         img.onclick = () => { $('#zoom img').src = img.src; $('#zoom').style.display = 'flex'; };
         box.append(img); box.style.display = 'none'; grid.append(box);
         p[kind] = {box, img, ver: null};
+        if (kind === 'art') {  // a RadioDNS slide's click-through link
+          const a = p.artLink = h('a', null, '↗'); a.target = '_blank'; a.rel = 'noopener noreferrer';
+          a.style.display = 'none'; box.append(a);
+        }
       }
     }
   });
@@ -604,6 +610,11 @@ function updatePanel(p, r) {
       m.box.style.display = ver ? 'flex' : 'none';
       if (ver) m.img.src = `img/${p.n}/${kind}?v=${ver}`;
     }
+  }
+  const link = /^https?:\/\//.test(r.art_link || '') ? r.art_link : '';
+  if (p.artLink.getAttribute('href') !== link) {
+    p.artLink.href = link; p.artLink.title = 'Open ' + link;
+    p.artLink.style.display = link ? '' : 'none';
   }
   const alarms = r.alarms;
   setText(p.alarm, alarms.length ? '⚠  ' + alarms.join(', ') : '●  No alarms');
