@@ -183,7 +183,7 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from dataclasses import asdict, dataclass, field, fields
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -878,9 +878,19 @@ class AudioMeter(gr.sync_block):
         self._tpk = deque(maxlen=UPDATE_HZ)  # per-hop true peaks: 1 s hold
         self._tp_tail = [np.zeros(self.TP_TAIL), np.zeros(self.TP_TAIL)]
         self._mod = deque(maxlen=UPDATE_HZ)  # per-hop L/R/M/S peaks: 1 s hold
-        self._gated = []                   # 400 ms block powers > -70 LUFS
+        self._clear_gated()
         self._reset = False
         self._reset_all = False
+
+    # Integrated loudness keeps the gated 400 ms blocks as a histogram of their
+    # loudness (GATE_STEP LU bins from -70 LUFS), each bin's summed power and
+    # count, so a monitor running for weeks uses fixed memory and time.
+    GATE_STEP = 0.01
+    GATE_BINS = 8000  # -70 .. +10 LUFS
+
+    def _clear_gated(self):
+        self._gate_pow = np.zeros(self.GATE_BINS)
+        self._gate_n = np.zeros(self.GATE_BINS, np.int64)
 
     def reset_integrated(self):
         self._reset = True
@@ -898,7 +908,7 @@ class AudioMeter(gr.sync_block):
             self._tp_tail = [np.zeros(self.TP_TAIL), np.zeros(self.TP_TAIL)]
             for d in (self._kpow, self._sums, self._tpk, self._mod):
                 d.clear()
-            self._gated = []
+            self._clear_gated()
             self.stats = self.scope = None
         for chunk, x in zip(self._chunks, ins):
             chunk.append(x.copy())
@@ -946,16 +956,20 @@ class AudioMeter(gr.sync_block):
         momentary, m_pow = lufs(list(self._kpow)[-4:])
         short_term, _ = lufs(self._kpow)
         if self._reset:
-            self._gated, self._reset = [], False
+            self._clear_gated()
+            self._reset = False
         if len(self._kpow) >= 4 and momentary > -70:
-            self._gated.append(m_pow)
+            k = min(int((momentary + 70) / self.GATE_STEP), self.GATE_BINS - 1)
+            self._gate_pow[k] += m_pow
+            self._gate_n[k] += 1
         integrated = -math.inf
-        if self._gated:
-            g = np.array(self._gated)
-            rel_gate = -0.691 + _db(float(np.mean(g))) - 10
-            above = g[-0.691 + 10 * np.log10(g) > rel_gate]
-            if len(above):
-                integrated = -0.691 + _db(float(np.mean(above)))
+        total = int(self._gate_n.sum())
+        if total:
+            rel_gate = -0.691 + _db(float(self._gate_pow.sum()) / total) - 10
+            k = max(math.ceil((rel_gate + 70) / self.GATE_STEP), 0)
+            n = int(self._gate_n[k:].sum())
+            if n:
+                integrated = -0.691 + _db(float(self._gate_pow[k:].sum()) / n)
 
         ll, rr, lr, ss, mm, cnt = np.sum(self._sums, axis=0)
         tp = np.max(self._tpk, axis=0)
@@ -1402,7 +1416,7 @@ class RadioDns:
         if sub is None or sub.stopped:
             host, port = result['vis']
             topic = '/topic/' + '/'.join(reversed(fqdn.split('.radiodns.org')[0].split('.')))
-            sub = self._vis[fqdn] = RadioVis(host, port, topic, self._logo)
+            sub = self._vis[fqdn] = RadioVis(host, port, topic, self._download)
         sub.want()
         return sub
 
@@ -1464,22 +1478,32 @@ class RadioDns:
     def _logo(self, url):
         """The image at url, downloaded to the session cache once."""
         if url not in self._logos:
-            ext = os.path.splitext(url.split('?', 1)[0])[1][:5] or '.img'
-            path = os.path.join(cache_dir(), f'radiodns_{len(self._logos)}{ext}')
-            req = urllib.request.Request(url, headers={'User-Agent': self.USER_AGENT})
-            with urllib.request.urlopen(req, timeout=20) as resp, open(path, 'wb') as fh:
-                fh.write(resp.read())
-            self._logos[url] = path
+            self._logos[url] = self._download(url)
         return self._logos[url]
+
+    def _download(self, url):
+        """The image at url, downloaded to a new file in the session cache."""
+        ext = os.path.splitext(url.split('?', 1)[0])[1][:5] or '.img'
+        fd, path = tempfile.mkstemp(suffix=ext, prefix='radiodns_', dir=cache_dir())
+        req = urllib.request.Request(url, headers={'User-Agent': self.USER_AGENT})
+        try:
+            with os.fdopen(fd, 'wb') as fh, urllib.request.urlopen(req, timeout=20) as resp:
+                fh.write(resp.read())
+        except BaseException:
+            os.remove(path)
+            raise
+        return path
 
 
 class RadioVis:
     """A RadioDNS slideshow (RadioVIS, ETSI TS 101 499) over STOMP 1.0: the
     current slide image (downloaded with fetch(url) -> file), its link, and
     the station's RadioVIS text, from <topic>/image and <topic>/text. Runs
-    while want() is called; reconnects after a dropped connection."""
+    while want() is called; reconnects after a dropped connection. The last
+    SLIDES slides stay cached (stations often rotate a few); older ones are deleted."""
 
     IDLE_S = 60
+    SLIDES = 16
 
     def __init__(self, host, port, topic, fetch):
         self.host, self.port, self.topic, self.fetch = host, port, topic, fetch
@@ -1488,6 +1512,7 @@ class RadioVis:
         self.text = ''
         self.stopped = False
         self._wanted = time.monotonic()
+        self._slides = OrderedDict()  # url -> cached file, oldest first
         threading.Thread(target=self._run, daemon=True).start()
 
     def want(self):
@@ -1543,11 +1568,23 @@ class RadioVis:
             if body.startswith('SHOW '):
                 url = body[5:].strip()
                 if re.match(r'https?://', url):
-                    self.image = self.fetch(url)
+                    self.image = self._slide(url)
                     self.link = headers.get('link')
                     self.state = 'showing'
             elif body.startswith('TEXT '):
                 self.text = body[5:].strip()
+
+    def _slide(self, url):
+        path = self._slides.pop(url, None)
+        if path is None or not os.path.exists(path):
+            path = self.fetch(url)
+        self._slides[url] = path
+        while len(self._slides) > self.SLIDES:
+            try:
+                os.remove(self._slides.popitem(last=False)[1])
+            except OSError:
+                pass
+        return path
 
 
 class IbocPipe(gr.sync_block):
@@ -4376,6 +4413,10 @@ class WebView:
         view = self
 
         class Handler(BaseHTTPRequestHandler):
+            # A client that goes quiet (a browser's idle pre-connection, a stalled
+            # audio listener) lets go of its thread, and its listener slot, after this.
+            timeout = 60
+
             def _send(self, code, body, ctype, headers=()):
                 self.send_response(code)
                 self.send_header('Content-Type', ctype)
