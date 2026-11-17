@@ -6261,7 +6261,7 @@ def build_parser(width=100):
                          '(default: %(default)s; those ffmpeg can encode)')
     ap.add_argument('--rds-port', type=int, default=RDS_TCP_PORT,
                     help='first TCP port of the raw RDS group feeds, one per receiver '
-                         '(default %(default)s, so 7711-7713; 0 = off)')
+                         '(default %(default)s, so 7711-7714; 0 = off)')
     ap.add_argument('--rds-bind', default='0.0.0.0',
                     help='address the RDS feeds listen on (default all; 127.0.0.1 = this PC only)')
     return ap

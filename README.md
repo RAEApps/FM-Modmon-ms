@@ -16,16 +16,24 @@ Per station, refreshed 10× a second:
   RDS injection, SCA 67 / 92 kHz injection (and whether an SCA carries audio, data, a tone or nothing)
 - **Loudness** – ITU-R BS.1770 / EBU R128 momentary, short-term, integrated and true peak
 - **Stereo image** – levels, balance, correlation, width and a goniometer
-- **RDS** – PI, PS, RT, RT+, PTY / PTYN, flags, AF, ECC, ODA, CT, group rate and loss, group types
+- **RDS** – PI, PS, RT, RT+ (Alarm tags in red), PTY / PTYN, flags, AF, ECC, ODA, CT,
+  group rate and loss, group types
+- **Data services** – the non-programme data a station carries and its share of groups:
+  paging (7A, with the 1A paging codes, operator code and paging ID, and 13A enhanced
+  paging), TMC (8A), EWS (9A), other ODAs and SCA data. Services are identified, never
+  decoded. Each receiver can name them (e.g. `7A=Alert FM, SCA67=Muzak`).
 - **IBOC** – via [nrsc5](https://github.com/theori-io/nrsc5): status, MER/BER, PSD, SIS,
   station logo and album art, emergency alerts
 - **RadioDNS** – service information and slideshow (RadioVIS) slides, text and links over
-  Server-sent Events, Stomp or HTTP (ETSI TS 103 270 / TS 101 499)
+  Server-sent Events, HTTP long polling or Stomp, tried in that order with SRV failover
+  (ETSI TS 103 270 / TS 101 499 v3.2)
 
 ## Alarms
 
-Carrier low/lost, audio silence, over-modulation, pilot lost, RDS lost, wrong PI, IBOC
-emergency alert, and the FM technical rules of a preset, each limit adjustable per receiver:
+Carrier low/lost, audio silence, over-modulation, pilot lost, RDS lost, wrong PI, emergency
+alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
+then gone for 60 s; paging that only bursts during an alert never alarms), and the FM
+technical rules of a preset, each limit adjustable per receiver:
 
 | Check | FCC (47 CFR 73) | ISED (BETS-6, BPR-3) |
 |---|---|---|
@@ -130,7 +138,8 @@ C:\ProgramData\radioconda\python.exe tests\rules_test.py
 ```
 
 `tests\setup_test.py` checks the setup wizard, the password hash, Credential Manager and
-the web sign-in.
+the web sign-in. `tests\radiovis_test.py` checks the RadioDNS slideshow (SSE, HTTP and
+Stomp, SRV failover, trigger times, bad slides) against local fake servers.
 
 ## Examples
 
