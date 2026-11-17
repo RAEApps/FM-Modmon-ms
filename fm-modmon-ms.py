@@ -1256,7 +1256,8 @@ class RdsGroupServer:
         self._last = 0.0
         self._closed = False
         self._sock = socket.create_server((bind, port))
-        threading.Thread(target=self._accept, daemon=True).start()
+        self._acceptor = threading.Thread(target=self._accept, daemon=True)
+        self._acceptor.start()
         threading.Thread(target=self._heartbeat, daemon=True).start()
 
     @property
@@ -1272,7 +1273,7 @@ class RdsGroupServer:
         # On Windows, closing a listening socket from another thread while
         # accept() blocks on it doesn't reliably stop it listening, so this
         # thread polls for close() and closes the socket itself.
-        self._sock.settimeout(0.5)
+        self._sock.settimeout(0.1)
         while not self._closed:
             try:
                 conn, _ = self._sock.accept()
@@ -1290,12 +1291,14 @@ class RdsGroupServer:
         self._sock.close()
 
     def close(self):
-        """Stop listening (within half a second) and drop every client."""
+        """Drop every client and stop listening. Returns once the port is free
+        (a tenth of a second at most), so it can be opened again at once."""
         self._closed = True
         with self._lock:
             for conn in self._clients:
                 conn.close()
             self._clients.clear()
+        self._acceptor.join(1.0)
 
     def _heartbeat(self):
         while not self._closed:
