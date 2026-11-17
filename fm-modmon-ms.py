@@ -63,8 +63,10 @@ per second, with the same controls, and each receiver's audio as a stream
 in the listener's choice of MP3, AAC, Opus or FLAC (/audio/1.mp3, .aac,
 .opus, .flac ... /audio/4.*; encoded by ffmpeg, --ffmpeg and --web-audio)
 for the page's player or any media player. Anyone who can reach the port
-can watch and listen; the controls need --web-password (or FM_MODMON_WEB_PASSWORD), or,
-when no password is set, a browser on this PC (http://localhost:8765/).
+can watch and listen; the controls need the web password (set in Setup, or
+--web-password / FM_MODMON_WEB_PASSWORD, which take precedence), or, when no
+password is set, a browser on this PC (http://localhost:8765/). The password
+is kept only as a salted hash (PBKDF2) in the settings file.
 
 Each receiver also serves its raw RDS groups over TCP (receiver 1 on port
 7711, 2 on 7712, 3 on 7713, 4 on 7714 by default, or the port set in the
@@ -75,10 +77,16 @@ decode the groups itself. The feed follows whatever station its receiver
 is tuned to, and closes when the receiver is removed. Alarms and station changes go to
 the event log in the window, the web view and logs/fm-modmon-ms_events_YYYY-MM-DD.log.
 
+First run: the first start (or --setup, or Settings > Run setup again) opens
+a short setup: where the monitor is (which technical rules the alarms check:
+ISED in Canada, else FCC), the web version (on or off, this PC only or the
+network, its port and password), notifications, and starting with Windows.
+Cancelling keeps the defaults; it doesn't come back unless asked for.
+
 Notifications: "Settings" (in the window) sends alarms raised and cleared,
-SDR lost and recovered, and start / stop by email (SMTP; the password comes
-from the FM_MODMON_SMTP_PASSWORD environment variable, never the settings
-file) and / or a webhook (generic JSON, Slack, Microsoft Teams workflow or
+SDR lost and recovered, and start / stop by email (SMTP; the password is kept
+in Windows Credential Manager, never the settings file;
+FM_MODMON_SMTP_PASSWORD, if set, is used instead) and / or a webhook (generic JSON, Slack, Microsoft Teams workflow or
 Discord). Events within NOTIFY_BATCH_S of each other go out as one message;
 failed sends are retried, and failures go to the event log.
 
@@ -159,9 +167,11 @@ import argparse
 import glob
 import concurrent.futures
 import contextlib
+import base64
 import ctypes
 import gc
 import datetime
+import hashlib
 import hmac
 import json
 import math
@@ -186,6 +196,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter, OrderedDict, deque
 from dataclasses import asdict, dataclass, field, fields
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid, parseaddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -2356,6 +2367,15 @@ QCheckBox::indicator:checked, QGroupBox::indicator:checked { background: #8ab4f8
                                                              image: url(%CHECK%); }
 QCheckBox::indicator:disabled, QGroupBox::indicator:disabled { border-color: #4a4e56; background: #1c1d21; }
 QCheckBox::indicator:checked:disabled { background: #4a4e56; border-color: #4a4e56; }
+QRadioButton { spacing: 8px; }
+QRadioButton:disabled { color: %DISABLED%; }
+QRadioButton::indicator { width: 14px; height: 14px; border: 2px solid %BORDER_HOVER%; border-radius: 9px;
+                          background: #16171a; }
+QRadioButton::indicator:hover, QRadioButton::indicator:focus { border-color: #8ab4f8; }
+QRadioButton::indicator:checked { border-color: #8ab4f8;
+    background: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+                                stop: 0 #8ab4f8, stop: 0.5 #8ab4f8, stop: 0.6 #16171a, stop: 1 #16171a); }
+QRadioButton::indicator:disabled { border-color: #4a4e56; }
 QPlainTextEdit { background: #16171a; border: none; border-radius: 6px; padding: 4px; color: #c4c7cc;
                  font-family: Consolas; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 22px;
@@ -2927,6 +2947,7 @@ class StationAlarms:
         return time.monotonic() - self._t0 >= ALARM_GRACE_S
 
     def update(self, conditions, holds=None):
+        """[(name, description, raised)] for the alarms raised or cleared now."""
         now = time.monotonic()
         changes = []
         if now - self._t0 < ALARM_GRACE_S:
@@ -2940,7 +2961,7 @@ class StationAlarms:
             if now - self._pending.setdefault(name, now) >= hold:
                 del self._pending[name]
                 (self.active.add if want else self.active.discard)(name)
-                changes.append((desc, want))
+                changes.append((name, desc, want))
         return changes
 
 
@@ -3608,6 +3629,9 @@ class StationPanel(QtWidgets.QGroupBox):
             }
             changes = self.alarms.update({k: v and cfg.alarms.get(k, True) for k, v in conditions.items()},
                                          holds={'SILENCE': cfg.silence_s})
+            if changes:
+                details = self._alarm_details(s, a, lim, limit, subcarriers, rate, pi)
+                changes = [(desc, raised, details.get(name, '')) for name, desc, raised in changes]
         feed = ''
         if self.feed:
             n = self.feed.clients
@@ -3624,6 +3648,30 @@ class StationPanel(QtWidgets.QGroupBox):
                 ('background: #3a1d1f; color: #ff8a8a; border: 1px solid #6b2a2e;' if active else
                  'background: #1b2f21; color: #69db7c; border: 1px solid #2c5236;'))
         return changes
+
+    def _alarm_details(self, s, a, lim, limit, subcarriers, rate, pi):
+        """What each alarm measured, against its limit, for the event log and notifications."""
+        st, cfg = self.station, self.settings
+        num = lambda v, fmt='.1f': format(v, fmt) if v is not None and math.isfinite(v) else '-'  # noqa: E731
+        pilot_hz = f' at {num(st.pilot_hz)} Hz' if st.pilot_hz is not None else ''
+        sca = ', '.join(f'SCA {k} {num(s[f"sca{k}_pct"])}%' for k in (67, 92) if s[f'sca{k}_pct'])
+        return {
+            'CARRIER': f'RF {num(s["rf_dbfs"])} dBFS, S/N {num(s["snr_db"])} dB '
+                       f'(alarm below {cfg.min_snr_db:g} dB S/N or -75 dBFS)',
+            'SILENCE': f'momentary loudness {num(a["momentary"])} LUFS '
+                       f'(alarm below {cfg.silence_lufs:g} LUFS for {cfg.silence_s} s)',
+            'OVERMOD': f'peak +{num(s["pos_pct"])}% / -{num(s["neg_pct"])}%, limit {num(limit)}%',
+            'PILOT_SPEC': f'pilot {num(s["pilot_pct"])}%{pilot_hz} (allowed {lim["pilot_min_pct"]:g}-'
+                          f'{lim["pilot_max_pct"]:g}%, 19000 +/- {lim["pilot_tol_hz"]:g} Hz)',
+            'SUBCARRIERS': f'subcarriers {num(subcarriers)}% total (RDS {num(s["rds_pct"])}%'
+                           + (f', {sca}' if sca else '') + f'; limits {lim["sub_total_pct"]:g}% total, '
+                           f'{lim["sub_high_pct"]:g}% above 75 kHz)',
+            'FREQUENCY': f'carrier offset {num(s["offset_hz"], "+.0f")} Hz (tolerance +/- {lim["freq_tol_hz"]:g} Hz, '
+                         'includes the tuning error of the SDR)',
+            'PILOT': f'pilot {num(s["pilot_pct"])}%',
+            'RDS': f'RDS {num(rate)} groups/s',
+            'PI': f'PI {pi or "-"}, expected {cfg.expected_pi}',
+        }
 
     def web_state(self, feed_port, default_port, listeners):
         """Everything the web page shows for this receiver, as plain JSON values.
@@ -3667,15 +3715,16 @@ class StationPanel(QtWidgets.QGroupBox):
         }
 
 
-class AppSettingsDialog(QtWidgets.QDialog):
-    """Notifications (email, webhook, which events) and start with Windows."""
+class NotifyForm(QtWidgets.QWidget):
+    """Notification settings (email, webhook, which events) with a test send;
+    in Settings and the setup wizard. The SMTP password typed here is stored
+    (Windows Credential Manager) only by save_password()."""
 
-    def __init__(self, parent, settings, notifier):
+    def __init__(self, settings, notifier, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f'{APP_NAME} settings')
-        self.setMinimumWidth(560)
         self.notifier = notifier
         form = QtWidgets.QVBoxLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
 
         mail = QtWidgets.QGroupBox('Email (SMTP)')
         mail.setCheckable(True)
@@ -3691,6 +3740,7 @@ class AppSettingsDialog(QtWidgets.QDialog):
         for key, label in (('starttls', 'STARTTLS (port 587)'), ('ssl', 'SSL/TLS (port 465)'), ('none', 'None (port 25)')):
             self.smtp_security.addItem(label, key)
         self.smtp_security.setCurrentIndex(self.smtp_security.findData(settings.smtp_security))
+        self.smtp_security.currentIndexChanged.connect(self._security_port)
         server = QtWidgets.QHBoxLayout()
         server.addWidget(self.smtp_host, 1)
         server.addWidget(QtWidgets.QLabel('port'))
@@ -3700,11 +3750,26 @@ class AppSettingsDialog(QtWidgets.QDialog):
         self.smtp_user = QtWidgets.QLineEdit(settings.smtp_user)
         self.smtp_user.setPlaceholderText('optional: sign-in name')
         mf.addRow('User name:', self.smtp_user)
-        pw = 'set' if os.environ.get('FM_MODMON_SMTP_PASSWORD') else 'NOT set'
-        note = QtWidgets.QLabel(f'Password: from the FM_MODMON_SMTP_PASSWORD environment variable ({pw}); '
-                                'it is never saved in the settings file.')
+        self._stored = credential_read(SMTP_CREDENTIAL) is not None
+        self._forget = False
+        self.smtp_password = QtWidgets.QLineEdit()
+        self.smtp_password.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.smtp_password.setPlaceholderText('stored (type to change)' if self._stored else 'sign-in password')
+        self.forget_btn = QtWidgets.QPushButton('Forget')
+        self.forget_btn.setToolTip('Remove the stored SMTP password')
+        self.forget_btn.setEnabled(self._stored)
+        self.forget_btn.clicked.connect(self._forget_password)
+        pw_row = QtWidgets.QHBoxLayout()
+        pw_row.addWidget(self.smtp_password, 1)
+        pw_row.addWidget(self.forget_btn)
+        mf.addRow('Password:', pw_row)
+        note = ('Kept in Windows Credential Manager, never in the settings file.'
+                if os.name == 'nt' else 'Set FM_MODMON_SMTP_PASSWORD (it can only be stored on Windows).')
+        if os.environ.get('FM_MODMON_SMTP_PASSWORD'):
+            note += ' FM_MODMON_SMTP_PASSWORD is set, and is used instead.'
+        note = QtWidgets.QLabel(note)
         note.setWordWrap(True)
-        note.setStyleSheet('color: #9aa0a6;')
+        note.setStyleSheet(f'color: {DIM};')
         mf.addRow('', note)
         self.email_from = QtWidgets.QLineEdit(settings.email_from)
         self.email_from.setPlaceholderText('sender address (default: the user name)')
@@ -3712,6 +3777,15 @@ class AppSettingsDialog(QtWidgets.QDialog):
         self.email_to = QtWidgets.QLineEdit(settings.email_to)
         self.email_to.setPlaceholderText('one or more addresses, separated by commas')
         mf.addRow('To:', self.email_to)
+        mail_test = QtWidgets.QHBoxLayout()
+        self.mail_test_btn = QtWidgets.QPushButton('Send test email')
+        self.mail_test_btn.setToolTip('Send a test message to the addresses above with these settings')
+        self.mail_test_btn.clicked.connect(lambda: self._test('email'))
+        self.mail_test_result = QtWidgets.QLabel('')
+        self.mail_test_result.setWordWrap(True)
+        mail_test.addWidget(self.mail_test_btn)
+        mail_test.addWidget(self.mail_test_result, 1)
+        mf.addRow('', mail_test)
         form.addWidget(mail)
 
         hook = QtWidgets.QGroupBox('Webhook')
@@ -3731,36 +3805,39 @@ class AppSettingsDialog(QtWidgets.QDialog):
         form.addWidget(hook)
 
         events = QtWidgets.QGroupBox('Send')
-        ef = QtWidgets.QVBoxLayout(events)
+        ef = QtWidgets.QHBoxLayout(events)
         self.events = {}
         for key, label in (('on_raise', 'Alarms raised'), ('on_clear', 'Alarms cleared'),
-                           ('on_sdr', 'SDR lost and recovered'), ('on_start_stop', 'FM-Modmon-ms started and stopped')):
+                           ('on_sdr', 'SDR lost / recovered'), ('on_start_stop', 'Start / stop')):
             box = QtWidgets.QCheckBox(label)
             box.setChecked(getattr(settings, key))
             ef.addWidget(box)
             self.events[key] = box
+        ef.addStretch(1)
         form.addWidget(events)
-
-        self.autostart = QtWidgets.QCheckBox('Start FM-Modmon-ms when I sign in to Windows')
-        self.autostart.setChecked(autostart_enabled())
-        form.addWidget(self.autostart)
 
         test_row = QtWidgets.QHBoxLayout()
         self.test_btn = QtWidgets.QPushButton('Send test')
-        self.test_btn.clicked.connect(self._test)
+        self.test_btn.clicked.connect(lambda: self._test(None))
         self.test_result = QtWidgets.QLabel('')
         self.test_result.setWordWrap(True)
         test_row.addWidget(self.test_btn)
         test_row.addWidget(self.test_result, 1)
         form.addLayout(test_row)
-
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
-        form.addWidget(buttons)
-        self._test_job = None
+        self._test_job = None       # {'button', 'label', 'result'} while a test is out
         self._poll = QtCore.QTimer(self)
         self._poll.timeout.connect(self._test_done)
+
+    def _security_port(self):
+        default = {'starttls': 587, 'ssl': 465, 'none': 25}
+        if self.smtp_port.value() in default.values():
+            self.smtp_port.setValue(default[self.smtp_security.currentData()])
+
+    def _forget_password(self):
+        self._forget = True
+        self.smtp_password.clear()
+        self.smtp_password.setPlaceholderText('will be forgotten (type to set a new one)')
+        self.forget_btn.setEnabled(False)
 
     def settings(self):
         return NotifySettings.from_dict({
@@ -3772,20 +3849,43 @@ class AppSettingsDialog(QtWidgets.QDialog):
             'webhook_format': self.webhook_format.currentData(),
             **{key: box.isChecked() for key, box in self.events.items()}})
 
-    def _test(self):
+    def have_password(self):
+        """Whether there will be an SMTP password once this form is saved."""
+        return bool(self.smtp_password.text() or os.environ.get('FM_MODMON_SMTP_PASSWORD')
+                    or (self._stored and not self._forget))
+
+    def problems(self):
+        return self.settings().problems(self.have_password())
+
+    def save_password(self):
+        """Store (or forget) the SMTP password as typed; raises OSError if it can't be stored."""
+        if self.smtp_password.text():
+            credential_write(SMTP_CREDENTIAL, self.smtp_password.text(), self.smtp_user.text().strip())
+        elif self._forget:
+            credential_delete(SMTP_CREDENTIAL)
+
+    def _test(self, channel):
+        """Send a test: channel 'email' (the button in the SMTP box) or None (every channel turned on)."""
+        if self._test_job:
+            return                  # one test at a time
+        button, label = ((self.mail_test_btn, self.mail_test_result) if channel == 'email'
+                         else (self.test_btn, self.test_result))
         new = self.settings()
-        problems = new.problems()
+        if channel == 'email':
+            new = NotifySettings.from_dict({**new.to_dict(), 'email': True, 'webhook': False})
+        problems = new.problems(self.have_password())
         if not (new.email or new.webhook):
             problems.append('turn on email and / or the webhook first')
         if problems:
-            self.test_result.setText('\n'.join(problems))
-            self.test_result.setStyleSheet(f'color: {RED};')
+            label.setText('\n'.join(problems))
+            label.setStyleSheet(f'color: {RED};')
             return
-        self.test_btn.setEnabled(False)
-        self.test_result.setStyleSheet('color: #9aa0a6;')
-        self.test_result.setText('sending\u2026')
-        job = self._test_job = {}
-        threading.Thread(target=lambda: job.update(result=self.notifier.test(new)), daemon=True).start()
+        button.setEnabled(False)
+        label.setStyleSheet(f'color: {DIM};')
+        label.setText('sending…')
+        job = self._test_job = {'button': button, 'label': label}
+        typed = self.smtp_password.text() or None
+        threading.Thread(target=lambda: job.update(result=self.notifier.test(new, typed)), daemon=True).start()
         self._poll.start(200)
 
     def _test_done(self):
@@ -3793,17 +3893,286 @@ class AppSettingsDialog(QtWidgets.QDialog):
         if not job or 'result' not in job:
             return
         self._poll.stop()
-        self.test_btn.setEnabled(True)
+        self._test_job = None
+        job['button'].setEnabled(True)
         ok = all(err is None for _, err in job['result'])
-        self.test_result.setText('\n'.join(f'{name}: {"sent" if err is None else err}' for name, err in job['result']))
-        self.test_result.setStyleSheet(f'color: {GREEN if ok else RED};')
+        if job['button'] is self.mail_test_btn:
+            err = job['result'][0][1] if job['result'] else 'not sent'
+            reply = self.notifier.last_reply.get('email')
+            text = (f'accepted for {", ".join(self.settings().recipients())}'
+                    + (f'\nserver: {reply}' if reply else '')) if err is None else err
+            job['label'].setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)  # copy the queue ID
+        else:
+            text = '\n'.join(f'{name}: {"sent" if err is None else err}' for name, err in job['result'])
+        job['label'].setText(text)
+        job['label'].setStyleSheet(f'color: {GREEN if ok else RED};')
+
+
+class AppSettingsDialog(QtWidgets.QDialog):
+    """Notifications (email, webhook, which events) and start with Windows;
+    "Run setup again" closes it with RUN_SETUP for the setup wizard."""
+
+    RUN_SETUP = 2
+
+    def __init__(self, parent, settings, notifier):
+        super().__init__(parent)
+        self.setWindowTitle(f'{APP_NAME} settings')
+        self.setMinimumWidth(600)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.form = NotifyForm(settings, notifier)
+        layout.addWidget(self.form)
+        self.autostart = QtWidgets.QCheckBox('Start FM-Modmon-ms when I sign in to Windows')
+        self.autostart.setChecked(autostart_enabled())
+        layout.addWidget(self.autostart)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        setup = buttons.addButton('Run setup again…', QtWidgets.QDialogButtonBox.ResetRole)
+        setup.setToolTip('Location and rules, web access and its password, notifications')
+        setup.clicked.connect(lambda: self.done(self.RUN_SETUP))
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def settings(self):
+        return self.form.settings()
 
     def _accept(self):
-        problems = self.settings().problems()
+        problems = self.form.problems()
         if problems:
             QtWidgets.QMessageBox.warning(self, self.windowTitle(), '\n'.join(problems))
             return
+        try:
+            self.form.save_password()
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, self.windowTitle(), f'The SMTP password was not stored: {e}')
+            return
         self.accept()
+
+
+class _WizardPage(QtWidgets.QWizardPage):
+    """A setup page; `check` returns an error to show, or None to go on."""
+
+    def __init__(self, title, subtitle='', check=None):
+        super().__init__()
+        self.setTitle(title)
+        self.setSubTitle(subtitle)
+        self._check = check
+        self.body = QtWidgets.QVBoxLayout(self)
+
+    def validatePage(self):
+        err = self._check() if self._check else None
+        if err:
+            QtWidgets.QMessageBox.warning(self, self.wizard().windowTitle(), err)
+            return False
+        return True
+
+
+class SetupWizard(QtWidgets.QWizard):
+    """Setup, at the first start (or --setup, or from Settings): where the monitor is
+    (the alarm rules), the web version and its password, notifications, and
+    starting with Windows. Read the results with app_config(), notify_settings()
+    and autostart(); secrets are stored when Finish is clicked."""
+
+    COUNTRIES = (('CA', 'Canada', 'ISED rules (BETS-6, BPR-3)'),
+                 ('US', 'United States', 'FCC rules (47 CFR 73)'))
+
+    def __init__(self, parent, app_cfg, notify, notifier, first_run=True):
+        super().__init__(parent)
+        self.setWindowTitle(f'{APP_NAME} setup')
+        self.setWizardStyle(QtWidgets.QWizard.ModernStyle)
+        self.setOption(QtWidgets.QWizard.NoBackButtonOnStartPage)
+        self.setMinimumSize(720, 640)
+        self.cfg = app_cfg
+        self.first_run = first_run
+        self.addPage(self._welcome())
+        self.addPage(self._location())
+        self.addPage(self._web())
+        self.addPage(self._notifications(notify, notifier))
+        self.addPage(self._finish())
+
+    @staticmethod
+    def _note(text):
+        label = QtWidgets.QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(f'color: {DIM};')
+        return label
+
+    def _welcome(self):
+        page = _WizardPage(f'Welcome to {APP_NAME}' if self.first_run else f'{APP_NAME} setup',
+                           'Multi-station FM modulation monitor')
+        text = QtWidgets.QLabel(
+            f'{APP_NAME} monitors up to four FM stations at once from one SDRplay RSP1A: modulation, '
+            'pilot, RDS, subcarriers, loudness and stereo, with alarms on the technical rules.\n\n'
+            'This setup takes a minute:\n'
+            '    •  where the monitor is (which rules the alarms check)\n'
+            '    •  the web version, and the password for its controls\n'
+            '    •  where alarms are sent (email, webhook)\n'
+            '    •  starting with Windows\n\n'
+            + ('Everything can be changed later: Settings > Run setup again. Cancel keeps the defaults.'
+               if self.first_run else 'Cancel leaves everything as it is.'))
+        text.setWordWrap(True)
+        page.body.addWidget(text)
+        page.body.addStretch(1)
+        return page
+
+    def _location(self):
+        page = _WizardPage('Where is the monitor?',
+                           'The country sets the technical rules the alarms check (every limit can still be '
+                           "adjusted per receiver), and tells RadioDNS where you are when a station sends no ECC.",
+                           self._check_country)
+        self.country_buttons = {}
+        group = QtWidgets.QButtonGroup(page)
+        for code, name, rules in self.COUNTRIES:
+            button = QtWidgets.QRadioButton(f'{name} — {rules}')
+            group.addButton(button)
+            page.body.addWidget(button)
+            self.country_buttons[code] = button
+        other_row = QtWidgets.QHBoxLayout()
+        self.country_other = QtWidgets.QRadioButton('Elsewhere — FCC limits; ISO country code:')
+        group.addButton(self.country_other)
+        self.country_code = QtWidgets.QLineEdit()
+        self.country_code.setMaxLength(2)
+        self.country_code.setFixedWidth(48)
+        self.country_code.setPlaceholderText('GB')
+        self.country_code.textEdited.connect(lambda: self.country_other.setChecked(True))
+        other_row.addWidget(self.country_other)
+        other_row.addWidget(self.country_code)
+        other_row.addStretch(1)
+        page.body.addLayout(other_row)
+        if self.cfg.country in self.country_buttons:
+            self.country_buttons[self.cfg.country].setChecked(True)
+        else:
+            self.country_other.setChecked(True)
+            self.country_code.setText(self.cfg.country)
+        page.body.addSpacing(12)
+        page.body.addWidget(self._note('The band scan uses the North American 200 kHz channel raster '
+                                       '(88.1–107.9 MHz).'))
+        page.body.addStretch(1)
+        return page
+
+    def country(self):
+        for code, button in self.country_buttons.items():
+            if button.isChecked():
+                return code
+        return self.country_code.text().strip().upper()
+
+    def _check_country(self):
+        if not re.fullmatch(r'[A-Z]{2}', self.country()):
+            return 'Enter the two-letter ISO country code (such as GB or MX).'
+        return None
+
+    def _web(self):
+        page = _WizardPage('Web version',
+                           'The same panels in a browser, with each station’s audio. Anyone who can open '
+                           'the page can watch and listen; changing anything needs the password.',
+                           self._check_web)
+        self.web_on = QtWidgets.QGroupBox('Serve the web version')
+        self.web_on.setCheckable(True)
+        self.web_on.setChecked(bool(self.cfg.web_port))
+        wf = QtWidgets.QFormLayout(self.web_on)
+        self.web_port = QtWidgets.QSpinBox()
+        self.web_port.setRange(1024, 65535)
+        self.web_port.setValue(self.cfg.web_port or WEB_PORT)
+        wf.addRow('Port:', self.web_port)
+        self.web_local = QtWidgets.QRadioButton('This PC only (http://localhost)')
+        self.web_network = QtWidgets.QRadioButton('Other computers on the network too')
+        (self.web_local if self.cfg.web_bind == '127.0.0.1' else self.web_network).setChecked(True)
+        reach = QtWidgets.QVBoxLayout()
+        reach.addWidget(self.web_network)
+        reach.addWidget(self.web_local)
+        wf.addRow('Open to:', reach)
+        self.web_pw = QtWidgets.QLineEdit()
+        self.web_pw2 = QtWidgets.QLineEdit()
+        for edit in (self.web_pw, self.web_pw2):
+            edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        had = bool(self.cfg.web_password_hash)
+        self.web_pw.setPlaceholderText('set (type to change)' if had else f'at least {MIN_WEB_PASSWORD} characters')
+        self.web_pw2.setPlaceholderText('the same again')
+        wf.addRow('Password:', self.web_pw)
+        wf.addRow('Confirm:', self.web_pw2)
+        self.web_pw_remove = QtWidgets.QCheckBox('Remove the password (controls only in a browser on this PC)')
+        self.web_pw_remove.setVisible(had)
+        self.web_pw_remove.toggled.connect(lambda on: (self.web_pw.setEnabled(not on), self.web_pw2.setEnabled(not on)))
+        wf.addRow('', self.web_pw_remove)
+        page.body.addWidget(self.web_on)
+        notes = ('Without a password the controls work only in a browser on this PC. The password is kept '
+                 'only as a salted hash. The web version is plain HTTP: use it on a network you trust, or '
+                 'over a VPN or a TLS reverse proxy, not straight on the internet.')
+        if os.environ.get('FM_MODMON_WEB_PASSWORD'):
+            notes += ' FM_MODMON_WEB_PASSWORD is set, and is used instead of this password.'
+        page.body.addWidget(self._note(notes))
+        page.body.addStretch(1)
+        return page
+
+    def _check_web(self):
+        pw, pw2 = self.web_pw.text(), self.web_pw2.text()
+        if self.web_pw_remove.isChecked() or not (pw or pw2):
+            return None
+        if pw != pw2:
+            return 'The two passwords are different.'
+        if len(pw) < MIN_WEB_PASSWORD:
+            return f'Use at least {MIN_WEB_PASSWORD} characters for the web password.'
+        return None
+
+    def _notifications(self, notify, notifier):
+        page = _WizardPage('Notifications',
+                           'Send alarms (raised and cleared), SDR lost / recovered and start / stop by email '
+                           'and / or a webhook. Leave both off to use the event log only.',
+                           self._check_notify)
+        self.notify_form = NotifyForm(notify, notifier)
+        scroll = QtWidgets.QScrollArea()   # the email fields need more room than the page has on small screens
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(self.notify_form)
+        page.body.addWidget(scroll)
+        return page
+
+    def _check_notify(self):
+        problems = self.notify_form.problems()
+        return '\n'.join(problems) if problems else None
+
+    def _finish(self):
+        page = _WizardPage('Ready' if self.first_run else 'Save',
+                           'Last step: starting with Windows.' if os.name == 'nt' else '')
+        self.autostart_box = QtWidgets.QCheckBox(f'Start {APP_NAME} when I sign in to Windows')
+        self.autostart_box.setChecked(autostart_enabled())
+        self.autostart_box.setVisible(os.name == 'nt')
+        page.body.addWidget(self.autostart_box)
+        page.body.addSpacing(12)
+        page.body.addWidget(self._note(
+            f'Click Finish to start monitoring: {APP_NAME} scans the FM band, sets the RSP1A’s gain for '
+            'the stations it finds, and opens a receiver on the strongest. "Add receiver" opens more.'
+            if self.first_run else
+            'Click Finish to save. Notifications and the web password apply at once; the country and web '
+            'access at the next start.'))
+        page.body.addStretch(1)
+        return page
+
+    def accept(self):
+        try:
+            self.notify_form.save_password()
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, self.windowTitle(), f'The SMTP password was not stored: {e}')
+            return
+        super().accept()
+
+    def app_config(self):
+        """The AppConfig chosen (the web password hashed)."""
+        out = AppConfig.from_dict(self.cfg.to_dict())
+        out.setup_done = True
+        out.country = self.country()
+        out.web_port = self.web_port.value() if self.web_on.isChecked() else 0
+        out.web_bind = '127.0.0.1' if self.web_local.isChecked() else '0.0.0.0'
+        if self.web_pw_remove.isChecked():
+            out.web_password_hash = ''
+        elif self.web_pw.text():
+            out.web_password_hash = hash_password(self.web_pw.text())
+        return out
+
+    def notify_settings(self):
+        return self.notify_form.settings()
+
+    def autostart(self):
+        return os.name == 'nt' and self.autostart_box.isChecked()
 
 
 class ReceiverDialog(QtWidgets.QDialog):
@@ -4000,7 +4369,7 @@ class ReceiverDialog(QtWidgets.QDialog):
 @dataclass
 class NotifySettings:
     """Where notifications go and which events; saved in fm-modmon-ms_config.json.
-    The SMTP password is not here: it comes from FM_MODMON_SMTP_PASSWORD."""
+    The SMTP password is not here: see smtp_password()."""
     email: bool = False
     smtp_host: str = ''
     smtp_port: int = 587
@@ -4036,8 +4405,9 @@ class NotifySettings:
     def recipients(self):
         return [a.strip() for a in self.email_to.replace(';', ',').split(',') if a.strip()]
 
-    def problems(self):
-        """What stops the enabled channels working, as text lines."""
+    def problems(self, have_password=None):
+        """What stops the enabled channels working, as text lines. have_password:
+        whether there will be an SMTP password (default: whether one is stored or set)."""
         out = []
         if self.email:
             if not self.smtp_host:
@@ -4046,11 +4416,123 @@ class NotifySettings:
                 out.append('email: no recipients')
             if not (self.email_from or self.smtp_user):
                 out.append('email: no sender address')
-            if self.smtp_user and not os.environ.get('FM_MODMON_SMTP_PASSWORD'):
-                out.append('email: FM_MODMON_SMTP_PASSWORD is not set')
+            if self.smtp_user and not (smtp_password() if have_password is None else have_password):
+                out.append('email: no password for the SMTP user name')
         if self.webhook and not re.match(r'https?://', self.webhook_url):
             out.append('webhook: the URL must start with https:// (or http://)')
         return out
+
+
+# The web password is kept only as a salted PBKDF2 hash (in the settings file);
+# the SMTP password, which has to be sent as it is, in Windows Credential Manager
+# (protected by the signed-in Windows account), never in the settings file.
+PBKDF2_ITERATIONS = 240_000
+SMTP_CREDENTIAL = 'FM-Modmon-ms/smtp'
+MIN_WEB_PASSWORD = 8
+CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE = 1, 2
+
+
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, PBKDF2_ITERATIONS)
+    return f'pbkdf2_sha256${PBKDF2_ITERATIONS}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}'
+
+
+def verify_password(password, stored):
+    try:
+        algo, iterations, salt, digest = stored.split('$')
+        if algo != 'pbkdf2_sha256':
+            return False
+        got = hashlib.pbkdf2_hmac('sha256', password.encode(), base64.b64decode(salt), int(iterations))
+        return hmac.compare_digest(got, base64.b64decode(digest))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+if os.name == 'nt':
+    from ctypes import wintypes
+
+    class _Credential(ctypes.Structure):
+        _fields_ = [('Flags', wintypes.DWORD), ('Type', wintypes.DWORD), ('TargetName', wintypes.LPWSTR),
+                    ('Comment', wintypes.LPWSTR), ('LastWritten', wintypes.FILETIME),
+                    ('CredentialBlobSize', wintypes.DWORD), ('CredentialBlob', ctypes.POINTER(ctypes.c_ubyte)),
+                    ('Persist', wintypes.DWORD), ('AttributeCount', wintypes.DWORD),
+                    ('Attributes', ctypes.c_void_p), ('TargetAlias', wintypes.LPWSTR),
+                    ('UserName', wintypes.LPWSTR)]
+
+
+def credential_read(target):
+    """A secret from Windows Credential Manager; None if none is stored (or off Windows)."""
+    if os.name != 'nt':
+        return None
+    advapi = ctypes.windll.advapi32
+    ptr = ctypes.POINTER(_Credential)()
+    if not advapi.CredReadW(target, CRED_TYPE_GENERIC, 0, ctypes.byref(ptr)):
+        return None
+    try:
+        c = ptr.contents
+        return ctypes.string_at(c.CredentialBlob, c.CredentialBlobSize).decode('utf-16-le')
+    finally:
+        advapi.CredFree(ptr)
+
+
+def credential_write(target, secret, user=''):
+    """Store a secret in Windows Credential Manager (an empty one deletes it)."""
+    if not secret:
+        credential_delete(target)
+        return
+    if os.name != 'nt':
+        raise OSError('storing a password needs Windows Credential Manager; '
+                      'set FM_MODMON_SMTP_PASSWORD instead')
+    blob = secret.encode('utf-16-le')
+    buf = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+    cred = _Credential(Type=CRED_TYPE_GENERIC, TargetName=target, Comment=f'{APP_NAME} password',
+                       CredentialBlobSize=len(blob), CredentialBlob=ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)),
+                       Persist=CRED_PERSIST_LOCAL_MACHINE, UserName=user or None)
+    if not ctypes.windll.advapi32.CredWriteW(ctypes.byref(cred), 0):
+        raise ctypes.WinError()
+
+
+def credential_delete(target):
+    if os.name == 'nt':
+        ctypes.windll.advapi32.CredDeleteW(target, CRED_TYPE_GENERIC, 0)
+
+
+def smtp_password():
+    """The SMTP password: FM_MODMON_SMTP_PASSWORD if set, else the one stored by Settings / Setup."""
+    return os.environ.get('FM_MODMON_SMTP_PASSWORD') or credential_read(SMTP_CREDENTIAL)
+
+
+@dataclass
+class AppConfig:
+    """App-wide settings, chosen in Setup; saved in the settings file's "app" section.
+    Command-line options, where given, take precedence."""
+    setup_done: bool = False
+    country: str = 'CA'                # ISO country: ISED rules for CA, else FCC; RadioDNS
+    web_port: int = WEB_PORT           # 0 = no web version
+    web_bind: str = '0.0.0.0'          # '127.0.0.1' = this PC only
+    web_password_hash: str = ''        # hash_password(); '' = controls only in a browser on this PC
+
+    @classmethod
+    def from_dict(cls, d):
+        known = {f.name for f in fields(cls)}
+        out = cls(**{k: v for k, v in (d or {}).items() if k in known})
+        out.setup_done = bool(out.setup_done)
+        out.country = str(out.country or '').strip().upper()
+        if not re.fullmatch(r'[A-Z]{2}', out.country):
+            out.country = 'CA'
+        try:
+            out.web_port = int(out.web_port)
+        except (TypeError, ValueError):
+            out.web_port = WEB_PORT
+        if not (out.web_port == 0 or 1024 <= out.web_port <= 65535):
+            out.web_port = WEB_PORT
+        out.web_bind = str(out.web_bind or '0.0.0.0')
+        out.web_password_hash = str(out.web_password_hash or '')
+        return out
+
+    def to_dict(self):
+        return asdict(self)
 
 
 class Notifier:
@@ -4065,6 +4547,7 @@ class Notifier:
         self.settings = settings
         self.where = where              # () -> (host name, web address or None) for the message
         self.results = queue.Queue()
+        self.last_reply = {}            # channel -> the server's last answer to a message
         self._q = queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -4081,11 +4564,13 @@ class Notifier:
         if self.enabled(kind):
             self._deliver([(time.strftime('%Y-%m-%d %H:%M:%S'), kind, text)], retries=(), timeout=timeout)
 
-    def test(self, settings):
-        """Send a test message with `settings`; returns [(channel, error or None)]."""
+    def test(self, settings, password=None):
+        """Send a test message with `settings` (and an SMTP password not stored yet);
+        returns [(channel, error or None)]."""
         host, _ = self.where()
         return self._deliver([(time.strftime('%Y-%m-%d %H:%M:%S'), 'test',
-                               f'test message from {APP_NAME} on {host}')], settings, retries=(), report=False)
+                               f'test message from {APP_NAME} on {host}')], settings, retries=(), report=False,
+                             password=password)
 
     def _run(self):
         while True:
@@ -4098,7 +4583,7 @@ class Notifier:
                     break
             self._deliver(batch)
 
-    def _deliver(self, batch, settings=None, retries=NOTIFY_RETRY_S, timeout=15, report=True):
+    def _deliver(self, batch, settings=None, retries=NOTIFY_RETRY_S, timeout=15, report=True, password=None):
         s = settings or self.settings
         results = []
         for name, send in (('email', self._email), ('webhook', self._webhook)):
@@ -4108,7 +4593,7 @@ class Notifier:
             for wait in (0, *retries):
                 time.sleep(wait)
                 try:
-                    send(s, batch, timeout)
+                    send(s, batch, timeout, password)
                     err = None
                     break
                 except Exception as e:  # noqa: BLE001 - any failure is reported, then retried
@@ -4126,14 +4611,20 @@ class Notifier:
         footer = [f'{APP_NAME} on {host}'] + ([f'web: {web}'] if web else [])
         return subject, lines, footer
 
-    def _email(self, s, batch, timeout):
+    def _email(self, s, batch, timeout, password=None):
         subject, lines, footer = self._message(batch)
         msg = EmailMessage()
         msg['Subject'] = subject
-        msg['From'] = s.email_from or s.smtp_user
+        sender = s.email_from or s.smtp_user
+        msg['From'] = sender
         msg['To'] = ', '.join(s.recipients())
+        # Gmail / Google Workspace (and many spam filters) refuse mail without these;
+        # behind a relay that has already said OK, the refusal only reaches the sender.
+        msg['Date'] = formatdate(localtime=True)
+        domain = parseaddr(sender)[1].rpartition('@')[2]   # From may be 'Name <addr>'
+        msg['Message-ID'] = make_msgid(domain=domain or socket.getfqdn())
         msg.set_content('\n'.join(lines + [''] + footer) + '\n')
-        password = os.environ.get('FM_MODMON_SMTP_PASSWORD')
+        password = password or smtp_password()
         if s.smtp_security == 'ssl':
             smtp = smtplib.SMTP_SSL(s.smtp_host, s.smtp_port, timeout=timeout, context=ssl.create_default_context())
         else:
@@ -4143,9 +4634,16 @@ class Notifier:
                 smtp.starttls(context=ssl.create_default_context())
             if s.smtp_user and password:
                 smtp.login(s.smtp_user, password)
+            # Keep the server's answer to the message itself: it carries the server's
+            # queue ID, the way to trace a message that was accepted but never arrived.
+            data, replies = smtp.data, []
+            smtp.data = lambda m: replies.append(data(m)) or replies[-1]
             smtp.send_message(msg)
+            if replies:
+                code, text = replies[-1]
+                self.last_reply['email'] = f'{code} {text.decode(errors="replace")}'
 
-    def _webhook(self, s, batch, timeout):
+    def _webhook(self, s, batch, timeout, password=None):
         subject, lines, footer = self._message(batch)
         text = '\n'.join([subject] + lines)
         host, web = self.where()
@@ -4191,6 +4689,14 @@ def set_autostart(on, args_text=''):
                    capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
 
+def load_app(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return AppConfig.from_dict(json.load(fh).get('app'))
+    except (OSError, ValueError, AttributeError):
+        return AppConfig()
+
+
 def load_notify(path):
     try:
         with open(path, encoding='utf-8') as fh:
@@ -4225,13 +4731,24 @@ def load_config(path):
     return out
 
 
-def save_config(path, panels, notify=None):
-    """Write the open receivers and their settings, and the notification settings (atomically)."""
-    data = {'version': 1,
-            'receivers': [{'receiver': p.slot + 1, 'freq_mhz': p.station.freq_hz / 1e6,
-                           'settings': p.settings.to_dict()} for p in panels]}
+def save_config(path, panels, notify=None, app=None):
+    """Write the open receivers and their settings, the notification settings and
+    the app settings (atomically); a part given as None keeps what the file has."""
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data['version'] = 1
+    if panels is not None:
+        data['receivers'] = [{'receiver': p.slot + 1, 'freq_mhz': p.station.freq_hz / 1e6,
+                              'settings': p.settings.to_dict()} for p in panels]
     if notify is not None:
         data['notify'] = notify.to_dict()
+    if app is not None:
+        data['app'] = app.to_dict()
     tmp = path + '.tmp'
     try:
         with open(tmp, 'w', encoding='utf-8') as fh:
@@ -4285,9 +4802,9 @@ FM-Modmon-ms PC only).
 The controls (station, settings, remove, audio source, reset integrated, add
 receiver, recalibrate gain) need signing in: click "View only" and enter the
 password. The button turns green ("Controls on"); click it again to sign out.
-Closing the tab also signs out; reloading the page doesn't. When FM-Modmon-ms runs
-without a web password, the controls work only in a browser on the fm-modmon-ms
-PC itself, and the button can't be clicked.
+Closing the tab also signs out; reloading the page doesn't. When no web
+password is set, the controls work only in a browser on the FM-Modmon-ms PC
+itself, and the button can't be clicked.
 
 Everything shown is the app's own display, refreshed 10 times a second. The
 guide below explains each measurement."""
@@ -4357,9 +4874,10 @@ class WebView:
     WEB_IDLE_S = 15
     SESSION_IDLE_S = 600
 
-    def __init__(self, bind, port, password=None):
+    def __init__(self, bind, port, password=None, password_hash=''):
         self.port = port
-        self.password = password or None
+        self.password = password or None          # --web-password / FM_MODMON_WEB_PASSWORD
+        self.password_hash = password_hash or ''  # from Setup (used when there is no password above)
         self.favicon = ico_bytes((16, 32, 48))
         self.touch_icon = _png(draw_icon(180))
         self.state = b'{"ready": false}'
@@ -4389,6 +4907,20 @@ class WebView:
         for audio in list(self.audio.values()):
             audio.close_all()
 
+    def locked(self):
+        """Whether the controls need signing in (a password is set)."""
+        return bool(self.password or self.password_hash)
+
+    def check_password(self, given):
+        if self.password:
+            return hmac.compare_digest(given.encode(), self.password.encode())
+        return bool(self.password_hash) and verify_password(given, self.password_hash)
+
+    def set_password_hash(self, password_hash):
+        """A new password from Setup: everyone signed in has to sign in again."""
+        self.password_hash = password_hash or ''
+        self.sessions.clear()
+
     def _session(self, handler):
         """The request's session token if it is signed in (and keep the session alive)."""
         token = handler.headers.get('X-FM-Modmon-Session') or ''
@@ -4401,7 +4933,7 @@ class WebView:
         return None
 
     def can_control(self, handler):
-        if self.password:
+        if self.locked():
             return self._session(handler) is not None
         # No password: only a browser on this PC, addressed as localhost (the
         # Host check stops another site reaching it through DNS rebinding).
@@ -4451,7 +4983,7 @@ class WebView:
                         return
                     self._send(200, body, 'text/html; charset=utf-8')
                 elif path in ('/state.json', '/status.json'):
-                    access = json.dumps({'control': view.can_control(self), 'password': bool(view.password)})
+                    access = json.dumps({'control': view.can_control(self), 'password': view.locked()})
                     self._send(200, b'{"access": ' + access.encode() + b', ' + view.state[1:], 'application/json')
                 elif path == '/help.json':
                     self._send(200, view.help, 'application/json')
@@ -4525,10 +5057,10 @@ class WebView:
                     self._json(400, {'error': 'bad request'})
                     return
                 if path == '/api/login':
-                    if not view.password:
-                        self._json(400, {'error': 'no password is set (--web-password)'})
+                    if not view.locked():
+                        self._json(400, {'error': 'no web password is set (Settings > Run setup again)'})
                         return
-                    if not hmac.compare_digest(str(args.get('password', '')).encode(), view.password.encode()):
+                    if not view.check_password(str(args.get('password', ''))):
                         time.sleep(1)  # slows guessing
                         view.note(f'web: failed sign-in from {who}')
                         self._json(403, {'error': 'wrong password'})
@@ -4549,9 +5081,9 @@ class WebView:
                     self.send_error(404)
                     return
                 if not view.can_control(self):
-                    self._json(403, {'error': 'sign in to use the controls' if view.password else
+                    self._json(403, {'error': 'sign in to use the controls' if view.locked() else
                                      'controls work only from this PC (http://localhost:'
-                                     f'{view.port}/) unless FM-Modmon-ms runs with --web-password'})
+                                     f'{view.port}/) until a web password is set'})
                     return
                 fut = concurrent.futures.Future()
                 view.commands.put((path[len('/api/'):], args, fut))
@@ -4581,6 +5113,7 @@ class MainWindow(QtWidgets.QWidget):
         self.country = country
         self.nrsc5 = nrsc5              # path to nrsc5.exe, or None: no IBOC playout
         self.config_path = config_path  # None: don't save
+        self.app_config = None          # AppConfig (set by main); None: the file's is kept
         self.stations = stations
         self.gain_info = gain_info
         self.iboc_scan = iboc_scan
@@ -4724,7 +5257,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def save(self):
         if self.config_path:
-            save_config(self.config_path, self.panels, self.notify_settings)
+            save_config(self.config_path, self.panels, self.notify_settings, self.app_config)
 
     # ------------------------------------------------------------ notifications
     def _where(self):
@@ -4736,18 +5269,49 @@ class MainWindow(QtWidgets.QWidget):
 
     def _app_settings(self):
         dialog = AppSettingsDialog(self, self.notify_settings, self.notifier)
-        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+        result = dialog.exec_()
+        if result == AppSettingsDialog.RUN_SETUP:
+            self.run_setup()
             return
-        new = dialog.settings()
+        if result != QtWidgets.QDialog.Accepted:
+            return
+        self._apply_notify(dialog.settings())
+        self._apply_autostart(dialog.autostart.isChecked())
+
+    def run_setup(self):
+        """The setup wizard again, from Settings."""
+        old = self.app_config or AppConfig(setup_done=True)
+        wizard = SetupWizard(self, old, self.notify_settings, self.notifier, first_run=False)
+        if wizard.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        new = self.app_config = wizard.app_config()
+        self._apply_notify(wizard.notify_settings())
+        self._apply_autostart(wizard.autostart())
+        if new.web_password_hash != old.web_password_hash:
+            if self.web:
+                self.web.set_password_hash(new.web_password_hash)
+            self.log('web: password ' + ('set' if new.web_password_hash else 'removed')
+                     + ('' if not self.web or not self.web.password else
+                        ' (--web-password / FM_MODMON_WEB_PASSWORD is used while it is given)'))
+        later = [what for what, changed in (
+            ('the country', new.country != old.country),
+            ('web access', (new.web_port, new.web_bind) != (old.web_port, old.web_bind))) if changed]
+        if later:
+            self.log('setup: ' + ' and '.join(later) + ' change at the next start')
+        self.save()
+
+    def _apply_notify(self, new):
         if new != self.notify_settings:
             self.set_notify(new)
             self.save()
             on = [n for n, v in (('email', new.email), ('webhook', new.webhook)) if v]
             self.log('notifications: ' + (' and '.join(on) if on else 'off'))
-        if dialog.autostart.isChecked() != autostart_enabled():
+
+    def _apply_autostart(self, on):
+        if on != autostart_enabled():
             try:
-                set_autostart(dialog.autostart.isChecked())
-                self.log('start with Windows: ' + ('on' if dialog.autostart.isChecked() else 'off'))
+                set_autostart(on)
+                self.log('start with Windows: ' + ('on' if on else 'off'))
             except (OSError, subprocess.SubprocessError) as e:
                 self.log(f'start with Windows: could not change it: {e}')
 
@@ -4894,7 +5458,7 @@ class MainWindow(QtWidgets.QWidget):
         if self.web:
             rows.append(('Web version', f'http://{socket.gethostname()}:{self.web.port}/ and '
                                         f'http://localhost:{self.web.port}/; controls '
-                                        + ('with the password' if self.web.password else 'from this PC only')))
+                                        + ('with the password' if self.web.locked() else 'from this PC only')))
         else:
             rows.append(('Web version', 'off (--web-port 0)'))
         formats = ', '.join(WEB_FORMATS[f]['label'] for f in (self.web.formats if self.web else []))
@@ -5092,8 +5656,8 @@ class MainWindow(QtWidgets.QWidget):
                 self.log(f'RDS feed TCP {p.feed.port} (receiver {p.slot + 1}): '
                          f'{"client connected" if n > was else "client disconnected"}, {n} now')
                 self._feed_clients[p.slot] = n
-            for desc, raised in p.refresh():
-                text = f'{p.title}: {"ALARM" if raised else "cleared"} - {desc}'
+            for desc, raised, detail in p.refresh():
+                text = f'{p.title}: {"ALARM" if raised else "cleared"} - {desc}' + (f': {detail}' if detail else '')
                 self.log(text)
                 if not self._recovery:
                     self.notifier.event('raise' if raised else 'clear', text)
@@ -5236,24 +5800,28 @@ def build_parser(width=100):
     ap.add_argument('--radiodns-client-id', default=os.environ.get('RADIODNS_CLIENT_ID'),
                     help='RadioDNS client identifier for providers that need one '
                          '(default: the RADIODNS_CLIENT_ID environment variable)')
-    ap.add_argument('--country', default='CA', type=str.upper,
-                    help='ISO country of this receiver, for RadioDNS when a station sends no ECC (default CA)')
+    ap.add_argument('--country', type=str.upper,
+                    help='ISO country of this receiver: the alarm rules (ISED for CA, else FCC) and '
+                         'RadioDNS when a station sends no ECC (default: as set in Setup, else CA)')
     ap.add_argument('--config', default=CONFIG_PATH,
                     help='where receivers and their settings are saved (default: %(default)s)')
+    ap.add_argument('--setup', action='store_true',
+                    help='open the setup (as at the first start) before starting')
     ap.add_argument('--no-scan', action='store_true',
                     help='skip the band scan; dropdowns then list every channel')
     ap.add_argument('--lna', type=int, help='RSP1A LNA state 0-9, higher = less gain (default: calibrated at '
                                             f'start-up; {CAL_DEFAULT[0]} if only --ifgr is given)')
     ap.add_argument('--ifgr', type=int, help='IF gain reduction 20-59 dB (default: calibrated at start-up; '
                                              f'{CAL_DEFAULT[1]} if only --lna is given)')
-    ap.add_argument('--web-port', type=int, default=WEB_PORT,
-                    help='port for the web version (default %(default)s; 0 = off)')
-    ap.add_argument('--web-bind', default='0.0.0.0',
-                    help='address the web version listens on (default all; 127.0.0.1 = this PC only)')
+    ap.add_argument('--web-port', type=int,
+                    help=f'port for the web version (0 = off; default: as set in Setup, else {WEB_PORT})')
+    ap.add_argument('--web-bind',
+                    help='address the web version listens on (0.0.0.0 = all, 127.0.0.1 = this PC only; '
+                         'default: as set in Setup, else all)')
     ap.add_argument('--web-password', default=os.environ.get('FM_MODMON_WEB_PASSWORD'),
-                    help='password for the web controls from other computers (default: the '
-                         'FM_MODMON_WEB_PASSWORD environment variable; without one, the controls work '
-                         'only in a browser on this PC)')
+                    help='password for the web controls from other computers, instead of the one set in '
+                         'Setup (default: the FM_MODMON_WEB_PASSWORD environment variable; with no '
+                         'password at all, the controls work only in a browser on this PC)')
     ap.add_argument('--ffmpeg', default=None,
                     help='ffmpeg for the web audio (default: ffmpeg on the PATH, or a WinGet install)')
     ap.add_argument('--web-audio', default=','.join(WEB_FORMATS), metavar='FORMATS',
@@ -5305,17 +5873,46 @@ def choose_stations(args, saved=None):
     return sorted(stations), receivers, iboc_scan
 
 
+def resolve_args(args, app):
+    """Fill in what the command line left to the app settings (AppConfig)."""
+    args.country = args.country or app.country
+    args.web_port = app.web_port if args.web_port is None else args.web_port
+    args.web_bind = args.web_bind or app.web_bind
+    args.web_password_hash = app.web_password_hash
+    return args
+
+
+def first_run_setup(args):
+    """The setup wizard at the first start (or with --setup); returns the AppConfig."""
+    app_cfg = load_app(args.config)
+    if app_cfg.setup_done and not args.setup:
+        return app_cfg
+    notify = load_notify(args.config)
+    wizard = SetupWizard(None, app_cfg, notify, Notifier(notify, lambda: (socket.gethostname(), None)),
+                         first_run=not app_cfg.setup_done)
+    if wizard.exec_() == QtWidgets.QDialog.Accepted:
+        app_cfg, notify = wizard.app_config(), wizard.notify_settings()
+        try:
+            if wizard.autostart() != autostart_enabled():
+                set_autostart(wizard.autostart())
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f'start with Windows: could not change it: {e}')
+    app_cfg.setup_done = True     # cancelled: the defaults, and no setup at the next start
+    save_config(args.config, None, notify, app_cfg)
+    return app_cfg
+
+
 def start_web(args):
     if not args.web_port:
         return None
     try:
-        web = WebView(args.web_bind, args.web_port, args.web_password)
+        web = WebView(args.web_bind, args.web_port, args.web_password, getattr(args, 'web_password_hash', ''))
     except OSError as e:
         print(f'web version not started (port {args.web_port}): {e}')
         return None
     host = socket.gethostname() if args.web_bind == '0.0.0.0' else args.web_bind
     print(f'Web version: http://{host}:{args.web_port}/  (also http://localhost:{args.web_port}/); controls '
-          + ('with the password' if args.web_password else 'from this PC only (no --web-password)'))
+          + ('with the password' if web.locked() else 'from this PC only (no web password)'))
     args.ffmpeg = args.ffmpeg or find_ffmpeg()
     web.formats = ffmpeg_formats(args.ffmpeg, [f.strip() for f in args.web_audio.split(',') if f.strip()])
     if not args.ffmpeg:
@@ -5352,6 +5949,8 @@ def main():
     app = QtWidgets.QApplication(sys.argv)
     install_icon(app)
     apply_dark_theme(app)
+    app_cfg = first_run_setup(args)
+    resolve_args(args, app_cfg)
     # Started from the shortcut there is no console, so show progress and errors in windows.
     splash = QtWidgets.QSplashScreen(splash_pixmap(app.primaryScreen().logicalDotsPerInch() / 96))
     splash.setFont(QtGui.QFont('Segoe UI', 10))
@@ -5392,6 +5991,7 @@ def main():
     if cal_report:
         win.log(f'gain: calibrated at start-up, {cal_report}')
     win.args = args
+    win.app_config = app_cfg
     win.set_notify(load_notify(args.config))
     win.save()
     # Windows only knows the frame size once the window exists, so open it

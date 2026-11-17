@@ -534,9 +534,10 @@ function buildPanel(r) {
   // any src they're given), and shows while listening, for volume and pause.
   p.listen = h('button', null, '▶  Listen');
   p.listen.title = 'Play this receiver in this browser (a few seconds behind the air)';
-  p.format = h('select'); p.format.title = 'Audio format for this browser (remembered)';
+  p.format = h('select'); p.format.title = 'Audio format for this receiver in this browser (remembered)';
+  p.audioFormat = savedFormat(n);
   p.format.onchange = () => {
-    setAudioFormat(JSON.parse(p.format.value));
+    setAudioFormat(p, JSON.parse(p.format.value));
     if (p.listening) { p.stop(); p.listen.onclick(); }   // switch the stream now
   };
   // The player: our own controls over a hidden <audio>, styled like the app.
@@ -560,11 +561,11 @@ function buildPanel(r) {
   p.listen.onclick = () => {
     if (p.listening) { p.stop(); return; }
     for (const q of panels.values()) if (q !== p) q.stop();  // one at a time
-    p.listening = true; p.since = null; p.status = 'connecting…';
+    p.listening = true; p.since = null; p.playState = 'connecting…';
     p.listen.classList.add('on'); setText(p.listen, '■  Stop');
     playerUi.classList.add('on');
     applyVolume(p);
-    const src = p.player.src = `audio/${n}.${audioFormat}?t=${Date.now()}`;
+    const src = p.player.src = `audio/${n}.${p.audioFormat}?t=${Date.now()}`;
     p.player.play().catch(e => {
       // Stop (or a format change) while it was still buffering cancels the start:
       // that's on purpose, not a fault, so say nothing.
@@ -575,8 +576,8 @@ function buildPanel(r) {
     clearInterval(p.liveTimer);
     p.liveTimer = setInterval(() => showLive(p), 500);   // the LIVE clock, whatever the data rate
   };
-  p.player.addEventListener('playing', () => { p.since = p.since || Date.now(); p.status = null; showLive(p); });
-  p.player.addEventListener('waiting', () => { if (p.listening) { p.status = 'buffering…'; showLive(p); } });
+  p.player.addEventListener('playing', () => { p.since = p.since || Date.now(); p.playState = null; showLive(p); });
+  p.player.addEventListener('waiting', () => { if (p.listening) { p.playState = 'buffering…'; showLive(p); } });
   p.player.addEventListener('error', () => { if (p.listening) { p.stop(); toast(`receiver ${n}: the audio stream failed`); } });
   p.note = h('span', 'note');
   ar.append(p.source, p.format, p.listen, playerUi, p.note);
@@ -616,8 +617,8 @@ function updatePanel(p, r) {
   drawGonio(p.gonio, r.gonio);
   if (stereo.panel === p) followStereo(p, r);
   const iboc = r.source.startsWith('iboc');
-  const fmts = playableFormats(), can = fmts.length > 0 && !iboc;
-  fillSelect(p.format, fmts.map(f => ({value: f.key, label: f.label, enabled: true})), audioFormat);
+  const fmts = playableFormats(p), can = fmts.length > 0 && !iboc;
+  fillSelect(p.format, fmts.map(f => ({value: f.key, label: f.label, enabled: true})), p.audioFormat);
   p.format.style.display = can ? '' : 'none';
   if (!can) p.stop();
   p.listen.style.display = can ? '' : 'none';
@@ -646,24 +647,25 @@ function applyVolume(p) {
 }
 function showLive(p) {
   if (!p.listening) { setText(p.live, ''); p.live.className = 'live'; return; }
-  if (p.status || !p.since) { setText(p.live, p.status || 'connecting…'); p.live.className = 'live wait'; return; }
+  if (p.playState || !p.since) { setText(p.live, p.playState || 'connecting…'); p.live.className = 'live wait'; return; }
   const s = Math.floor((Date.now() - p.since) / 1000);
   setText(p.live, `● LIVE ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`);
   p.live.className = 'live on';
 }
 
-// Browser audio format: one choice for all receivers, remembered in this browser.
-let audioFormat = (() => { try { return localStorage.getItem('fm-modmon-ms-format') || ''; } catch (e) { return ''; } })();
-function setAudioFormat(key) {
-  audioFormat = key;
-  try { localStorage.setItem('fm-modmon-ms-format', key); } catch (e) {}
-  for (const q of panels.values()) if (document.activeElement !== q.format) q.format.value = JSON.stringify(key);
+// Browser audio format: chosen per receiver, each remembered in this browser.
+function savedFormat(n) {
+  try { return localStorage.getItem('fm-modmon-ms-format-' + n) || ''; } catch (e) { return ''; }
+}
+function setAudioFormat(p, key) {
+  p.audioFormat = key;
+  try { localStorage.setItem('fm-modmon-ms-format-' + p.n, key); } catch (e) {}
 }
 const canPlay = {};
-function playableFormats() {
+function playableFormats(p) {
   const probe = playableFormats.probe || (playableFormats.probe = document.createElement('audio'));
   const fmts = (state.audio_formats || []).filter(f => (canPlay[f.canplay] ??= probe.canPlayType(f.canplay) !== ''));
-  if (fmts.length && !fmts.some(f => f.key === audioFormat)) audioFormat = fmts[0].key;   // the server's first, or what's left
+  if (fmts.length && !fmts.some(f => f.key === p.audioFormat)) p.audioFormat = fmts[0].key;   // the server's first, or what's left
   return fmts;
 }
 
@@ -769,7 +771,7 @@ function renderAccess(a) {
   setText(lock, on ? (a.password ? '\u{1F513}  Controls on' : '\u{1F513}  Controls on (this PC)') : '\u{1F512}  View only');
   lock.title = on ? (a.password ? 'Signed in: click to sign out' : 'Controls work here because this browser is on the FM-Modmon-ms PC')
              : a.password ? 'Click to sign in and use the controls'
-             : 'The controls work in a browser on the FM-Modmon-ms PC (http://localhost:' + location.port + '/), or from anywhere when FM-Modmon-ms runs with --web-password';
+             : 'The controls work in a browser on the FM-Modmon-ms PC (http://localhost:' + location.port + '/), or from anywhere once a web password is set (Settings > Run setup again on that PC)';
   if (on) closeSignin();
 }
 
