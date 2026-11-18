@@ -180,6 +180,9 @@ Measurements (refreshed 10x per second):
                     the demodulator's sinc roll-off (L-R, RDS and SCA peaks
                     read up to 3% low without it) and stops the noise above
                     100 kHz
+                    Flagged when one side reads 3% higher than the other
+                    over 10 s: programme is symmetric, but a station 200 kHz
+                    above pulls the positive peaks up (below: the negative)
     Peak deviation  the same, of |MPX|, in kHz
     Over 100/110%   bursts above 100% / 110% in the last minute, counted only
                     in valid time; repeats within 5 ms are one burst (the
@@ -195,7 +198,10 @@ Measurements (refreshed 10x per second):
                     or not as a whole (never single samples): not while AM /
                     multipath has been 5% or more in the last 10 s, nor
                     while Noise >100 kHz is amber, nor for
-                    1 s after an RF level step of 3 dB. The over-modulation
+                    1 s after an RF level step of 3 dB, nor for 60 s after
+                    another station's PI is decoded (co-channel by ducting
+                    or sporadic E, intermod; against the expected PI, else
+                    the one held 60 s since tuning). The over-modulation
                     alarm judges the peaks of valid time only. A station
                     seldom valid says more about the antenna than the
                     transmitter
@@ -379,6 +385,10 @@ VALID_WARN_PCT = 90.0      # valid time under this is shown amber: the readings 
 HF_LO_HZ, HF_HI_HZ = 105e3, 145e3  # MPX noise measured here: above every subcarrier, inside the channel
 PEAK_NOISE_PCT = 1.4       # not valid while that noise (RMS, % of 75 kHz) has been this high in the last 10 s:
                            # it adds ~1 kHz to the peaks, half SM.1268's +/-2 kHz (synthetic transmitter: MPX S/N ~58 dB)
+PI_LEARN_S = 60            # a PI decoded this long since tuning is the station's own (when none is expected)
+INTERFERENCE_HOLD_S = 60   # peaks withheld this long after the last sign of another station (tropo lasts hours)
+ASYM_S = 10                # +/- peak asymmetry averaged over this long...
+ASYM_WARN_PCT = 3.0        # ...flagged from here: programme is symmetric, a station on one side isn't
 PILOT_AM_WARN_PCT = 1.0    # pilot amplitude ripple shown amber from here (Inovonics' multipath sign; a confirmation,
                            # not a gate: noise and composite clipping that hits the pilot raise it too)
 IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor
@@ -858,6 +868,7 @@ class FmMeter(gr.sync_block):
         self._noise_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # noise on the peak path per update
         self._pilot_am = None
         self._vpeaks = deque(maxlen=UPDATE_HZ)   # (+, -) peaks of the last 1 s's valid updates (None: invalid)
+        self._asym = deque(maxlen=ASYM_S * UPDATE_HZ)  # + peak minus - peak per update
         self._rf_slow = None
         self._hold = 0                            # updates an event keeps invalid still
         self.interference = None                  # set from outside: why another station is suspected, or None
@@ -889,7 +900,7 @@ class FmMeter(gr.sync_block):
             self._rds_fft = None
             self._env_sum, self._env, self._sync = 0.0, [], None
             for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._am_hist,
-                      self._rds_z, self._valid_hist, self._vpeaks, self._exceed, self._noise_hist):
+                      self._rds_z, self._valid_hist, self._vpeaks, self._exceed, self._noise_hist, self._asym):
                 d.clear()
             self._rf_slow, self._hold, self._pilot_am = None, 0, None
             self._over_last = [-10 ** 9] * 2
@@ -1179,6 +1190,8 @@ class FmMeter(gr.sync_block):
         if why is None:
             self._add_exceed(ax)
         self._vpeaks.append(None if why else (float(pos), float(-neg)))
+        if not settling:
+            self._asym.append(float(pos + neg))   # (neg is negative)
         vpeaks = [p for p in self._vpeaks if p]
         over = np.sum(self._over, axis=0) if self._over else np.zeros(2)
         sync_am = self._sync_am(x, env) if env is not None and not self._settle else None
@@ -1239,6 +1252,8 @@ class FmMeter(gr.sync_block):
             'peak_noise_pct': self._hf_noise * 100,
             'peak_noise_max_pct': max(self._noise_hist, default=0.0) * 100,
             'pilot_am_pct': self._pilot_am,
+            # + peak minus - peak, % (mean over ASYM_S): a station on one side pulls one way (Inovonics)
+            'asym_pct': float(np.mean(self._asym)) * 100 if self._asym else None,
             'sync_am_pct': None if sync_am is None else sync_am * 100,
             'pilot_pct': pilot_pct,
             'rds_pct': rds_pct,
@@ -4002,6 +4017,7 @@ class StationPanel(QtWidgets.QGroupBox):
         self._data_lost = []
         self._data_codes = {}  # service: its code for a name ('7A', 'SCA67')
         self._rt_alarm = ''
+        self._reset_identity()
         self.rate = 0.0
         self._groups = deque()
         self.readings = {}      # the latest _measure(): every reading as plain values
@@ -4416,12 +4432,40 @@ class StationPanel(QtWidgets.QGroupBox):
         self._data_lost = []
         self._data_codes = {}
         self._rt_alarm = ''
+        self._reset_identity()
         self.readings = {}
         self.history.reset()
         for m in self.meters.values():
             m.set_value(None, '-')
         self.gonio.set_data(None)
         self.mpx.set_data(None)
+
+    def _reset_identity(self):
+        self._pi_seen = (None, 0.0)    # (PI, decoded unchanged since)
+        self._pi_ref = None            # the PI held PI_LEARN_S since tuning
+        self._interference, self._interference_until = None, 0.0
+
+    def _other_station(self, pi):
+        """Why another station is suspected on the channel, or None: its PI
+        decoded instead of this station's (the expected one, else the one held
+        PI_LEARN_S since tuning; the expected one only while the PI alarm is on). Co-channel (tropospheric ducting, sporadic E)
+        and intermod are caught by their signature, not by AM depth alone;
+        Inovonics' co-channel alarm is the same PI check. Peaks are withheld
+        until INTERFERENCE_HOLD_S after the last sign (FmMeter.interference)."""
+        now = time.monotonic()
+        if pi:
+            if pi != self._pi_seen[0]:
+                self._pi_seen = (pi, now)
+            elif self._pi_ref is None and now - self._pi_seen[1] >= PI_LEARN_S:
+                self._pi_ref = pi
+        # (with the PI alarm switched off, the expected PI isn't acted on here either)
+        ref = (self.settings.expected_pi if self.settings.alarms.get('PI', True) else '') or self._pi_ref
+        if pi and ref and pi != ref:
+            self._interference, self._interference_until = f'PI {pi}, not {ref}', now + INTERFERENCE_HOLD_S
+        elif now >= self._interference_until:
+            self._interference = None
+        self.station.meter.interference = self._interference
+        return self._interference
 
     def _rds_rate(self):
         """Groups per second over the last 3 s."""
@@ -4560,9 +4604,12 @@ class StationPanel(QtWidgets.QGroupBox):
                      pos_pct=s['pos_pct'], neg_pct=s['neg_pct'], limit_pct=limit, limit_why=why,
                      dev_khz=s['peak_dev_khz'], over100_min=s['over100_min'], over110_min=s['over110_min'],
                      mpx_dbr=s['mpx_dbr'], mpx_window_s=s['mpx_window_s'], mpx_db=s['mpx_db'],
-                     valid=s['valid'], invalid_why=s['invalid_why'], valid_pct=s['valid_pct'],
+                     valid=s['valid'] and not self._interference,
+                     invalid_why=self._interference or s['invalid_why'], valid_pct=s['valid_pct'],
                      valid_window_s=s['valid_window_s'], hf_noise_db=s['hf_noise_db'],
-                     peak_noise_pct=s['peak_noise_pct'], pilot_am_pct=s['pilot_am_pct'])
+                     peak_noise_pct=s['peak_noise_pct'], pilot_am_pct=s['pilot_am_pct'], asym_pct=s['asym_pct'])
+            if s['asym_pct'] is not None and abs(s['asym_pct']) >= ASYM_WARN_PCT:
+                lv['asym_pct'] = 'warn'
             if s['peak_noise_max_pct'] >= PEAK_NOISE_PCT:
                 lv['hf_noise_db'] = 'warn'
             if s['pilot_am_pct'] is not None and s['pilot_am_pct'] >= PILOT_AM_WARN_PCT:
@@ -4707,8 +4754,13 @@ class StationPanel(QtWidgets.QGroupBox):
                     f'{pct:.1f}%  ' + self._sca_kind_html(r[f'sca{khz}_kind'], r[f'sca{khz}_baud']) if pct is not None
                     else f'<span style="color:{DIM}">none</span>')
             self._sca_sources({khz: {'kind': r[f'sca{khz}_kind']} for khz in (67, 92)})
+            asym = ''
+            if lv.get('asym_pct'):  # an adjacent station pulls the deviation its way
+                side = 'above' if r['asym_pct'] > 0 else 'below'
+                asym = '  ' + _coloured(f"{'+' if r['asym_pct'] > 0 else '−'} {abs(r['asym_pct']):.0f}% higher: "
+                                        f"a station {side}?", 'warn')
             v['Peak + / −'].setText(f"+{_pct_html(r['pos_pct'], lv.get('pos_pct'))}"
-                                    f" / −{_pct_html(r['neg_pct'], lv.get('neg_pct'))}")
+                                    f" / −{_pct_html(r['neg_pct'], lv.get('neg_pct'))}" + asym)
             v['Limit'].setText(f"{r['limit_pct']:.1f}%  <span style=\"color:{DIM}\">({_html(r['limit_why'])})</span>")
             v['Peak deviation'].setText(f"{r['dev_khz']:.1f} kHz  ({r['dev_khz'] / 0.75:.0f}%)")
             v['Over 100%'].setText(f"{r['over100_min']} /min")
@@ -4802,8 +4854,9 @@ class StationPanel(QtWidgets.QGroupBox):
             # other readings); only judge the technical rules on clean reception,
             # and peaks only from the valid time of the last second (ITU-R SM.1268).
             clean = not carrier and s['am_pct'] < CLEAN_AM_PCT and s['snr_db'] > 25
+            other = self._other_station(pi)
             valid_peak = (max(s['valid_pos_pct'], s['valid_neg_pct'])
-                          if clean and s['valid_pos_pct'] is not None else None)
+                          if clean and not other and s['valid_pos_pct'] is not None else None)
             suppressed = set(JUDGED_CLEAN) if not clean else set()
             if valid_peak is None:
                 suppressed.add('OVERMOD')

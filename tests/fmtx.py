@@ -193,11 +193,13 @@ def mpx(rm, seconds, left=(), right=(), pilot=0.09, pilot_hz=19000.0, rds=0.0, r
 
 
 def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e6, seed=1, echo=None,
-        sync_am=None):
+        sync_am=None, interferer=None):
     """Feed the MPX through a transmitter and a real FmStation; returns the station.
     sync_am: (a, b) gives the carrier synchronous AM, envelope 1 + a*x + b*(x^2 - mean)
     of the MPX x (as a mistuned RF chain would).
-    echo: (delay_s, gain, phase_rad) adds one reflection (two-ray multipath)."""
+    echo: (delay_s, gain, phase_rad) adds one reflection (two-ray multipath).
+    interferer: (mpx, gain, offset_hz) adds a second FM transmitter (its own MPX, as long),
+    gain x rf_amp, offset_hz from the wanted carrier (co-channel: a few Hz to kHz)."""
     from gnuradio import analog, blocks, filter, gr
     from gnuradio.filter import firdes
     tb = gr.top_block()
@@ -226,6 +228,15 @@ def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e
         add = blocks.add_cc()
         refl = blocks.multiply_const_cc(g * complex(math.cos(phase), math.sin(phase)))
         tb.connect(chain[-1], blocks.delay(gr.sizeof_gr_complex, round(delay_s * rm.SAMP_RATE)), refl, (add, 1))
+        chain.append(add)
+    if interferer:
+        mpx2, g, df = interferer
+        add = blocks.add_cc()
+        tb.connect(blocks.vector_source_f(np.asarray(mpx2, np.float32).tolist(), False),
+                   filter.interp_fir_filter_fff(rm.CHAN_DECIM, interp.taps()),
+                   analog.frequency_modulator_fc(2 * math.pi * rm.MAX_DEV / rm.SAMP_RATE),
+                   blocks.rotator_cc(2 * math.pi * (offset_hz + df) / rm.SAMP_RATE),
+                   blocks.multiply_const_cc(rf_amp * g), (add, 1))
         chain.append(add)
     if noise:
         add = blocks.add_cc()

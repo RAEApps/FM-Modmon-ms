@@ -135,6 +135,28 @@ st = held(station(left=[(997, 0.826)], right=[(997, 0.826)], pilot=0.09, rds=0.0
 check(f'SM.1268: ~{max(st.meter.stats["pos_pct"], st.meter.stats["neg_pct"]):.1f}%: over the limit, '
       'not over it + 2 kHz', judge(st, 'fcc')[0], ['OVERMOD'])
 check('SM.1268: compliant programme, 15 min held', judge(held(station(**music)), 'fcc')[0], [])
+# Another station's PI: peaks withheld (co-channel is caught by signature; AM depth under-reports it)
+st = station(left=[(997, 0.86)], right=[(997, 0.86)], pilot=0.09, rds=0.04)
+got, _, p, _ = judge(st, 'fcc', expected_pi='ABCD')
+check('PI differs from expected: over-modulation withheld', (got, p.readings['alarms']['OVERMOD'],
+                                                            p.readings['invalid_why']),
+      (['PI'], 'suppressed', 'PI C6B2, not ABCD'))
+rm.time = fake
+try:
+    p.settings = rm.ReceiverSettings()
+    p._reset_identity()
+    def seen(pi, seconds):
+        for _ in range(seconds):
+            clock['t'] += 1.0
+            why = p._other_station(pi)
+        return why
+    check('no expected PI: none suspected before one is held 60 s', (seen('C6B2', 30), seen('1234', 1)), (None, None))
+    seen('C6B2', 61)
+    check('...then another PI is withheld for 60 s after it last shows',
+          (seen('1234', 1), seen('C6B2', 59), seen('C6B2', 2), st.meter.interference),
+          ('PI 1234, not C6B2', 'PI 1234, not C6B2', None, None))
+finally:
+    rm.time = real_time
 check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
 
 rm.time = fake

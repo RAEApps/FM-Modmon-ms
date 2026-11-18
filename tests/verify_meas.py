@@ -378,6 +378,31 @@ st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, am=0.10)
 check(S, 'Pilot AM % (10% plain AM: not an echo)', True, st.meter.stats['pilot_am_pct'] < rm.PILOT_AM_WARN_PCT, 0)
 rows[-1] = rows[-1][:3] + (round(st.meter.stats['pilot_am_pct'], 2),) + rows[-1][4:]
 
+# ================================================================ S13: another station on the channel or beside it
+S = 'S13 interference'
+x2, _ = fmtx.mpx(rm, 6.0, left=[(440, 0.6), (3100, 0.2)], right=[(700, 0.5)], pilot=0.09, rds=0.04,
+                 rds_content=fmtx.RdsContent(pi=0x1234, ps='OTHER   '))
+want = block_peaks(info['mpx_ac'])[0]    # (x, info: S12's programme, 6 s)
+# co-channel (a different programme, 150 Hz off): 30 dB down adds no false peak and stays valid;
+# 20 dB down adds ~4% and reads 10% AM: not valid
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 10 ** (-30 / 20), 150))
+check(S, 'co-channel 30 dB down: Peak +%', want, st.meter.stats['pos_pct'], 0.6, '%')
+check(S, 'co-channel 30 dB down: valid', None, st.meter.stats['invalid_why'])
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 10 ** (-20 / 20), 150))
+check(S, 'co-channel 20 dB down: not valid', 'multipath', st.meter.stats['invalid_why'])
+rows[-1] = rows[-1][:3] + (f"{st.meter.stats['invalid_why']} (AM {st.meter.stats['am_pct']:.0f}%, "
+                           f"peak +{st.meter.stats['pos_pct'] - want:.1f}%)",) + rows[-1][4:]
+# a neighbour 200 kHz away: 20 dB down its energy above 100 kHz invalidates; 12 dB down it pulls one side's peaks
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 0.1, 200e3))
+check(S, 'neighbour +200 kHz 20 dB down: not valid', 'noise', st.meter.stats['invalid_why'])
+for df, side in ((200e3, 'above'), (-200e3, 'below')):
+    st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 10 ** (-12 / 20), df))
+    text = plain(panel_for(st).values['Peak + / −'])
+    check(S, f'neighbour {df / 1e3:+.0f} kHz 12 dB down: peaks flagged', True, text.endswith(f'a station {side}?'), 0)
+    rows[-1] = rows[-1][:3] + (text,) + rows[-1][4:]
+check(S, 'no neighbour: not flagged', True, plain(panel_for(fmtx.run(rm, x, rf_amp=0.1, noise=0.0005))
+                                                 .values['Peak + / −']).endswith('%'), 0)
+
 # ================================================================ report
 w = max(len(r[1]) for r in rows)
 for scn, name, exp, got, unit, verdict in rows:
