@@ -159,11 +159,12 @@ function Install-Monitor {
     $root = (Get-ChildItem $src -Directory | Select-Object -First 1).FullName
 
     $appDir = Join-Path $InstallDir 'app'
-    New-Item -ItemType Directory -Force (Join-Path $appDir 'examples') | Out-Null
+    New-Item -ItemType Directory -Force (Join-Path $appDir 'examples'), (Join-Path $appDir 'tools') | Out-Null
     foreach ($f in 'fm-modmon-ms.py', 'fm-modmon-ms-web.html', 'fm-modmon-ms.ico', 'LICENSE', 'README.md') {
         Copy-Item (Join-Path $root $f) $appDir -Force
     }
     Copy-Item (Join-Path $root 'examples\*') (Join-Path $appDir 'examples') -Recurse -Force
+    Copy-Item (Join-Path $root 'tools\*') (Join-Path $appDir 'tools') -Recurse -Force
     Copy-Item (Join-Path $root 'install.ps1') $InstallDir -Force   # for updates and uninstalling
     # Settings and event logs are written beside the script: let users change them.
     & icacls.exe $appDir /grant '*S-1-5-32-545:(OI)(CI)M' /T /Q | Out-Null
@@ -323,7 +324,7 @@ function Uninstall-All {
     Remove-Item (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\fm-modmon-ms.lnk') -ErrorAction SilentlyContinue
     Remove-Item (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) "$App.lnk") -ErrorAction SilentlyContinue
     Remove-Item (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) "$App.lnk") -ErrorAction SilentlyContinue
-    foreach ($d in 'soapysdrplay3-build', 'nrsc5', 'ffmpeg', 'app\examples', 'app\__pycache__') {
+    foreach ($d in 'soapysdrplay3-build', 'nrsc5', 'ffmpeg', 'app\examples', 'app\tools', 'app\__pycache__') {
         Remove-Item (Join-Path $InstallDir $d) -Recurse -Force -ErrorAction SilentlyContinue
     }
     foreach ($f in 'app\fm-modmon-ms.py', 'app\fm-modmon-ms-web.html', 'app\fm-modmon-ms.ico', 'app\LICENSE',

@@ -130,7 +130,9 @@ Measurements (refreshed 10x per second):
                     band (FM noise rises as f^2; the estimate allows for it)
     Carrier offset  DC of demodulated MPX (station + SDR tuning error)
     AM / multipath  envelope ripple of the carrier, RMS, as % of 100% AM
-                    (10% sine AM reads 10%; 0% = clean reception)
+                    (10% sine AM reads 10%; 0% = clean reception). Peaks
+                    are judged only while it stays under 5% (ITU-R SM.1268:
+                    echoes 26 dB down); the other rules under 15%
     Pilot           19 kHz injection, % of 75 kHz (>3% = stereo), and its
                     frequency from the stereo PLL (spec 19 kHz +/- 2 Hz)
     RDS injection   57 kHz subcarrier peak deviation, % of 75 kHz (as
@@ -209,12 +211,21 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 import xml.etree.ElementTree as ET
 from collections import Counter, OrderedDict, deque
 from dataclasses import asdict, dataclass, field, fields
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# radioconda's numpy and scipy use MKL with Intel OpenMP, whose threads spin for
+# 200 ms after each parallel FFT or filter. The meters call those all the time, so
+# on a 4-thread laptop the spinning took 2 of its 4 cores. The meters already run
+# in parallel (a GNU Radio thread each): keep the maths single-threaded. Must be
+# set before numpy loads.
+for _var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
+    os.environ.setdefault(_var, '1')
 
 import numpy as np
 import pmt
@@ -234,6 +245,9 @@ CHAN_PASS_HZ = 150e3       # channel filter: flat to +/-150 kHz, stop by +/-185 
 AUDIO_RATE = int(QUAD_RATE / AUDIO_DECIM)
 MAX_DEV = 75e3             # FM broadcast 100% deviation
 MAX_SPAN = 7.2e6           # widest station spread that fits the 8 MHz IF filter
+EDGE_HZ = MAX_SPAN / 2 + 150e3  # a station at most this far from the SDR centre (room to move off the midpoint)
+DC_CLEAR_HZ = 250e3        # SDR centre this far from every carrier: the RSP1A's DC offset stays out of the channel
+IMAGE_CLEAR_HZ = 300e3     # each station's IQ image (mirrored about the centre) this far from every other carrier
 PLAY_GAIN = 0.7
 UPDATE_HZ = 10             # measurement and display rate
 MAX_RECEIVERS = 4          # receivers the app runs at once
@@ -243,9 +257,11 @@ AUDIO_BATCH = 512          # so they are called ~100x/s, not ~900x/s; powers
 SRC_BUFFER = 1 << 18       # SDR output buffer, samples (~27 ms). GNU Radio's default
                            # (4096) makes every block downstream run on ~100-sample
                            # scraps thousands of times a second: 4x the CPU.
-CHAN_CHUNK = 512           # channel filters wait for this many outputs (~2 ms), so the
+CHAN_CHUNK = 8192          # channel filters wait for this many outputs (~21 ms), so the
                            # whole station runs in chunks of this size whatever the
-                           # SDR delivers per read
+                           # SDR delivers per read. Each station is ~50 blocks, one
+                           # thread each: 512 (~1.3 ms) cost ~25% more CPU in wake-ups.
+                           # Needs CHAN_CHUNK * CHAN_DECIM < SRC_BUFFER.
 RDS_CREST = 1.443          # IEC 62106 RDS waveform: peak / RMS (random data)
 GUARD_TO_AUDIO = (15e3 ** 3 / 3) / ((18.3e3 ** 3 - 16e3 ** 3) / 3 / 2.3e3)  # f^2 noise: 0-15 kHz power
                            # per (Hz of guard-band noise density)
@@ -271,6 +287,10 @@ PS_NAME_STABLE_S = 10      # a PS names the station once it has held this long
 OVERMOD_WINDOW_S = 0.001   # over-modulation is counted per 1 ms window
 OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes)
 MPX_POWER_S = 60           # ITU-R BS.412 MPX power integration time
+PEAK_AM_PCT = 5.0          # over-modulation is judged only while AM / multipath has stayed
+PEAK_AM_S = 10             # ...under this for this long (ITU-R SM.1268: echoes 26 dB down,
+                           # AM averaged over 10 s); echoes or noise above it inflate peaks
+CLEAN_AM_PCT = 15.0        # the other technical rules are judged under this
 IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor
 WEB_PORT = 8765            # web view; 0 turns it off
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fm-modmon-ms-web.html')
@@ -661,6 +681,15 @@ def _db(power):
     return 10 * math.log10(power) if power > 1e-20 else -math.inf
 
 
+def _percentiles(x, qs):
+    """np.percentile(x, qs) (linear interpolation) from one np.partition,
+    without np.percentile's general-purpose overhead."""
+    pos = [q / 100 * (len(x) - 1) for q in qs]
+    lo = [min(int(p), len(x) - 2) for p in pos]
+    part = np.partition(x, sorted({k for i in lo for k in (i, i + 1)}))
+    return [float(part[i] + (p - i) * (part[i + 1] - part[i])) for p, i in zip(pos, lo)]
+
+
 class FmMeter(gr.sync_block):
     """Measures a station from its channel IQ and MPX (both at QUAD_RATE).
 
@@ -697,6 +726,7 @@ class FmMeter(gr.sync_block):
         self._over_prev = np.zeros(2, bool)                # was the last 1 ms window over 100/110%?
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
+        self._am_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # AM per update, for the peak gate
         self._env_sum = 0.0
         self._settle = SETTLE_UPDATES
         self._reset = False
@@ -713,7 +743,7 @@ class FmMeter(gr.sync_block):
             self._chunks, self._count, self._iq_energy = [], 0, 0.0
             self._psd = self._rf = self._offset = self._am = None
             self._env_sum = 0.0
-            for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms):
+            for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._am_hist):
                 d.clear()
             self._over_prev = np.zeros(2, bool)
             self._settle = SETTLE_UPDATES
@@ -765,18 +795,19 @@ class FmMeter(gr.sync_block):
         psd *= 2.0 / (self.NFFT * np.sum(self._win ** 2)) * self._demod_comp
         self._psd = self._smooth(self._psd, psd, 0.25)
         ax = np.abs(x)
-        self._peaks.append(float(np.percentile(ax, 99.9)))
+        self._peaks.append(_percentiles(ax, (99.9,))[0])
         # Modulation-monitor style: +/- peaks (relative to the carrier's rest
         # frequency), 1 ms windows over 100%/110%, and BS.412 MPX power.
-        neg, pos = np.percentile(x, (0.05, 99.95))
+        neg, pos = _percentiles(x, (0.05, 99.95))
         self._pos.append(float(pos))
         self._neg.append(float(-neg))
         # Count excursions (runs of 1 ms windows over the limit), like a
         # monitor's peak counter, so one long burst counts once.
         win = int(QUAD_RATE * OVERMOD_WINDOW_S)
-        sustained = ax
-        for k in range(1, max(1, round(QUAD_RATE * OVERMOD_MIN_S))):
-            sustained = np.minimum(sustained, np.roll(ax, k))
+        sustained = ax.copy()
+        for k in range(1, max(1, round(QUAD_RATE * OVERMOD_MIN_S))):  # min with ax shifted by k (wrapping)
+            np.minimum(sustained[k:], ax[:-k], out=sustained[k:])
+            np.minimum(sustained[:k], ax[-k:], out=sustained[:k])
         wmax = sustained[:len(x) // win * win].reshape(-1, win).max(axis=1)
         counts = []
         for i, limit in enumerate((1.0, 1.1)):
@@ -794,6 +825,8 @@ class FmMeter(gr.sync_block):
         if env_mean > 0:
             # RMS ripple x sqrt(2): the % of a sine AM with the same RMS
             self._am = self._smooth(self._am, math.sqrt(2 * max(iq_power - env_mean ** 2, 0.0)) / env_mean, 0.3)
+            if not self._settle:  # filters' start-up ripple isn't multipath
+                self._am_hist.append(self._am)
         over = np.sum(self._over, axis=0) if self._over else np.zeros(2)
 
         def band(lo, hi):
@@ -817,6 +850,7 @@ class FmMeter(gr.sync_block):
             'mpx_dbr': _db(np.mean(self._mpx_ms) * MAX_DEV ** 2 / (19e3 ** 2 / 2)) if self._mpx_ms else -math.inf,
             'mpx_window_s': len(self._mpx_ms) / UPDATE_HZ,
             'am_pct': (self._am or 0.0) * 100,
+            'am_max_pct': max(self._am_hist, default=0.0) * 100,  # over the last PEAK_AM_S
             'pilot_pct': math.sqrt(2 * band(18.9e3, 19.1e3)) * 100,
             # Report RDS only when it stands 3 dB above the expected noise.
             'rds_pct': (math.sqrt(2 * (band(54.6e3, 59.4e3) - rds_noise)) * RDS_CREST * 100
@@ -897,8 +931,9 @@ class ScaMeter(gr.sync_block):
         edges = np.geomspace(300, 15000, 17)
         bands = np.stack([spec[:, (f >= lo) & (f < hi)].sum(axis=1) for lo, hi in zip(edges, edges[1:])], axis=1)
         flux = float(np.mean(np.abs(np.diff(10 * np.log10(bands + 1e-12), axis=0))))
-        # symbol-rate line in |d/dt| (the transitions of NRZ data)
-        d = np.abs(np.diff(x))
+        # symbol-rate line in |d/dt| (the transitions of NRZ data); prepend keeps
+        # the length 96000, which FFTs 8x faster than 95999 (= 17 x 5647)
+        d = np.abs(np.diff(x, prepend=x[0]))
         line = np.abs(np.fft.rfft((d - d.mean()) * np.hanning(len(d)))) ** 2
         fd = np.fft.rfftfreq(len(d), 1 / AUDIO_RATE)
         band = (fd > 150) & (fd < 16000)
@@ -982,12 +1017,15 @@ class AudioMeter(gr.sync_block):
         return x
 
     TP_TAIL = 32  # input samples carried between hops for true-peak oversampling
+    # resample_poly's own 4x filter (Kaiser, beta 5, 81 taps), designed once: it
+    # would otherwise redesign it on every call
+    TP_TAPS = sps.firwin(81, 1 / 4, window=('kaiser', 5.0))
 
     def _true_peak(self, ch, x):
         """4x-oversampled peak. Each hop is overlapped with the previous hop's
         tail and the filter's edge ringing is discarded, so block boundaries
         don't inflate the reading."""
-        y = sps.resample_poly(np.concatenate((self._tp_tail[ch], x)), 4, 1)
+        y = sps.resample_poly(np.concatenate((self._tp_tail[ch], x)), 4, 1, window=self.TP_TAPS)
         self._tp_tail[ch] = x[-self.TP_TAIL:]
         half = 4 * self.TP_TAIL // 2
         return float(np.max(np.abs(y[half:-half])))
@@ -2471,8 +2509,22 @@ class FmStation(gr.hier_block2):
 
 
 def _centre(freqs_hz):
-    freqs_hz = list(freqs_hz)
-    return (min(freqs_hz) + max(freqs_hz)) / 2
+    """SDR centre for these stations: as near their midpoint as keeps every
+    carrier DC_CLEAR_HZ off the RSP1A's DC offset and IMAGE_CLEAR_HZ off every
+    other station's IQ image, with no station more than EDGE_HZ out. On the
+    midpoint itself a lone station sits on the DC offset, and the two end
+    stations sit on each other's images."""
+    freqs = sorted(set(freqs_hz))
+    mid = (freqs[0] + freqs[-1]) / 2
+    room = max(0.0, EDGE_HZ - (freqs[-1] - freqs[0]) / 2)
+
+    def clearance(c):
+        dc = min(abs(f - c) for f in freqs) / DC_CLEAR_HZ
+        image = min((abs(2 * c - a - b) for a in freqs for b in freqs if a < b), default=math.inf) / IMAGE_CLEAR_HZ
+        return min(dc, image, 1.0)
+
+    shifts = sorted((k * 25e3 for k in range(-int(room // 25e3), int(room // 25e3) + 1)), key=lambda s: (abs(s), -s))
+    return max((mid + s for s in shifts), key=clearance)  # first (smallest shift) of the best
 
 
 class FmMonitor(gr.top_block):
@@ -2635,6 +2687,12 @@ class FmMonitor(gr.top_block):
     def set_freq(self, slot, freq_hz):
         """Move one receiver to another station; the SDR re-centres so all fit."""
         self._recentre({slot: freq_hz})
+
+    def window_hz(self):
+        """The band the receivers' stations can be chosen from (MAX_SPAN around their midpoint)."""
+        freqs = [st.freq_hz for st in self.slots if st] or [self.center_hz]
+        mid = (min(freqs) + max(freqs)) / 2
+        return mid - MAX_SPAN / 2, mid + MAX_SPAN / 2
 
     def _recentre(self, changes=None):
         freqs = {i: st.freq_hz for i, st in enumerate(self.slots) if st}
@@ -2945,18 +3003,29 @@ class Meter(QtWidgets.QWidget):
         p.drawText(QtCore.QRectF(w - val_w, 0, val_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, self.text)
 
 
-def _flags_html(f):
-    """gr-rds flag string: TP, TA, Music, Stereo(DI), AH, Compressed, static PTY."""
+RDS_FLAGS = ('TP', 'TA', 'music', 'stereo', 'AH', 'CMP')  # gr-rds flag string order (then static PTY)
+
+
+def rds_flags(f):
+    """gr-rds flag string ('1'/'0' for TP, TA, Music, Stereo(DI), AH, Compressed,
+    static PTY) as {name: bool}, or None until a full one is decoded."""
     if len(f) < 7:
+        return None
+    return {name: f[i] == '1' for i, name in enumerate(RDS_FLAGS)}
+
+
+def _flags_html(flags):
+    """rds_flags() for a rich-text label."""
+    if flags is None:
         return '-'
 
     def lit(name, on):
         return f'<b style="color:{RED}">{name}</b>' if on else f'<span style="color:{DIM}">{name}</span>'
 
     return ' '.join([
-        lit('TP', f[0] == '1'), lit('TA', f[1] == '1'),
-        '<b>Music</b>' if f[2] == '1' else '<b>Speech</b>',
-        lit('DI-Stereo', f[3] == '1'), lit('AH', f[4] == '1'), lit('CMP', f[5] == '1'),
+        lit('TP', flags['TP']), lit('TA', flags['TA']),
+        '<b>Music</b>' if flags['music'] else '<b>Speech</b>',
+        lit('DI-Stereo', flags['stereo']), lit('AH', flags['AH']), lit('CMP', flags['CMP']),
     ])
 
 
@@ -3302,6 +3371,10 @@ class StationAlarms:
         self._pending = {}
         self._t0 = time.monotonic()
 
+    def pending(self):
+        """The alarms whose change (raise or clear) waits for its delay."""
+        return set(self._pending)
+
     def ready(self):
         """False during the grace period after (re)tuning, while the meters
         still hold some of the previous station's signal."""
@@ -3359,10 +3432,101 @@ def mod_limit(rules, limits, stats):
                    f'max {lim["mod_max_pct"]:g}%')
 
 
-def _pct_html(v, warn=100, alarm=110):
-    colour = RED if v > alarm else AMBER if v > warn else None
-    text = f'{v:.0f}%'
+def _level(v, warn=None, alarm=None):
+    """'alarm' above `alarm`, 'warn' above `warn`, else None (normal)."""
+    if alarm is not None and v > alarm:
+        return 'alarm'
+    if warn is not None and v > warn:
+        return 'warn'
+    return None
+
+
+LEVEL_COLOURS = {'warn': AMBER, 'alarm': RED}
+
+
+def _coloured(text, level):
+    """text in its level's colour (as is when normal)."""
+    colour = LEVEL_COLOURS.get(level)
     return f'<span style="color:{colour}">{text}</span>' if colour else text
+
+
+def _pct_html(v, level):
+    return _coloured(f'{v:.0f}%', level)
+
+
+class _Ring:
+    """The last n (time, row of values) pairs, oldest first from view()."""
+
+    def __init__(self, n, width):
+        self.t = np.full(n, np.nan)
+        self.v = np.full((n, width), np.nan, dtype=np.float32)
+        self.i = self.count = 0
+
+    def add(self, t, row):
+        self.t[self.i], self.v[self.i] = t, row
+        self.i = (self.i + 1) % len(self.t)
+        self.count = min(self.count + 1, len(self.t))
+
+    def view(self):
+        order = np.roll(np.arange(len(self.t)), -self.i)[len(self.t) - self.count:]
+        return self.t[order], self.v[order]
+
+
+class History:
+    """A receiver's recent readings, for trend displays: every refresh for
+    FAST_S, and one point a second for SLOW_S (peak readings: the second's
+    maximum; the rest: its mean); and the alarm changes of the last ALARM_LOG_S.
+    Times are time.time(); a reading not available is NaN."""
+
+    KEYS = ('pos_pct', 'neg_pct', 'rf_dbfs', 'snr_db', 'am_pct', 'offset_hz', 'pilot_pct', 'rds_pct',
+            'rds_rate', 'mpx_dbr', 'momentary', 'short_term', 'correlation')
+    PEAKS = ('pos_pct', 'neg_pct', 'am_pct')
+    FAST_S, SLOW_S, ALARM_LOG_S = 300, 3600, 86400
+
+    def __init__(self):
+        self._peak = np.array([k in self.PEAKS for k in self.KEYS])
+        self.reset()
+
+    def reset(self):
+        self.fast = _Ring(self.FAST_S * UPDATE_HZ, len(self.KEYS))
+        self.slow = _Ring(self.SLOW_S, len(self.KEYS))
+        self._second, self._acc = None, []
+        self.alarm_log = deque()  # (time, alarm name, raised)
+
+    def add(self, t, readings):
+        """readings: {key: value or None}; keys not in KEYS are ignored."""
+        row = np.array([np.nan if readings.get(k) is None else readings[k] for k in self.KEYS], dtype=np.float64)
+        self.fast.add(t, row)
+        second = int(t)
+        if self._acc and second != self._second:
+            self._close_second()
+        self._second = second
+        self._acc.append(row)
+
+    def _close_second(self):
+        rows = np.array(self._acc)
+        self._acc = []
+        with np.errstate(all='ignore'), warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)  # a reading missing the whole second: NaN
+            row = np.where(self._peak, np.nanmax(rows, axis=0), np.nanmean(rows, axis=0))
+        self.slow.add(float(self._second), row)
+
+    def series(self, key, seconds=FAST_S):
+        """(times, values) of one reading over the last `seconds`: every
+        refresh up to FAST_S, one a second beyond that."""
+        ring = self.fast if seconds <= self.FAST_S else self.slow
+        t, v = ring.view()
+        keep = t >= (t[-1] if len(t) else 0) - seconds
+        return t[keep], v[keep, self.KEYS.index(key)]
+
+    def log_alarm(self, t, name, raised):
+        self.alarm_log.append((t, name, raised))
+        while self.alarm_log and self.alarm_log[0][0] < t - self.ALARM_LOG_S:
+            self.alarm_log.popleft()
+
+
+# Alarms that judge the transmission against the rules: only on clean reception
+JUDGED_CLEAN = ('OVERMOD', 'PILOT_SPEC', 'SUBCARRIERS', 'FREQUENCY')
 
 
 class StationPanel(QtWidgets.QGroupBox):
@@ -3397,6 +3561,8 @@ class StationPanel(QtWidgets.QGroupBox):
         self._rt_alarm = ''
         self.rate = 0.0
         self._groups = deque()
+        self.readings = {}      # the latest _measure(): every reading as plain values
+        self.history = History()
         self._web_lists = None  # (stations, sources) for the web page; None = rebuild
         self.setObjectName('panel')
 
@@ -3666,46 +3832,56 @@ class StationPanel(QtWidgets.QGroupBox):
         self._web_lists = None
         return not why
 
-    def _iboc_line_text(self):
+    IBOC_TEXT = ('artist', 'title', 'album', 'genre', 'comment', 'name', 'slogan', 'message', 'alert')
+
+    def _iboc_readings(self):
+        """The IBOC programme playing (from nrsc5's status), or None when none plays."""
         dec = self.station.iboc
         if not dec:
-            return '-'
+            return None
         st = dec.status
-        parts = [dict(AUDIO_SOURCES)[f'iboc{dec.program}'].split()[1],
-                 'synchronized' if st['synced'] else f'<span style="color:{AMBER}">searching\u2026</span>']
-        if dec.program in st['services']:
-            parts[0] += f" ({st['services'][dec.program]})"
-        if st['kbps']:
-            parts.append(f"{st['kbps']:.0f} kbps")
-        if st['mer']:
-            parts.append(f"MER {min(st['mer']):.1f} dB")
-        if st['ber'] is not None:
-            parts.append(f"BER {st['ber']:.1e}")
-        if dec.pipe.dropped:
-            parts.append(f'<span style="color:{RED}">{dec.pipe.dropped} blocks dropped</span>')
-        if st['alert']:
-            parts.append(f'<b style="color:{RED}">ALERT: {_html(st["alert"])}</b>')
+        return {'program': dec.program, 'service': st['services'].get(dec.program), 'synced': st['synced'],
+                'kbps': st['kbps'] or None, 'mer_db': min(st['mer']) if st['mer'] else None, 'ber': st['ber'],
+                'dropped': dec.pipe.dropped, **{k: st[k] for k in self.IBOC_TEXT}}
+
+    @staticmethod
+    def _iboc_line_text(ib):
+        if not ib:
+            return '-'
+        parts = [dict(AUDIO_SOURCES)[f'iboc{ib["program"]}'].split()[1],
+                 'synchronized' if ib['synced'] else f'<span style="color:{AMBER}">searching\u2026</span>']
+        if ib['service'] is not None:
+            parts[0] += f" ({ib['service']})"
+        if ib['kbps']:
+            parts.append(f"{ib['kbps']:.0f} kbps")
+        if ib['mer_db'] is not None:
+            parts.append(f"MER {ib['mer_db']:.1f} dB")
+        if ib['ber'] is not None:
+            parts.append(f"BER {ib['ber']:.1e}")
+        if ib['dropped']:
+            parts.append(f'<span style="color:{RED}">{ib["dropped"]} blocks dropped</span>')
+        if ib['alert']:
+            parts.append(f'<b style="color:{RED}">ALERT: {_html(ib["alert"])}</b>')
         return '  \u00b7  '.join(parts)
 
-    def _psd_sis_text(self):
+    @staticmethod
+    def _psd_sis_text(ib):
         """(PSD line, SIS line) from nrsc5, each '-' when there is nothing."""
-        dec = self.station.iboc
-        if not dec:
+        if not ib:
             return '-', '-'
-        st = dec.status
-        song = ' \u2013 '.join(x for x in (st['artist'], st['title']) if x)
-        psd = [x for x in (song, st['album'], st['genre'], st['comment']) if x]
-        sis = [x for x in (st['name'], st['slogan'], st['message']) if x]
+        song = ' \u2013 '.join(x for x in (ib['artist'], ib['title']) if x)
+        psd = [x for x in (song, ib['album'], ib['genre'], ib['comment']) if x]
+        sis = [x for x in (ib['name'], ib['slogan'], ib['message']) if x]
         return ('  \u00b7  '.join(map(_html, psd)) or '-', '  \u00b7  '.join(map(_html, sis)) or '-')
 
-    def _rdns_lookups(self, f, raw):
+    def _rdns_lookups(self, pi, ecc):
         """[(label, result, slideshow or None)] for this station's RadioDNS
         services (FM, and IBOC while it plays)."""
         if not self.radiodns:
             return []
         out = []
-        pi = f.get(0, '').strip()
-        fm_key = radiodns_fm(pi, self.station.freq_hz, raw['ecc'], self.country) if pi else None
+        pi = (pi or '').strip()
+        fm_key = radiodns_fm(pi, self.station.freq_hz, ecc, self.country) if pi else None
         if fm_key:
             out.append(('FM', self.radiodns.lookup(*fm_key), self.radiodns.vis(fm_key[0])))
         dec = self.station.iboc
@@ -3732,10 +3908,10 @@ class StationPanel(QtWidgets.QGroupBox):
             return f'<span style="color:{RED}">lookup failed: {_html(result.get("error", ""))}</span>'
         return f'<span style="color:{DIM}">{state}</span>'
 
-    def _update_media(self, f, raw):
+    def _update_media(self, pi, ecc):
         """RadioDNS line (only while RadioDNS works for the station), station
         logo (IBOC on air, else RadioDNS) and album art (IBOC, else the RadioDNS slideshow)."""
-        lookups = self._rdns_lookups(f, raw)
+        lookups = self._rdns_lookups(pi, ecc)
         working = [(label, r, vis) for label, r, vis in lookups
                    if r['state'] == 'found' or (vis and vis.image)]
         parts = []
@@ -3797,6 +3973,8 @@ class StationPanel(QtWidgets.QGroupBox):
         self._data_lost = []
         self._data_codes = {}
         self._rt_alarm = ''
+        self.readings = {}
+        self.history.reset()
         for m in self.meters.values():
             m.set_value(None, '-')
         self.gonio.set_data(None)
@@ -3820,9 +3998,8 @@ class StationPanel(QtWidgets.QGroupBox):
         kind = self.station.sca_meter.kinds[khz]
         return kind[0] if kind else 'checking'
 
-    def _sca_kind_html(self, khz, s):
-        kind = self._sca_kind(khz, s)
-        baud = (self.station.sca_meter.kinds[khz] or (None, None))[1]
+    @staticmethod
+    def _sca_kind_html(kind, baud):
         return {
             'audio': f'<span style="color:{AMBER}">AUDIO</span>',
             'data': f'<span style="color:{ACCENT}">DATA</span>' + (f' ~{baud:.0f} Bd' if baud else '')
@@ -3830,15 +4007,15 @@ class StationPanel(QtWidgets.QGroupBox):
             'tone': f'<span style="color:{AMBER}">TONE</span>',
             'idle': f'<span style="color:{DIM}">IDLE (no modulation)</span>',
             'weak': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(too weak to tell)</span>',
-            'checking': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(checking\u2026)</span>',
+            'checking': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(checking…)</span>',
         }[kind]
 
-    def _sca_sources(self, s):
+    def _sca_sources(self, sca):
         """Label the SCA audio sources with what they carry, so data isn't taken for audio."""
         for i, (key, label) in enumerate(AUDIO_SOURCES):
             if not key.startswith('sca'):
                 continue
-            kind = self._sca_kind(int(key[3:]), s)
+            kind = sca[int(key[3:])]['kind']
             text, tip = label, ''
             if kind is None:
                 text, tip = f'{label} (none)', 'No subcarrier on this station'
@@ -3867,144 +4044,273 @@ class StationPanel(QtWidgets.QGroupBox):
         """Whether to show the IBOC, PSD and SIS rows: IBOC found on this station, or playing."""
         return bool(self.station.iboc) or isinstance(self.iboc_scan.get(self.station.freq_hz), float)
 
-    def _iboc_text(self):
+    def _iboc_scan_readings(self):
+        """What the start-up scan found of IBOC on this station: ('unscanned' |
+        'adjacent' | 'absent' | 'detected', level in dBc or None)."""
         if self.station.freq_hz not in self.iboc_scan:
-            return f'<span style="color:{DIM}">unknown (not scanned)</span>'
+            return 'unscanned', None
         info = self.iboc_scan[self.station.freq_hz]
         if info == 'adjacent':
-            return f'<span style="color:{DIM}">unknown (adjacent station)</span>'
+            return 'adjacent', None
         if info is None:
-            return f'<span style="color:{DIM}">not detected</span>'
-        return f'<span style="color:{AMBER}">detected</span>, {info:.0f} dBc'
+            return 'absent', None
+        return 'detected', info
 
-    def refresh(self):
-        """Update every readout; returns alarm changes as [(description, raised), ...]."""
-        v = self.values
+    @staticmethod
+    def _iboc_text(found, dbc):
+        if found == 'detected':
+            return f'<span style="color:{AMBER}">detected</span>, {dbc:.0f} dBc'
+        return f'<span style="color:{DIM}">' + {'unscanned': 'unknown (not scanned)',
+                                                'adjacent': 'unknown (adjacent station)',
+                                                'absent': 'not detected'}[found] + '</span>'
+
+    def _measure(self):
+        """Every reading of this receiver as plain values: text, numbers, lists
+        (None: not received yet). 'levels' holds {reading: 'warn' | 'alarm'} for
+        readings out of their range. Measurement and signal readings are present
+        only once the meters have them ('has_signal', 'has_audio').
+        Keeps the RDS rate, the data services and the RT+ alarm current."""
         st = self.station
         f = st.rds.fields
         raw = st.rds.snapshot()
-        if raw['ps']:
-            self.ps.setText(raw['ps'])
-        elif 1 in f:
-            self.ps.setText(f[1].ljust(8))
-        self.ps_mode.setVisible(raw['ps_dynamic'])
-        rt = f.get(4, '')
-        self.rt.setText(rt.strip())
-        show = self._iboc_lines()
+        lv = {}
+        r = {'freq_hz': st.freq_hz, 'levels': lv}
+
+        # station text
+        r['ps'] = raw['ps'] or (f[1].ljust(8) if 1 in f else None)
+        r['ps_dynamic'] = raw['ps_dynamic']
+        r['rt'] = f.get(4, '').strip()
+        r['rtplus'] = [(t, RTPLUS_TYPES.get(t, f'type {t}'), text) for t, text in
+                       sorted(raw['rtplus'], key=lambda kv: (kv[0] != RTPLUS_ALARM, kv[0] != 4, kv[0]))]
+        self._rt_alarm = r['rt_alarm'] = next((text for t, text in raw['rtplus'] if t == RTPLUS_ALARM), '')
+        r['iboc'] = self._iboc_readings()
+        r['iboc_lines'] = self._iboc_lines()
+        r['iboc_found'], r['iboc_dbc'] = self._iboc_scan_readings()
+
+        # RDS
+        r['pi'] = f.get(0)
+        r['pty'] = ((PTY_RDS if self.settings.pty_names == 'rds' else PTY_RBDS)[raw['pty']]
+                    if raw['pty'] is not None else f.get(2))
+        r['flags'] = rds_flags(f.get(3, ''))
+        r['clock'] = raw['ct']      # (local datetime, UTC offset in minutes) or None
+        r['af'] = f.get(6) or ''
+        r['ptyn'] = raw['ptyn'] or ''
+        r['ecc'] = raw['ecc']       # None: not sent; 0: sent as 00 (not set)
+        r['oda'] = [ODA_NAMES.get(aid, f'{aid:04X}') for aid in raw['oda']]
+        self.rate = r['rds_rate'] = self._rds_rate()
+        total = sum(raw['types'].values())
+        r['rds_loss_pct'] = max(0.0, 1 - self.rate / 11.4) * 100 if total else None
+        r['group_types'] = ([(k, n * 100 / total) for k, n in sorted(raw['types'].items(), key=lambda kv: -kv[1])]
+                            if total else [])
+
+        # signal and modulation
+        s = st.meter.stats
+        r['has_signal'] = bool(s)
+        sca_kinds = {}
+        if s:
+            lim = self.settings.limits(self.country)
+            limit, why = mod_limit(self.rules(), lim, s)
+            tol = lim['freq_tol_hz']
+            r.update(limits=lim, rf_dbfs=s['rf_dbfs'], snr_db=s['snr_db'], offset_hz=s['offset_hz'],
+                     am_pct=s['am_pct'], pilot_pct=s['pilot_pct'], pilot_hz=st.pilot_hz, rds_pct=s['rds_pct'],
+                     stereo_mode='stereo' if st.stereo else 'forced mono' if st.pilot else 'mono',
+                     pos_pct=s['pos_pct'], neg_pct=s['neg_pct'], limit_pct=limit, limit_why=why,
+                     dev_khz=s['peak_dev_khz'], over100_min=s['over100_min'], over110_min=s['over110_min'],
+                     mpx_dbr=s['mpx_dbr'], mpx_window_s=s['mpx_window_s'], mpx_db=s['mpx_db'])
+            if tol and abs(s['offset_hz']) > tol:
+                lv['offset_hz'] = 'alarm'
+            if s['am_pct'] >= PEAK_AM_PCT:  # peaks aren't judged above this, nor other rules above CLEAN_AM_PCT
+                lv['am_pct'] = 'alarm' if s['am_pct'] >= CLEAN_AM_PCT else 'warn'
+            if st.pilot and not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']:
+                lv['pilot_pct'] = 'alarm'
+            if st.pilot_hz is not None and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']:
+                lv['pilot_hz'] = 'alarm'
+            for key in ('pos_pct', 'neg_pct'):
+                if level := _level(s[key], 100, limit):
+                    lv[key] = level
+            for khz in (67, 92):
+                kind = sca_kinds[khz] = self._sca_kind(khz, s)
+                r[f'sca{khz}_pct'] = s[f'sca{khz}_pct']
+                r[f'sca{khz}_kind'] = kind
+                r[f'sca{khz}_baud'] = (st.sca_meter.kinds[khz] or (None, None))[1]
+        self._measure_data_services(r, raw, sca_kinds, total)
+
+        # audio
+        a = st.audio_meter.stats
+        r['has_audio'] = bool(a)
+        if a:
+            r.update({k: a[k] for k in ('mod_l', 'mod_r', 'mod_m', 'mod_s', 'momentary', 'short_term', 'integrated',
+                                        'tp_l', 'tp_r', 'rms_l', 'rms_r', 'correlation', 'width_db')})
+            r['balance_db'] = a['rms_l'] - a['rms_r'] if math.isfinite(a['rms_l'] + a['rms_r']) else 0.0
+            for key in ('mod_l', 'mod_r', 'mod_m', 'mod_s'):
+                if level := _level(a[key], 100, 110):
+                    lv[key] = level
+            if a['correlation'] < 0:
+                lv['correlation'] = 'alarm'
+        return r
+
+    def _measure_data_services(self, r, raw, sca_kinds, total):
+        """r['data_services']: the data services on air now, [{'key', 'group' (its
+        group type, None for SCA data), 'share_pct' (of RDS groups, or None),
+        'paging' (1A paging details for the paging service)}]; r['data_lost']: the
+        steady services now missing (also self._data_lost)."""
+        present = {k: g for k, (age, g) in raw['data'].items() if age <= DATA_GAP_S}
+        for khz in (67, 92):
+            if sca_kinds.get(khz) == 'data':
+                present[f'SCA {khz} kHz data'] = None
+                self._data_codes[f'SCA {khz} kHz data'] = f'SCA{khz}'
+        self._data_codes.update((k, g) for k, g in present.items() if g)
+        self._data_lost = r['data_lost'] = self.data_services.update(present)
+        paging = [f'1A paging codes {raw["rp_codes"]:02X}'] if raw['rp_codes'] else []
+        paging += [f'operator code {raw["opc"]}'] if raw['opc'] else []
+        paging += [f'paging ID {raw["paging_id"]:03X}'] if raw['paging_id'] is not None else []
+        r['data_services'] = [
+            {'key': key, 'group': g, 'paging': paging if key == UNANNOUNCED_DATA[14] else [],
+             'share_pct': raw['types'].get(g, 0) * 100 / total if g and total else None}
+            for key, g in sorted(present.items())]
+
+    def _show(self, r):
+        """Put _measure()'s readings on the panel's labels and meters."""
+        v, lv = self.values, r['levels']
+        st = self.station
+        if r['ps'] is not None:
+            self.ps.setText(r['ps'])
+        self.ps_mode.setVisible(r['ps_dynamic'])
+        self.rt.setText(r['rt'])
+        show = r['iboc_lines']
         for w in self._iboc_rows:
             if w.isHidden() == show:
                 w.setVisible(show)
         for label, text in zip((self.iboc_line, self.psd_line, self.sis_line),
-                               (self._iboc_line_text(), *self._psd_sis_text())):
+                               (self._iboc_line_text(r['iboc']), *self._psd_sis_text(r['iboc']))):
             label.setText(text)
             label.setToolTip(QtGui.QTextDocumentFragment.fromHtml(text).toPlainText() if text != '-' else '')
-        self._update_media(f, raw)
-        tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>')
-                + _html(f'{RTPLUS_TYPES.get(t, f"type {t}")}: {text}') + '</span>'
-                for t, text in sorted(raw['rtplus'], key=lambda kv: (kv[0] != RTPLUS_ALARM, kv[0] != 4, kv[0]))]
+        self._update_media(r['pi'], r['ecc'])
+        tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>') + _html(f'{name}: {text}') + '</span>'
+                for t, name, text in r['rtplus']]
         self.rtplus.setText('   ·   '.join(tags) if tags else '-')
-        self._rt_alarm = next((text for t, text in raw['rtplus'] if t == RTPLUS_ALARM), '')
-        v['PI'].setText(f.get(0, '-'))
-        if raw['pty'] is not None:
-            v['PTY'].setText((PTY_RDS if self.settings.pty_names == 'rds' else PTY_RBDS)[raw['pty']])
-        else:
-            v['PTY'].setText(f.get(2, '-'))
-        v['Flags'].setText(_flags_html(f.get(3, '')))
-        if raw['ct']:  # RDS sends UTC and the local offset: show local time
-            local, offset = raw['ct']
+        v['PI'].setText('-' if r['pi'] is None else r['pi'])
+        v['PTY'].setText('-' if r['pty'] is None else r['pty'])
+        v['Flags'].setText(_flags_html(r['flags']))
+        if r['clock']:  # RDS sends UTC and the local offset: show local time
+            local, offset = r['clock']
             v['Clock'].setText(f'{local:%Y-%m-%d %H:%M} local (UTC{"-" if offset < 0 else "+"}'
                                f'{abs(offset) // 60}:{abs(offset) % 60:02d})')
         else:
             v['Clock'].setText('-')
-        v['Alt. freqs'].setText(f.get(6, '-') or '-')
-        v['PTYN'].setText(raw['ptyn'] or '-')
-        v['ECC'].setText('-' if raw['ecc'] is None else
-                         f"{raw['ecc']:02X}" if raw['ecc'] else '00 (not set)')
-        v['ODA'].setText(', '.join(ODA_NAMES.get(aid, f'{aid:04X}') for aid in raw['oda']) or '-')
-        self.rate = rate = self._rds_rate()
-        v['Groups/s'].setText(f'{rate:.1f}')
-        total = sum(raw['types'].values())
-        v['Group loss'].setText(f'{max(0.0, 1 - rate / 11.4) * 100:.0f}%' if total else '-')
-        v['Group types'].setText('  '.join(f'{k} {n * 100 / total:.0f}%' for k, n in
-                                           sorted(raw['types'].items(), key=lambda kv: -kv[1])[:5])
-                                 if total else '-')
+        v['Alt. freqs'].setText(r['af'] or '-')
+        v['PTYN'].setText(r['ptyn'] or '-')
+        v['ECC'].setText('-' if r['ecc'] is None else f"{r['ecc']:02X}" if r['ecc'] else '00 (not set)')
+        v['ODA'].setText(', '.join(r['oda']) or '-')
+        v['Groups/s'].setText(f"{r['rds_rate']:.1f}")
+        v['Group loss'].setText('-' if r['rds_loss_pct'] is None else f"{r['rds_loss_pct']:.0f}%")
+        v['Group types'].setText('  '.join(f'{k} {pct:.0f}%' for k, pct in r['group_types'][:5]) or '-')
 
-        s = st.meter.stats
-        if s:
-            v['RF level'].setText(_num(s['rf_dbfs'], 'dBFS'))
-            v['MPX S/N'].setText(_num(s['snr_db'], 'dB'))
-            rules = self.rules()
-            lim = self.settings.limits(self.country)
-            limit, why = mod_limit(rules, lim, s)
-            tol = lim['freq_tol_hz']
-            off = f"{s['offset_hz']:+.0f} Hz"
-            v['Carrier offset'].setText(f'<span style="color:{RED}">{off}</span>' if tol and abs(s['offset_hz']) > tol
-                                        else off)
-            am = s['am_pct']
-            am_text = f'{am:.1f}%'
-            v['AM / multipath'].setText(
-                f'<span style="color:{RED}">{am_text}  peaks unreliable</span>' if am >= 20 else
-                f'<span style="color:{AMBER}">{am_text}</span>' if am >= 10 else am_text)
-            pilot_txt = f"{s['pilot_pct']:.1f}%"
-            if st.pilot and not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']:
-                pilot_txt = f'<span style="color:{RED}">{pilot_txt}</span>'
+        if r['has_signal']:
+            v['RF level'].setText(_num(r['rf_dbfs'], 'dBFS'))
+            v['MPX S/N'].setText(_num(r['snr_db'], 'dB'))
+            v['Carrier offset'].setText(_coloured(f"{r['offset_hz']:+.0f} Hz", lv.get('offset_hz')))
+            am_text = f"{r['am_pct']:.1f}%"
+            am_note = {'warn': '  peaks unreliable', 'alarm': '  readings unreliable'}.get(lv.get('am_pct'), '')
+            v['AM / multipath'].setText(_coloured(am_text + am_note, lv.get('am_pct')))
             v['Pilot (19 kHz)'].setText(
-                f"{pilot_txt}  " +
-                (f'<span style="color:{RED}">STEREO</span>' if st.stereo
-                 else f'<span style="color:{AMBER}">mono (forced)</span>' if st.pilot
-                 else f'<span style="color:{DIM}">mono</span>'))
-            if st.pilot_hz is not None:
-                err = st.pilot_hz - 19000
-                text = f'{st.pilot_hz:.1f} Hz ({err:+.1f})'
-                v['Pilot freq'].setText(f'<span style="color:{RED}">{text}</span>' if abs(err) > lim['pilot_tol_hz'] else text)
+                _coloured(f"{r['pilot_pct']:.1f}%", lv.get('pilot_pct')) + '  ' +
+                {'stereo': f'<span style="color:{RED}">STEREO</span>',
+                 'forced mono': f'<span style="color:{AMBER}">mono (forced)</span>',
+                 'mono': f'<span style="color:{DIM}">mono</span>'}[r['stereo_mode']])
+            if r['pilot_hz'] is not None:
+                err = r['pilot_hz'] - 19000
+                v['Pilot freq'].setText(_coloured(f"{r['pilot_hz']:.1f} Hz ({err:+.1f})", lv.get('pilot_hz')))
             else:
                 v['Pilot freq'].setText('-')
-            v['RDS injection'].setText(f"{s['rds_pct']:.1f}%")
-            v['IBOC signal'].setText(self._iboc_text())
+            v['RDS injection'].setText(f"{r['rds_pct']:.1f}%")
+            v['IBOC signal'].setText(self._iboc_text(r['iboc_found'], r['iboc_dbc']))
             for khz in (67, 92):
-                pct = s[f'sca{khz}_pct']
-                v[f'SCA {khz} kHz'].setText(f'{pct:.1f}%  ' + self._sca_kind_html(khz, s) if pct is not None
-                                            else f'<span style="color:{DIM}">none</span>')
-            self._sca_sources(s)
-            v['Peak + / −'].setText(f"+{_pct_html(s['pos_pct'], alarm=limit)} / −{_pct_html(s['neg_pct'], alarm=limit)}")
-            v['Limit'].setText(f'{limit:.1f}%  <span style="color:{DIM}">({_html(why)})</span>')
-            v['Peak deviation'].setText(f"{s['peak_dev_khz']:.1f} kHz  ({s['peak_dev_khz'] / 0.75:.0f}%)")
-            v['Over 100%'].setText(f"{s['over100_min']} /min")
-            v['Over 110%'].setText(f"{s['over110_min']} /min")
-            window = '' if s['mpx_window_s'] >= MPX_POWER_S else f"  ({s['mpx_window_s']:.0f} s)"
-            v['MPX power'].setText(_num(s['mpx_dbr'], 'dBr', '+.1f') + window)
-            self.mpx.set_data(s['mpx_db'])
-            self.meters['rf'].set_value(s['rf_dbfs'], _num(s['rf_dbfs'], 'dBFS', '.0f'))
-            self.meters['snr'].set_value(s['snr_db'], _num(s['snr_db'], 'dB', '.0f'))
-            peak = max(s['pos_pct'], s['neg_pct'])
+                pct = r[f'sca{khz}_pct']
+                v[f'SCA {khz} kHz'].setText(
+                    f'{pct:.1f}%  ' + self._sca_kind_html(r[f'sca{khz}_kind'], r[f'sca{khz}_baud']) if pct is not None
+                    else f'<span style="color:{DIM}">none</span>')
+            self._sca_sources({khz: {'kind': r[f'sca{khz}_kind']} for khz in (67, 92)})
+            v['Peak + / −'].setText(f"+{_pct_html(r['pos_pct'], lv.get('pos_pct'))}"
+                                    f" / −{_pct_html(r['neg_pct'], lv.get('neg_pct'))}")
+            v['Limit'].setText(f"{r['limit_pct']:.1f}%  <span style=\"color:{DIM}\">({_html(r['limit_why'])})</span>")
+            v['Peak deviation'].setText(f"{r['dev_khz']:.1f} kHz  ({r['dev_khz'] / 0.75:.0f}%)")
+            v['Over 100%'].setText(f"{r['over100_min']} /min")
+            v['Over 110%'].setText(f"{r['over110_min']} /min")
+            window = '' if r['mpx_window_s'] >= MPX_POWER_S else f"  ({r['mpx_window_s']:.0f} s)"
+            v['MPX power'].setText(_num(r['mpx_dbr'], 'dBr', '+.1f') + window)
+            self.mpx.set_data(r['mpx_db'])
+            self.meters['rf'].set_value(r['rf_dbfs'], _num(r['rf_dbfs'], 'dBFS', '.0f'))
+            self.meters['snr'].set_value(r['snr_db'], _num(r['snr_db'], 'dB', '.0f'))
+            peak = max(r['pos_pct'], r['neg_pct'])
             self.meters['mod'].set_value(peak, f'{peak:.0f}%')
 
-        self._update_data_services(raw, s, total)
+        parts = []
+        for d in r['data_services']:
+            text = self._service_label(d['key'], html=True)
+            if d['paging']:
+                text += f' <span style="color:{DIM}">({", ".join(d["paging"])})</span>'
+            if d['share_pct'] is not None:
+                text += f" {d['share_pct']:.0f}%"
+            parts.append(text)
+        parts += [f'<span style="color:{RED}">{self._service_label(k, html=True)} lost</span>' for k in r['data_lost']]
+        v['Data services'].setText('  ·  '.join(parts) or '-')
 
-        a = st.audio_meter.stats
-        if a:
-            v['L / R'].setText(f"{_pct_html(a['mod_l'])} / {_pct_html(a['mod_r'])}")
-            v['L+R / L−R'].setText(f"{_pct_html(a['mod_m'])} / {_pct_html(a['mod_s'])}")
-            v['Momentary'].setText(_num(a['momentary'], 'LUFS'))
-            v['Short-term'].setText(_num(a['short_term'], 'LUFS'))
-            v['Integrated'].setText(_num(a['integrated'], 'LUFS'))
-            v['True peak L/R'].setText(f"{a['tp_l']:.1f} / {a['tp_r']:.1f} dBTP")
-            v['Level L/R'].setText(f"{_num(a['rms_l'], '')}/ {_num(a['rms_r'], 'dB')}")
-            bal = a['rms_l'] - a['rms_r'] if math.isfinite(a['rms_l'] + a['rms_r']) else 0.0
+        if r['has_audio']:
+            v['L / R'].setText(f"{_pct_html(r['mod_l'], lv.get('mod_l'))} / {_pct_html(r['mod_r'], lv.get('mod_r'))}")
+            v['L+R / L−R'].setText(f"{_pct_html(r['mod_m'], lv.get('mod_m'))} / {_pct_html(r['mod_s'], lv.get('mod_s'))}")
+            v['Momentary'].setText(_num(r['momentary'], 'LUFS'))
+            v['Short-term'].setText(_num(r['short_term'], 'LUFS'))
+            v['Integrated'].setText(_num(r['integrated'], 'LUFS'))
+            v['True peak L/R'].setText(f"{r['tp_l']:.1f} / {r['tp_r']:.1f} dBTP")
+            v['Level L/R'].setText(f"{_num(r['rms_l'], '')}/ {_num(r['rms_r'], 'dB')}")
+            bal = r['balance_db']
             v['Balance'].setText('centre' if abs(bal) < 0.5 else
                                  f"{abs(bal):.1f} dB {'L' if bal > 0 else 'R'}")
-            corr = a['correlation']
-            colour = RED if corr < 0 else GREEN
-            v['Correlation'].setText(f'<span style="color:{colour}">{corr:+.2f}</span>')
-            v['Width (S/M)'].setText('mono' if not math.isfinite(a['width_db']) or a['width_db'] < -40
-                                     else _num(a['width_db'], 'dB'))
+            corr = r['correlation']
+            v['Correlation'].setText(f'<span style="color:{RED if lv.get("correlation") else GREEN}">{corr:+.2f}</span>')
+            v['Width (S/M)'].setText('mono' if not math.isfinite(r['width_db']) or r['width_db'] < -40
+                                     else _num(r['width_db'], 'dB'))
             self.meters['corr'].set_value(corr, f'{corr:+.2f}')
         if st.audio_meter.scope is not None:
             self.gonio.set_data(st.audio_meter.scope)
         if self._stereo and self._stereo.isVisible():
             self._stereo.follow(self)
 
+    def _alarm_states(self, conditions, clean):
+        """{alarm: state} for an annunciator: 'off' (switched off for this receiver),
+        'raised', 'waiting' (not judged yet: grace period after tuning, or no
+        readings), 'suppressed' (not judged now: reception not clean enough for the
+        technical rules), 'pending' (its condition holds, its delay is running) or 'clear'."""
+        out = {}
+        pending = self.alarms.pending()
+        for name, *_ in ALARM_DEFS:
+            if not self.settings.alarms.get(name, True):
+                out[name] = 'off'
+            elif name in self.alarms.active:
+                out[name] = 'raised'
+            elif conditions is None or not self.alarms.ready():
+                out[name] = 'waiting'
+            elif name in JUDGED_CLEAN and not clean:
+                out[name] = 'suppressed'
+            elif name in pending:
+                out[name] = 'pending'
+            else:
+                out[name] = 'clear'
+        return out
+
+    def refresh(self):
+        """Measure, update every readout and the history; returns alarm changes
+        as [(description, raised, details), ...]."""
+        self.readings = r = self._measure()
+        self._show(r)
+        st = self.station
+        f = st.rds.fields
+        s, a = st.meter.stats, st.audio_meter.stats
+        rate = r['rds_rate']
+
         changes = []
+        conditions, clean = None, False
         if s and a:
             cfg = self.settings
             carrier = s['rf_dbfs'] < -75 or s['snr_db'] < cfg.min_snr_db
@@ -4013,8 +4319,10 @@ class StationPanel(QtWidgets.QGroupBox):
                 self.alarms.seen_rds |= rate > 5
             pi = f.get(0, '').strip().upper()
             # Multipath and noise spikes look like over-modulation (and upset the
-            # other readings); only judge the technical rules on clean reception.
-            clean = not carrier and s['am_pct'] < 15 and s['snr_db'] > 25
+            # other readings); only judge the technical rules on clean reception,
+            # and peaks only on reception clean enough for them (ITU-R SM.1268).
+            clean = not carrier and s['am_pct'] < CLEAN_AM_PCT and s['snr_db'] > 25
+            peaks_clean = clean and s['am_max_pct'] < PEAK_AM_PCT
             rules = self.rules()
             lim = cfg.limits(self.country)
             limit, _ = mod_limit(rules, lim, s)
@@ -4023,7 +4331,7 @@ class StationPanel(QtWidgets.QGroupBox):
             conditions = {
                 'CARRIER': carrier,
                 'SILENCE': not carrier and a['momentary'] < cfg.silence_lufs,
-                'OVERMOD': (clean and max(s['pos_pct'], s['neg_pct']) > limit),
+                'OVERMOD': (peaks_clean and max(s['pos_pct'], s['neg_pct']) > limit),
                 'PILOT_SPEC': (clean and st.pilot and (not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']
                                                        or (st.pilot_hz is not None
                                                            and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']))),
@@ -4040,8 +4348,12 @@ class StationPanel(QtWidgets.QGroupBox):
             changes = self.alarms.update({k: v and cfg.alarms.get(k, True) for k, v in conditions.items()},
                                          holds={'SILENCE': cfg.silence_s})
             if changes:
+                for name, _, raised in changes:
+                    self.history.log_alarm(time.time(), name, raised)
                 details = self._alarm_details(s, a, lim, limit, subcarriers, rate, pi)
                 changes = [(desc, raised, details.get(name, '')) for name, desc, raised in changes]
+        r['alarms'] = self._alarm_states(conditions, clean)
+        self.history.add(time.time(), r)
         feed = ''
         if self.feed:
             n = self.feed.clients
@@ -4058,29 +4370,6 @@ class StationPanel(QtWidgets.QGroupBox):
                 ('background: #3a1d1f; color: #ff8a8a; border: 1px solid #6b2a2e;' if active else
                  'background: #1b2f21; color: #69db7c; border: 1px solid #2c5236;'))
         return changes
-
-    def _update_data_services(self, raw, s, total):
-        """The Data services readout, and the steady services now missing (self._data_lost)."""
-        present = {k: g for k, (age, g) in raw['data'].items() if age <= DATA_GAP_S}
-        for khz in (67, 92):
-            if s and self._sca_kind(khz, s) == 'data':
-                present[f'SCA {khz} kHz data'] = None
-                self._data_codes[f'SCA {khz} kHz data'] = f'SCA{khz}'
-        self._data_codes.update((k, g) for k, g in present.items() if g)
-        self._data_lost = self.data_services.update(present)
-        paging = [f'1A paging codes {raw["rp_codes"]:02X}'] if raw['rp_codes'] else []
-        paging += [f'operator code {raw["opc"]}'] if raw['opc'] else []
-        paging += [f'paging ID {raw["paging_id"]:03X}'] if raw['paging_id'] is not None else []
-        parts = []
-        for key, g in sorted(present.items()):
-            text = self._service_label(key, html=True)
-            if key == UNANNOUNCED_DATA[14] and paging:
-                text += f' <span style="color:{DIM}">({", ".join(paging)})</span>'
-            if g and total:
-                text += f' {raw["types"].get(g, 0) * 100 / total:.0f}%'
-            parts.append(text)
-        parts += [f'<span style="color:{RED}">{self._service_label(k, html=True)} lost</span>' for k in self._data_lost]
-        self.values['Data services'].setText('  ·  '.join(parts) or '-')
 
     def _service_label(self, key, html=False):
         """A data service as shown: the name this receiver gives it, with what it is."""
@@ -5966,9 +6255,10 @@ class MainWindow(QtWidgets.QWidget):
     def _session_text(self):
         """What this run of FM-Modmon-ms is using, for the help."""
         a, tb, c = self.args, self.tb, self.tb.center_hz
+        lo, hi = tb.window_hz()
         rows = [('Start command', subprocess.list2cmdline([sys.executable] + sys.argv)),
-                ('SDR', f'RSP1A centred on {c / 1e6:.2f} MHz, window {(c - MAX_SPAN / 2) / 1e6:.1f}-'
-                        f'{(c + MAX_SPAN / 2) / 1e6:.1f} MHz, {SAMP_RATE / 1e6:.1f} MS/s'),
+                ('SDR', f'RSP1A centred on {c / 1e6:.2f} MHz, window {lo / 1e6:.1f}-'
+                        f'{hi / 1e6:.1f} MHz, {SAMP_RATE / 1e6:.1f} MS/s'),
                 ('Gain', self._gain_text() + ('' if tb.gain_auto else
                                               ' (set by --lna / --ifgr)' if a and a.gain_manual else
                                               ' (default, not calibrated)'))]
@@ -6088,7 +6378,8 @@ class MainWindow(QtWidgets.QWidget):
 
     def _update_window(self):
         c = self.tb.center_hz
-        window = f'{(c - MAX_SPAN / 2) / 1e6:.1f}\u2013{(c + MAX_SPAN / 2) / 1e6:.1f} MHz'
+        lo, hi = self.tb.window_hz()
+        window = f'{lo / 1e6:.1f}\u2013{hi / 1e6:.1f} MHz'
         chips = {'sdr': f'RSP1A  {c / 1e6:.2f} MHz', 'window': f'Window {window}',
                  'rate': f'{SAMP_RATE / 1e6:.1f} MS/s', 'gain': self._gain_text(),
                  'found': f'{self.n_found} stations found' if self.scanned else 'no scan'}
