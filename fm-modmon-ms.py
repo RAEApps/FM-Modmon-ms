@@ -4423,21 +4423,6 @@ class StationPanel(QtCore.QObject):
     """One receiver: measures it, judges its alarms, keeps its history, and shows
     it as a station row (self.row) and a detail view (self.detail)."""
 
-    # (title, columns, readouts, readouts long enough to get a full-width row at the end)
-    SECTIONS = (
-        ('RDS', 2, ('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss',
-                    'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'),
-         ('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')),
-        ('Signal', 2, ('RF level', 'MPX S/N', 'Carrier offset', 'AM / multipath',
-                       'Pilot (19 kHz)', 'Pilot freq', 'RDS injection', 'IBOC signal',
-                       'RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz'), ('SCA 67 kHz', 'SCA 92 kHz')),
-        ('Modulation', 2, ('Peak + / −', 'Peak deviation', 'Over 100%', 'Over 110%',
-                           'L / R', 'L+R / L−R', 'MPX power', 'Limit'), ('Limit',)),
-        ('MPX spectrum 0–100 kHz', 0, (), ()),
-        ('Loudness', 2, ('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), ()),
-        ('Stereo image', 1, ('Level L/R', 'Balance', 'Correlation', 'Width (S/M)'), ()),
-    )
-
     def __init__(self, station, stations, on_play, on_select, iboc_scan=None, on_remove=None, on_settings=None,
                  on_source=None, radiodns=None, country='CA', on_focus=None, on_pop=None):
         super().__init__()
@@ -4570,6 +4555,7 @@ class StationPanel(QtCore.QObject):
         tr.addWidget(self.spark)
         row.addWidget(trend)
         self._trend_t = -math.inf
+        self.web_trends = {}    # the sparklines and histogram for the web page
 
         # every alarm, always in the same place: raised, holding off, not judged, off
         self.annunciator = Annunciator()
@@ -5029,6 +5015,7 @@ class StationPanel(QtCore.QObject):
         self.meta.setText('')
         self.annunciator.set_states({})
         self._trend_t = -math.inf
+        self.web_trends = {}
         for spark in (self.spark, self.rds_spark, self.lufs_spark):
             spark.set_data([])
         self.peak_hist.set_data([], None)
@@ -5549,6 +5536,11 @@ class StationPanel(QtCore.QObject):
     def _show_trends(self, r):
         tr = self.trends(max(self.spark.width() // 2, 40))
         limit = r.get('limit_pct')
+        edges = np.arange(PeakHistogram.LO, PeakHistogram.HI + PeakHistogram.STEP, PeakHistogram.STEP)
+        self.web_trends = {k: _Finite(np.round(np.nan_to_num(tr[k], nan=-999.0), 1).tolist())
+                           for k in ('peak', 'rds_rate', 'short_term')}
+        self.web_trends['hist'] = (np.histogram(np.clip(tr['peaks'], edges[0], edges[-1] - 1e-6), edges)[0].tolist()
+                                   if len(tr['peaks']) else [])
         self.spark.set_data(tr['peak'], limit, AMBER if r.get('alarms', {}).get('OVERMOD') == 'suppressed' else RED)
         over = r.get('over100_min')
         self.trend_note.setText('peak modulation' + ('' if over is None else
@@ -5606,12 +5598,27 @@ class StationPanel(QtCore.QObject):
                      if self._data_lost else ''),
         }
 
+    def web_readings(self):
+        """self.readings as plain JSON values for the web page, which draws the
+        rows and the detail from them as the window does."""
+        r = {k: v for k, v in self.readings.items() if k != 'mpx_db'}
+        if r.get('clock'):
+            local, offset = r['clock']
+            r['clock'] = [local.strftime('%Y-%m-%d %H:%M'), offset]
+        r['data_services'] = [dict(d, label=self._service_label(d['key'])) for d in r.get('data_services', [])]
+        r['data_lost'] = [self._service_label(k) for k in r.get('data_lost', [])]
+        r['radiodns'] = (QtGui.QTextDocumentFragment.fromHtml(self.rdns_line.text()).toPlainText()
+                         if self._rdns_working else '')
+        r['rules_name'] = RULES[self.rules()]['name'] if self.rules() in RULES else 'custom'
+        return r
+
     def web_state(self, feed_port, default_port, listeners):
-        """Everything the web page shows for this receiver, as plain JSON values.
-        Readouts are the panel's own rich text (the page allows only colour
-        and bold through), so the page shows exactly what the app shows."""
+        """Everything the web page shows for this receiver, as plain JSON values:
+        the readings, alarm states and trends (the page formats and draws them),
+        and the controls' lists."""
         st = self.station
         scope = st.audio_meter.scope
+        mpx = self.readings.get('mpx_db')
 
         def items(combo):
             return [{'value': combo.itemData(i), 'label': combo.itemText(i),
@@ -5623,20 +5630,11 @@ class StationPanel(QtCore.QObject):
             self._web_lists = items(self.combo), items(self.source)
         stations, sources = self._web_lists
         return {
-            'receiver': self.slot + 1, 'freq': st.freq_hz, 'title': self.title,
-            'ps': self.ps.text(), 'ps_dynamic': not self.ps_mode.isHidden(), 'rt': self.rt.text(),
-            'lines': [[t, w.text()] for t, w in (('RT+', self.rtplus), ('IBOC', self.iboc_line),
-                                                ('PSD', self.psd_line), ('SIS', self.sis_line),
-                                                ('RadioDNS', self.rdns_line))],
-            'sections': [[title, cols, [[n, self.values[n].text(), n in wide]
-                                        for n in [m for m in names if m not in wide] + [m for m in names if m in wide]]]
-                         for title, cols, names, wide in self.SECTIONS],
-            'iboc_lines': self._iboc_lines(), 'rdns_line': self._rdns_working,
-            'meters': [{'name': m.name, 'lo': m.lo, 'hi': m.hi, 'zones': m.zones, 'origin': m.origin,
-                        'ticks': list(m.ticks), 'value': m.value, 'text': m.text} for m in self.meters.values()],
-            'mpx': None if self.mpx._db is None else _Finite(np.round(np.nan_to_num(self.mpx._db), 1).tolist()),
+            'receiver': self.slot + 1, 'freq': st.freq_hz, 'title': self.title, 'name': self.settings.name,
+            'readings': self.web_readings(), 'notes': self._alarm_notes(self.readings) if self.readings else {},
+            'trends': self.web_trends,
+            'mpx': None if mpx is None else _Finite(np.round(np.nan_to_num(mpx), 1).tolist()),
             'gonio': None if scope is None else [_Finite(np.round(np.nan_to_num(x[-400::2]), 4).tolist()) for x in scope],
-            'alarms': [desc for name, desc, _ in ALARM_DEFS if name in self.alarms.active],
             'status': self.feed_label.text(),
             'stations': stations,
             'source': self.source_key(), 'sources': sources,
@@ -7824,7 +7822,13 @@ class MainWindow(QtWidgets.QWidget):
             'audio_formats': [{'key': f, 'label': WEB_FORMATS[f]['label'], 'canplay': WEB_FORMATS[f]['canplay']}
                               for f in (web.formats if self.ffmpeg else [])],
             'listeners': web.listeners(), 'max_listeners': WEB_MAX_LISTENERS,
-            'alarm_defs': [[name, desc] for name, desc, _ in ALARM_DEFS],
+            'alarm_defs': [[name, desc, Annunciator.SHORT[name]] for name, desc, _ in ALARM_DEFS],
+            'alarm_means': Annunciator.MEANS,
+            'alarm_episodes': [{k: e[k] for k in ('station', 'desc', 'start', 'end', 'detail')}
+                               for e in self.alarm_table.episodes[-100:]],
+            'now': time.time(),
+            'peak_hist': [PeakHistogram.LO, PeakHistogram.HI, PeakHistogram.STEP],
+            'trend_span_s': TREND_SPAN_S, 'clean': [PEAK_AM_PCT, CLEAN_AM_PCT],
             'rules': {'presets': {k: v['limits'] for k, v in RULES.items()},
                       'by_country': 'ised' if self.country == 'CA' else 'fcc',
                       'limits': [list(x) for x in LIMITS]},
