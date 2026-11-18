@@ -169,7 +169,9 @@ check(S, 'Mod L-R % (mono)', 0.0, a['mod_s'], 0.5, '%')
 
 # ================================================================ S3: SCA, AM, noise -> S/N
 L3 = [(997, 0.60)]
-sca = [(67, 0.10, 1000, 6000), (92, 0.07, 700, 6000)]
+# (67 kHz SCA tone 1.1 kHz: a tone dividing 10 kHz puts a sideband line exactly on 57 kHz,
+#  which reads as ~0.2% RDS. Programme audio on an SCA makes no such line.)
+sca = [(67, 0.10, 1100, 6000), (92, 0.07, 700, 6000)]
 noise = 0.004
 x, info = fmtx.mpx(rm, SECS, left=L3, right=L3, pilot=0.09, sca=sca)
 st = fmtx.run(rm, x, rf_amp=0.1, am=0.10, noise=noise, seed=7)
@@ -179,7 +181,8 @@ check(S, 'SCA 67 %', 10.0, s['sca67_pct'], 0.3, '%')
 check(S, 'SCA 92 %', 7.0, s['sca92_pct'], 0.3, '%')
 check(S, 'AM % (10% sine AM)', 10.0, s['am_pct'], 0.5, '%')
 check(S, 'Sync AM % (AM not tied to modulation)', 0.0, s['sync_am_pct'], 0.1, '%')
-check(S, 'RDS phase shown (no RDS; SCA skirt in the band)', '-', plain(panel_for(st).values['RDS phase']))
+check(S, 'RDS injection % (no RDS; 67 kHz SCA skirt)', 0.0, s['rds_pct'], 0.1, '%')
+check(S, 'RDS phase shown (no RDS; SCA skirt in the band)','-', plain(panel_for(st).values['RDS phase']))
 snr_shown = s['snr_db']
 # truth: same noise, no modulation; noise power in 0.05-15 kHz of the demodulated MPX, vs a 100% sine
 x0, _ = fmtx.mpx(rm, SECS, pilot=0.0)
@@ -263,6 +266,10 @@ for rds_inj, unlocked, noise in ((0.05, 0.0, 0.0005), (0.02, 5.0, 0.0005), (0.0,
     check(S, f'RDS injection % ({what})', rds_inj * 100, st.meter.stats['rds_pct'], 0.15, '%')
     if noise > 0.001 and rds_inj:
         rows.append((S, '  groups decoded there', '', st.rds.groups, '', 'info'))
+    if noise > 0.001 and not rds_inj:   # the guard-band tones mustn't read as noise either
+        x0, _ = fmtx.mpx(rm, SECS, left=[(997, 0.5)], right=[(1500, 0.3)], pilot=0.09)
+        st0 = fmtx.run(rm, x0, rf_amp=0.1, noise=noise)
+        check(S, 'MPX S/N dB (tones in the guard band)', st0.meter.stats['snr_db'], st.meter.stats['snr_db'], 1.0, 'dB')
 
 # ================================================================ report
 w = max(len(r[1]) for r in rows)

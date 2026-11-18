@@ -991,7 +991,12 @@ class FmMeter(gr.sync_block):
         def band(lo, hi):
             return float(np.sum(self._psd[(self._freqs >= lo) & (self._freqs <= hi)])) + 1e-20
 
-        noise_per_hz = band(16e3, 18.3e3) / 2.3e3
+        # Guard-band noise density: the median bin, not the mean, so programme
+        # there (clipper products, the encoder LPF's skirt) doesn't read as noise.
+        # Each bin is first scaled to the band's mean f^2, as FM noise rises with f^2.
+        g = (self._freqs >= 16e3) & (self._freqs <= 18.3e3)
+        f2 = (18.3e3 ** 3 - 16e3 ** 3) / 3 / 2.3e3
+        noise_per_hz = float(np.median(self._psd[g] * (f2 / self._freqs[g] ** 2))) / (QUAD_RATE / self.NFFT) + 1e-20
         pilot_pct = math.sqrt(2 * band(18.9e3, 19.1e3)) * 100
         self._rds, rds_line = self._rds_power(x)
         # Report RDS only when its line stands clear of the search band's noise.
