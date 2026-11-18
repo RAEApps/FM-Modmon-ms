@@ -63,8 +63,9 @@ header .grow { flex: 1; }
 /* station rows: one line per receiver, the same columns as the app */
 .colhead, .row { display: grid; grid-template-columns: var(--cols); gap: 12px; align-items: center; }
 .colhead { padding: 0 10px 3px; color: var(--dim); font: 600 9.5px/1 Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; }
-.row { background: var(--row); border: 1px solid var(--row-b); border-radius: 6px; padding: 5px 6px 5px 10px; margin-bottom: 4px; cursor: pointer; }
-.row.sel { background: var(--sel); border-color: var(--sel-b); }
+.row { background: var(--row); border: 1px solid var(--row-b); border-left: 5px solid var(--row); border-radius: 6px; padding: 5px 6px 5px 6px; margin-bottom: 4px; cursor: pointer; }
+.row.sel { background: #1c2636; border-color: #5b8fd6; border-left-color: var(--accent); }
+.row.sel .freq { color: var(--accent); }
 .stn { display: grid; grid-template-columns: auto auto 1fr; column-gap: 6px; row-gap: 2px; align-items: center; min-width: 0; }
 .freq { position: relative; font-size: 19px; font-weight: 600; padding: 0 16px 0 3px; border: 1px solid transparent; border-radius: 6px; white-space: nowrap; }
 .freq::after { content: '▾'; position: absolute; right: 3px; top: 50%; transform: translateY(-50%); font-size: 12px; color: var(--muted); }
@@ -133,7 +134,7 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 .kv.one { grid-template-columns: auto minmax(0, 1fr); }
 .kv .k { color: var(--muted); white-space: nowrap; }
 .kv .v { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.kv .v.wide { grid-column: 2 / -1; }
+.kv .v.wide { grid-column: 2 / -1; white-space: normal; }   /* long readouts wrap, not cut */
 .absent { color: var(--dim); font-size: 11px; }
 .absent:empty { display: none; }
 .cap { color: var(--dim); font-size: 11px; }
@@ -623,9 +624,10 @@ function drawMpx(cv, db, opt = {}) {
     c.strokeStyle = '#9fb0bf'; c.lineWidth = 1.1; c.stroke(trace);
   }
   c.textAlign = 'left'; c.textBaseline = 'top'; c.setLineDash([2, 3]); c.lineWidth = 1;
+  let free = left;   // a label that would run into the one before is left out; its line stays
   for (const [k, label, col] of MARKERS) {
     c.strokeStyle = col; c.beginPath(); c.moveTo(x(k), top); c.lineTo(x(k), bottom); c.stroke();
-    c.fillStyle = col; c.fillText(label, x(k) + 4, top + 1);
+    if (x(k) + 4 >= free) { c.fillStyle = col; c.fillText(label, x(k) + 4, top + 1); free = x(k) + 8 + c.measureText(label).width; }
   }
   c.setLineDash([]);
   if (db && opt.cursor != null && opt.cursor >= left && opt.cursor <= right) {
@@ -811,7 +813,7 @@ function buildReceiver(r, alarmDefs) {
   p.hist.title = 'How peak modulation spreads: the share of updates at each peak level over the last 5 minutes (log height). Red: over the limit in force; amber: over 100%';
   mod.append(p.peak.pos.el, p.peak.neg.el, h('div', 'cap', 'Peak distribution · last 5 min'), p.hist,
              add(kv(['Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
-                       'Valid time', 'Limit', 'SM.1268'], 2, ['Valid time', 'Limit', 'SM.1268'])));
+                       'Valid time', 'Limit', 'SM.1268'], 1, ['Valid time', 'Limit', 'SM.1268'])));
   // multiplex
   const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'));
   p.mpx = h('canvas', 'mpx'); p.mpx.title = 'Click for a larger view'; p.mpx.onclick = () => openMpx(p);
@@ -820,14 +822,14 @@ function buildReceiver(r, alarmDefs) {
   p.absMpx = h('div', 'absent');
   mpx.append(p.mpx, p.mpxT.snr.el, p.mpxT.pilot.el, p.mpxT.offset.el,
              add(kv(['RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase', 'Sync AM', 'Noise >100 kHz',
-                     'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'], 2,
+                     'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'], 1,
                     ['RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'])), p.absMpx);
   // RDS
   p.rdsNote = h('span', 'x');
   const rds = card('RDS', p.rdsNote);
   p.rdsSpark = h('canvas', 'spark'); p.rdsSpark.title = 'RDS groups per second, the last 5 minutes (11.4/s is every group)';
   p.absRds = h('div', 'absent');
-  rds.append(p.rdsSpark, add(kv(['PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'], 2,
+  rds.append(p.rdsSpark, add(kv(['PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'], 1,
                                 ['Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'])), p.absRds);
   // audio
   const reset = h('button', null, 'reset I'); reset.title = 'Start the integrated loudness again';
@@ -837,9 +839,11 @@ function buildReceiver(r, alarmDefs) {
   const st = h('div', 'stereo'), side = h('div');
   p.gonio = h('canvas', 'gonio'); p.gonio.title = 'Click for a larger view'; p.gonio.onclick = () => openStereo(p);
   p.phase = makeTape('Phase', -1, 1, {origin: 0, nameW: 40, valW: 44});
-  side.append(p.phase.el, add(kv(['Balance', 'Width (S/M)', 'Level L/R', 'Correlation'], 1)));
+  side.append(p.phase.el);
   st.append(p.gonio, side);
-  audio.append(add(kv(['Momentary', 'Short-term', 'Integrated', 'True peak L/R'], 2)), p.lufsSpark, st, buildAudio(p));
+  // the stereo readouts under the goniometer, the card's full width (as the app)
+  audio.append(add(kv(['Momentary', 'Short-term', 'Integrated', 'True peak L/R'], 1)), p.lufsSpark, st,
+               add(kv(['Balance', 'Width (S/M)', 'Level L/R', 'Correlation'], 1)), buildAudio(p));
   cards.append(mod, mpx, rds, audio);
   d.append(cards);
   p.ctrl = [p.station, p.gear, p.remove, p.source, reset];

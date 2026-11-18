@@ -3249,8 +3249,9 @@ LCD = 'background: #0b1a0b; border: 1px solid #1f3a1f; border-radius: 6px;'
 APP_QSS = """
 QWidget { font-family: "Segoe UI"; font-size: 9pt; }
 QToolTip { background: #2b2d31; color: #e0e0e0; border: 1px solid #3c4043; padding: 4px 6px; }
-QFrame#row { background: #1e1f22; border: 1px solid #2e3035; border-radius: 6px; }
-QFrame#row[selected="true"] { background: #1f232a; border-color: #3d5f8f; }
+QFrame#row { background: #1e1f22; border: 1px solid #2e3035; border-left: 5px solid #1e1f22; border-radius: 6px; }
+QFrame#row[selected="true"] { background: #1c2636; border: 1px solid #5b8fd6; border-left: 5px solid #8ab4f8; }
+QFrame#row[selected="true"] QComboBox#freq { color: #8ab4f8; }
 QFrame#detail { background: #1b1c20; border: 1px solid #3d5f8f; border-radius: 6px; }
 QLabel#colHead { color: #8c9197; font-family: Consolas; font-size: 7pt; font-weight: 600; letter-spacing: 1px; }
 QComboBox#freq { font-size: 15pt; font-weight: 600; padding: 0 4px; border-color: transparent; background: transparent; }
@@ -3413,6 +3414,17 @@ def install_icon(app):
                 fh.write(ico_bytes())
         except OSError as e:
             print(f'could not write {ICON_PATH}: {e}')
+
+
+def enable_high_dpi():
+    """Scale the whole window with Windows' display scaling (150% etc.), not just
+    its fonts: without this Qt 5 enlarges the text but keeps every width and
+    height given in pixels, so readouts crowd and get cut. Before QApplication."""
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    if hasattr(QtGui.QGuiApplication, 'setHighDpiScaleFactorRoundingPolicy'):  # Qt 5.14+: 150% stays 1.5, not 2
+        QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
 
 def apply_dark_theme(app):
@@ -3660,10 +3672,14 @@ class StationRow(QtWidgets.QFrame):
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
     def set_selected(self, on):
+        """Selected: an accent bar down the left, a tinted background, the
+        frequency in the accent colour (children restyled too, for that)."""
         if self.property('selected') != on:
             self.setProperty('selected', on)
-            self.style().unpolish(self)
-            self.style().polish(self)
+            for w in [self] + self.findChildren(QtWidgets.QComboBox):
+                self.style().unpolish(w)
+                self.style().polish(w)
+            self.update()
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton and self.on_click:
@@ -4325,11 +4341,14 @@ class MpxSpectrum(QtWidgets.QWidget):
             p.setBrush(QtCore.Qt.NoBrush)
             p.drawPolyline(trace)
 
-        # subcarrier markers
+        # subcarrier markers (a label that would run into the one before is left out; its line stays)
+        free = left
         for khz_, label, colour in self.MARKERS:
             p.setPen(QtGui.QPen(QtGui.QColor(colour), 1, QtCore.Qt.DotLine))
             p.drawLine(QtCore.QPointF(x(khz_), top), QtCore.QPointF(x(khz_), bottom))
-            p.drawText(QtCore.QPointF(x(khz_) + 4, top + fm_.ascent()), label)
+            if x(khz_) + 4 >= free:
+                p.drawText(QtCore.QPointF(x(khz_) + 4, top + fm_.ascent()), label)
+                free = x(khz_) + 4 + fm_.horizontalAdvance(label) + 4
 
         # the frequency and level under the mouse (large view)
         if self._cursor is not None and self._db is not None and left <= self._cursor <= right:
@@ -5136,7 +5155,7 @@ class StationPanel(QtCore.QObject):
         box.addWidget(dim_label('Peak distribution \u00b7 last 5 min'))
         box.addWidget(self.peak_hist)
         box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R',
-                                'L+R / L−R', 'Valid time', 'Limit', 'SM.1268'), 2,
+                                'L+R / L−R', 'Valid time', 'Limit', 'SM.1268'), 1,
                                wide=('Valid time', 'Limit', 'SM.1268')))
         box.addStretch(1)
         cards.addWidget(mod, 0, 0)
@@ -5160,7 +5179,7 @@ class StationPanel(QtCore.QObject):
         for t in self.mpx_tapes.values():
             box.addWidget(t)
         box.addLayout(self._kv(('RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase',
-                                'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 2,
+                                'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 1,
                                wide=('RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz',
                                      'IBOC signal')))
         self.absent['mpx'] = dim_label()
@@ -5175,7 +5194,7 @@ class StationPanel(QtCore.QObject):
         self.rds_spark.setToolTip('RDS groups per second, the last 5 minutes (11.4/s is every group)')
         box.addWidget(self.rds_spark)
         box.addLayout(self._kv(('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs',
-                                'Clock', 'Group types', 'Data services'), 2,
+                                'Clock', 'Group types', 'Data services'), 1,
                                wide=('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')))
         self.absent['rds'] = dim_label()
         self.absent['rds'].setWordWrap(True)
@@ -5190,7 +5209,7 @@ class StationPanel(QtCore.QObject):
         reset.setStyleSheet('padding: 0 6px;')
         reset.clicked.connect(station.audio_meter.reset_integrated)
         audio, box = card('Audio', reset)
-        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 2))
+        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 1))
         self.lufs_spark = Spark(-40, 0, ref=-23)
         self.lufs_spark.setToolTip('Short-term loudness, the last 5 minutes (dotted: -23 LUFS)')
         box.addWidget(self.lufs_spark)
@@ -5207,10 +5226,11 @@ class StationPanel(QtCore.QObject):
         side = QtWidgets.QVBoxLayout()
         side.setSpacing(2)
         side.addWidget(self.meters['corr'])
-        side.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R', 'Correlation'), 1))
         side.addStretch(1)
         stereo.addLayout(side, 1)
         box.addLayout(stereo)
+        # the stereo readouts under the goniometer, the card's full width (beside it they were cut)
+        box.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R', 'Correlation'), 1))
         self.source = QtWidgets.QComboBox()
         for key, label in AUDIO_SOURCES:
             self.source.addItem(label, key)
@@ -5256,6 +5276,8 @@ class StationPanel(QtCore.QObject):
             value.setTextFormat(QtCore.Qt.RichText)
             value.setStyleSheet('font-weight: 600;')
             value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            value.setWordWrap(name in wide)   # long ones wrap in the card rather than being cut
+            label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
             grid.addWidget(label, row, col * 2)
             grid.addWidget(value, row, col * 2 + 1, 1, span)
             self.values[name] = value
@@ -8667,6 +8689,7 @@ def feed_opener(args):
 def main():
     args = parse_args()
     clear_cache(stale=True)  # caches left by a session that didn't close cleanly
+    enable_high_dpi()
     app = QtWidgets.QApplication(sys.argv)
     install_icon(app)
     apply_dark_theme(app)
