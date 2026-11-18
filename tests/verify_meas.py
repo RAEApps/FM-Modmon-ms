@@ -235,6 +235,17 @@ check(S, 'RDS lock (drifting)', True, s['rds_lock'] < rm.RDS_LOCKED, 0)
 rows[-1] = rows[-1][:3] + (round(s['rds_lock'], 2),) + rows[-1][4:]
 check(S, 'RDS phase (text)', 'drifting: not locked to the pilot', plain(v['RDS phase']))
 
+# ================================================================ S7: two-ray multipath, clean transmitter
+x, info = fmtx.mpx(rm, SECS, left=L5, right=R5, pilot=0.09, rds=0.045)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, echo=(3e-6, 0.3, 0.7))
+p = panel_for(st)
+s, v = st.meter.stats, p.values
+S = 'S7 multipath'
+check(S, 'RDS phase deg (echo leaves it)', 0.0, s['rds_phase_deg'], 3.0, 'deg')
+# a short echo gives AM tied to the modulation, just as a mistuned transmitter does
+check(S, 'Sync AM shown as multipath', True, plain(v['Sync AM']).endswith('multipath'), 0)
+rows[-1] = rows[-1][:3] + (plain(v['Sync AM']),) + rows[-1][4:]
+
 # ================================================================ report
 w = max(len(r[1]) for r in rows)
 for scn, name, exp, got, unit, verdict in rows:

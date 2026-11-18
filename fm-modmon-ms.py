@@ -135,13 +135,16 @@ Measurements (refreshed 10x per second):
                     echoes 26 dB down); the other rules under 15%
     Sync AM         synchronous AM: the envelope ripple that follows the
                     modulation, as the AM depth it reaches at +/-75 kHz, in %
-                    and dB. Mistuned transmitter, filter, combiner or antenna
-                    match causes it (Orban: <= -35 dB, -40 dB preferred). Read
-                    it where reception is clean (AM / multipath low), and
-                    compare readings (before/after a retune, dummy load vs
-                    antenna) rather than trust the absolute figure: the
-                    SDR's own filters add a little. '-' while the
-                    modulation is too light to judge
+                    and dB. A mistuned transmitter, filter, combiner or
+                    antenna match causes it (Orban: <= -35 dB, -40 dB
+                    preferred) - but so does any short-delay echo on the
+                    path, identically (a 3 us echo 20 dB down reads ~7%).
+                    So it is a figure for this receiving site: the
+                    transmitter's own share is at most this, and at a fixed,
+                    line-of-sight site its changes (before/after a retune)
+                    are the transmitter's. Amber above -35 dB only while
+                    AM / multipath has stayed under 5%; marked 'multipath'
+                    above that. '-' while the modulation is too light
     Pilot           19 kHz injection, % of 75 kHz (>3% = stereo), and its
                     frequency from the stereo PLL (spec 19 kHz +/- 2 Hz)
     RDS injection   57 kHz subcarrier peak deviation, % of 75 kHz (as
@@ -849,7 +852,8 @@ class FmMeter(gr.sync_block):
         The relative envelope is fitted to a*x + b*(x^2 - mean) (x = MPX,
         1.0 = 75 kHz): a sloped response (tuning off-centre) gives the x term,
         one too narrow for the sidebands the x^2 term. Envelope ripple not
-        tied to the modulation (noise, hum, most multipath) averages out.
+        tied to the modulation (noise, hum) averages out; a short echo's is
+        tied to it, so multipath counts.
         A fit, not a filter: every 4th sample (envelope and MPX at the same
         instants) gives the same answer for a quarter of the CPU."""
         n = min(len(x), len(env))
@@ -3590,10 +3594,11 @@ def _sync_am_db(pct):
     return 20 * math.log10(pct / 100) if pct else -math.inf
 
 
-def _sync_am_html(pct, level):
+def _sync_am_html(pct, level, multipath):
     if pct is None:
         return '-'
-    return _coloured(f'{pct:.2f}%  ({_num(_sync_am_db(pct), "dB", ".0f")})', level)
+    text = f'{pct:.2f}%  ({_num(_sync_am_db(pct), "dB", ".0f")})'
+    return f'<span style="color:{DIM}">{text}  multipath</span>' if multipath else _coloured(text, level)
 
 
 class _Ring:
@@ -4264,8 +4269,11 @@ class StationPanel(QtWidgets.QGroupBox):
             r['rds_phase_mode'], level = rds_phase(r['rds_phase_deg'], s['rds_lock'])
             if level:
                 lv['rds_phase_deg'] = level
+            # Short echoes give the same AM as a mistuned transmitter: only judge it on a clean path.
             r['sync_am_pct'] = s['sync_am_pct']
-            if s['sync_am_pct'] is not None and _sync_am_db(s['sync_am_pct']) > -35:
+            r['sync_am_multipath'] = s['am_max_pct'] >= PEAK_AM_PCT
+            if (s['sync_am_pct'] is not None and not r['sync_am_multipath']
+                    and _sync_am_db(s['sync_am_pct']) > -35):
                 lv['sync_am_pct'] = 'warn'
             if tol and abs(s['offset_hz']) > tol:
                 lv['offset_hz'] = 'alarm'
@@ -4375,7 +4383,7 @@ class StationPanel(QtWidgets.QGroupBox):
                 v['Pilot freq'].setText('-')
             v['RDS injection'].setText(f"{r['rds_pct']:.1f}%")
             v['RDS phase'].setText(_rds_phase_html(r['rds_phase_deg'], r['rds_phase_mode'], lv.get('rds_phase_deg')))
-            v['Sync AM'].setText(_sync_am_html(r['sync_am_pct'], lv.get('sync_am_pct')))
+            v['Sync AM'].setText(_sync_am_html(r['sync_am_pct'], lv.get('sync_am_pct'), r['sync_am_multipath']))
             v['IBOC signal'].setText(self._iboc_text(r['iboc_found'], r['iboc_dbc']))
             for khz in (67, 92):
                 pct = r[f'sca{khz}_pct']
