@@ -991,7 +991,12 @@ class FmMeter(gr.sync_block):
         def band(lo, hi):
             return float(np.sum(self._psd[(self._freqs >= lo) & (self._freqs <= hi)])) + 1e-20
 
-        noise_per_hz = band(16e3, 18.3e3) / 2.3e3
+        # Guard-band noise density: the median bin, not the mean, so programme
+        # there (clipper products, the encoder LPF's skirt) doesn't read as noise.
+        # Each bin is first scaled to the band's mean f^2, as FM noise rises with f^2.
+        g = (self._freqs >= 16e3) & (self._freqs <= 18.3e3)
+        f2 = (18.3e3 ** 3 - 16e3 ** 3) / 3 / 2.3e3
+        noise_per_hz = float(np.median(self._psd[g] * (f2 / self._freqs[g] ** 2))) / (QUAD_RATE / self.NFFT) + 1e-20
         pilot_pct = math.sqrt(2 * band(18.9e3, 19.1e3)) * 100
         self._rds, rds_line = self._rds_power(x)
         # Report RDS only when its line stands clear of the search band's noise.
@@ -1457,10 +1462,11 @@ class RdsGroupServer:
 
     HEARTBEAT_S = 1.0
     SEND_TIMEOUT_S = 2.0  # a client that can't take a line in this long is dropped
+    BACKLOG = 64          # lines queued for one client; a client this far behind is dropped
 
     def __init__(self, bind, port):
         self.port = port
-        self._clients = []
+        self._clients = {}  # socket -> its queue of lines, sent by its own thread
         self._lock = threading.Lock()
         self._last = 0.0
         self._closed = False
@@ -1492,11 +1498,13 @@ class RdsGroupServer:
                 break
             conn.settimeout(self.SEND_TIMEOUT_S)
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            q = queue.Queue(self.BACKLOG)
             with self._lock:
                 if self._closed:
                     conn.close()
-                else:
-                    self._clients.append(conn)
+                    continue
+                self._clients[conn] = q
+            threading.Thread(target=self._writer, args=(conn, q), daemon=True).start()
         self._sock.close()
 
     def close(self):
@@ -1504,9 +1512,8 @@ class RdsGroupServer:
         (a tenth of a second at most), so it can be opened again at once."""
         self._closed = True
         with self._lock:
-            for conn in self._clients:
-                conn.close()
-            self._clients.clear()
+            for conn in list(self._clients):
+                self._drop(conn)
         self._acceptor.join(1.0)
 
     def _heartbeat(self):
@@ -1516,13 +1523,31 @@ class RdsGroupServer:
                 self._send(b'---- ---- ---- ----\r\n')
 
     def _send(self, data):
+        # Never blocks: the RDS decoder calls this. Each client's own thread
+        # does the sending, so a stalled client can't hold the decoder up.
         with self._lock:
-            for conn in list(self._clients):
+            for conn, q in list(self._clients.items()):
                 try:
-                    conn.sendall(data)
-                except OSError:
-                    self._clients.remove(conn)
-                    conn.close()
+                    q.put_nowait(data)
+                except queue.Full:
+                    self._drop(conn)
+
+    def _drop(self, conn):
+        """Forget a client and close it; its writer then stops. Call holding _lock."""
+        q = self._clients.pop(conn, None)
+        if q is not None:
+            with contextlib.suppress(queue.Full):
+                q.put_nowait(None)
+        conn.close()
+
+    def _writer(self, conn, q):
+        while (data := q.get()) is not None:
+            try:
+                conn.sendall(data)
+            except OSError:
+                with self._lock:
+                    self._drop(conn)
+                return
 
 
 _cache_root = None
@@ -5812,6 +5837,18 @@ class HelpDialog(QtWidgets.QDialog):
         layout.addWidget(close)
 
 
+class _WebServer(ThreadingHTTPServer):
+    """On Windows, SO_REUSEADDR (http.server's default) lets a second process
+    bind the same port without error, and the two then answer each other's
+    requests. Bind it exclusively there, so a port in use fails to open."""
+    allow_reuse_address = os.name != 'nt'
+
+    def server_bind(self):
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class WebView:
     """The web version of the app: fm-modmon-ms-web.html draws the receiver panels
     from /state.json (rebuilt at UPDATE_HZ while anyone is watching), sends
@@ -5845,7 +5882,7 @@ class WebView:
         self.commands = queue.Queue()  # (action, args, Future or None) for the GUI thread
         self.sessions = {}             # token -> last heard from (monotonic)
         self.last_hit = 0.0
-        self.server = ThreadingHTTPServer((bind, port), self._handler())
+        self.server = _WebServer((bind, port), self._handler())
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 

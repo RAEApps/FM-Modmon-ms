@@ -102,6 +102,11 @@ code, body = post('/api/login', {'password': 'correct horse'})
 check('right web password signs in', code == 200 and body.get('token'))
 web.set_password_hash(m.hash_password('another one'))
 check('new password ends sessions', not web.sessions)
+try:  # (a second server on a port in use answered half the requests: this test was flaky beside another run)
+    m.WebView('127.0.0.1', 8799, None, h); taken = False
+except OSError:
+    taken = True
+check('web port already in use fails to open', taken)
 web2 = m.WebView('127.0.0.1', 8798, 'cli-pass', h)
 check('--web-password wins over the hash', web2.check_password('cli-pass') and not web2.check_password('correct horse'))
 
