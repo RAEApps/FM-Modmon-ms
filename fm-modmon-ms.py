@@ -2917,6 +2917,10 @@ QComboBox#freq { font-size: 15pt; font-weight: 600; padding: 0 4px; border-color
 QComboBox#freq:hover { border-color: %BORDER%; }
 QToolButton#rowBtn { padding: 0 4px; border-color: transparent; background: transparent; color: #9aa0a6; }
 QToolButton#rowBtn:hover { border-color: %BORDER%; color: #e0e0e0; }
+QTabBar#detailTabs::tab { background: transparent; color: #9aa0a6; padding: 2px 10px; border: none;
+                          border-radius: 4px; margin-left: 2px; }
+QTabBar#detailTabs::tab:selected { background: #2b2d31; color: #e3e4e6; }
+QTabBar#detailTabs::tab:hover { color: #e3e4e6; }
 QFrame#card { background: #222328; border: 1px solid #2a2c31; border-radius: 8px; }
 QLabel#cardTitle { color: #8ab4f8; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }
 QLabel#chip { background: #24262b; border: 1px solid #30333a; border-radius: 10px; padding: 3px 10px; color: #c4c7cc; }
@@ -4143,7 +4147,8 @@ class StationPanel(QtCore.QObject):
         buttons.addWidget(self.remove_btn)
         row.addLayout(buttons)
 
-        # ---- the detail view: everything else about this receiver
+        # ---- the detail view: this receiver in depth, under the rows or in its own window
+        self.window = None      # its DetailWindow while popped out
         self.detail = QtWidgets.QFrame()
         self.detail.setObjectName('detail')
         layout = QtWidgets.QVBoxLayout(self.detail)
@@ -4151,15 +4156,40 @@ class StationPanel(QtCore.QObject):
         layout.setSpacing(6)
         self.detail_title = QtWidgets.QLabel('')
         self.detail_title.setStyleSheet('font-weight: 700; font-size: 10pt;')
+        self.detail_sub = QtWidgets.QLabel('')
+        self.detail_sub.setStyleSheet('color: #8c9197;')
+        self.detail_sub.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.feed = None  # RdsGroupServer for this receiver, if any
         self.feed_label = QtWidgets.QLabel('')
-        self.feed_label.setStyleSheet('color: #9aa0a6;')
+        self.feed_label.setStyleSheet('color: #8c9197;')
+        self.tabs = QtWidgets.QTabBar()
+        self.tabs.setObjectName('detailTabs')
+        self.tabs.setDrawBase(False)
+        self.tabs.setExpanding(False)
+        self.tabs.addTab('Overview')
+        self.pop_btn = QtWidgets.QToolButton()
+        self.pop_btn.setText('⧉  Pop out')
+        self.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
+        self.pop_btn.clicked.connect(lambda: self.on_pop and self.on_pop(self))
         head = QtWidgets.QHBoxLayout()
+        head.setSpacing(10)
         head.addWidget(self.detail_title)
-        head.addStretch(1)
+        head.addWidget(self.detail_sub, 1)
         head.addWidget(self.feed_label)
+        head.addWidget(self.tabs)
+        head.addWidget(self.pop_btn)
         layout.addLayout(head)
+        self.pages = QtWidgets.QStackedWidget()
+        self.tabs.currentChanged.connect(self.pages.setCurrentIndex)
+        layout.addWidget(self.pages)
+        overview = QtWidgets.QWidget()
+        ov = QtWidgets.QVBoxLayout(overview)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.setSpacing(6)
+        self.pages.addWidget(overview)
 
+        # IBOC, PSD, SIS and RadioDNS lines (each only while there is something to say),
+        # with the station logo and album art beside them
         text_grid = QtWidgets.QGridLayout()
         text_grid.setHorizontalSpacing(8)
         text_grid.setVerticalSpacing(3)
@@ -4204,91 +4234,125 @@ class StationPanel(QtCore.QObject):
             w.hide()
         for w in self._rdns_row:
             w.hide()
-        layout.addLayout(text_grid)
-
-        # live meters
-        self.meters = {
-            'snr': Meter('S/N', 0, 60, [(15, RED), (30, AMBER), (999, GREEN)]),
-            'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,)),
-        }
-        meters, meters_box = card('Levels')
-        meter_grid = QtWidgets.QGridLayout()
-        meter_grid.setHorizontalSpacing(18)
-        meter_grid.setVerticalSpacing(6)
-        for m in self.meters.values():
-            m.ensurePolished()
-        name_w = max(m.fontMetrics().horizontalAdvance(m.name) for m in self.meters.values()) + 14
-        for i, m in enumerate(self.meters.values()):
-            m.name_w = name_w
-            meter_grid.addWidget(m, i // 2, i % 2)
-        meters_box.addLayout(meter_grid)
-        layout.addWidget(meters)
+        ov.addLayout(text_grid)
 
         self.values = {}
-        # one label width for every section, so the values line up down the panel
-        probe = QtWidgets.QLabel()
-        probe.ensurePolished()  # measure in the font the stylesheet gives labels
-        self._label_w = max(probe.fontMetrics().horizontalAdvance(n + ':')
-                            for _, _, names, _ in self.SECTIONS for n in names) + 10
-        probe.deleteLater()
-        sections = QtWidgets.QGridLayout()
-        sections.setSpacing(8)
-        layout.addLayout(sections)
-        for i, (title, cols, names, wide) in enumerate(self.SECTIONS):
-            extra = None
-            if title == 'Loudness':
-                extra = QtWidgets.QToolButton()
-                extra.setText('reset integrated')
-                extra.setStyleSheet('padding: 1px 8px;')
-                extra.clicked.connect(station.audio_meter.reset_integrated)
-            section, box = card(title, extra)
-            sections.addWidget(section, i // 3, i % 3)
-            if title.startswith('MPX spectrum'):
-                self.mpx = MpxSpectrum()
-                box.addWidget(self.mpx)
-                continue
-            grid = self._grid(names, cols, wide)
-            if title == 'Stereo image':
-                self.gonio = Goniometer()
-                self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
-                self.gonio.setToolTip('Click for a larger view')
-                self.gonio.on_click = self._open_stereo
-                row = QtWidgets.QHBoxLayout()
-                readouts = QtWidgets.QVBoxLayout()   # rows at their normal spacing, beside the goniometer
-                readouts.addLayout(grid)
-                readouts.addStretch(1)
-                row.addLayout(readouts, 1)
-                row.addWidget(self.gonio, 0, QtCore.Qt.AlignTop)
-                box.addLayout(row)
-            else:
-                box.addLayout(grid)
-                box.addStretch(1)
+        self._kv_rows = {}      # readout: its (label, value), to hide when it isn't on air
+        self.absent = {}        # card: its 'not on air' line
+        cards = QtWidgets.QGridLayout()
+        cards.setSpacing(8)
+        ov.addLayout(cards)
 
+        def dim_label(text=''):
+            label = QtWidgets.QLabel(text)
+            label.setStyleSheet('color: #8c9197; font-size: 8pt;')
+            return label
+
+        # modulation: peak tapes against the limit in force, then the counts and channels
+        self.limit_note = dim_label()
+        mod, box = card('Modulation', self.limit_note)
+        self.peak_tapes = {key: Tape(name, 0, 130, band=(85, 100), hold=True, name_w=50, val_w=110)
+                           for key, name in (('pos', '+ peak'), ('neg', '− peak'))}
+        for t in self.peak_tapes.values():
+            box.addWidget(t)
+        self.mod_extra = box   # sparklines and the histogram go here
+        box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'L / R', 'L+R / L−R',
+                                'Limit'), 2, wide=('Limit',)))
+        box.addStretch(1)
+        cards.addWidget(mod, 0, 0)
+
+        # multiplex: spectrum, S/N, pilot and carrier tapes, the subcarriers
+        mpx_card, box = card('Multiplex', dim_label('0–100 kHz'))
+        self.mpx = MpxSpectrum()
+        self.mpx.setMinimumHeight(140)
+        box.addWidget(self.mpx)
+        self.mpx_tapes = {
+            'snr': Tape('S/N', 0, 70, band=(30, 70), name_w=50, val_w=110),
+            'pilot': Tape('Pilot', 6, 12, band=(8, 10), name_w=50, val_w=110),
+            'offset': Tape('Offset', -3000, 3000, origin=0, band=(-1000, 1000), name_w=50, val_w=110),
+        }
+        self.mpx_tapes['snr'].setToolTip('MPX S/N, unweighted 15 kHz; below the carrier alarm\'s setting is carrier low')
+        self.mpx_tapes['pilot'].setToolTip('Pilot injection; the grey band is the range the rules allow')
+        self.mpx_tapes['offset'].setToolTip('Carrier offset; the grey band is the tolerance (includes the SDR\'s own error)')
+        for t in self.mpx_tapes.values():
+            box.addWidget(t)
+        box.addLayout(self._kv(('RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'RDS phase', 'Sync AM',
+                                'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 2,
+                               wide=('RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal')))
+        self.absent['mpx'] = dim_label()
+        box.addWidget(self.absent['mpx'])
+        box.addStretch(1)
+        cards.addWidget(mpx_card, 0, 1)
+
+        # RDS
+        self.rds_note = dim_label()
+        rds, box = card('RDS', self.rds_note)
+        self.rds_extra = box
+        box.addLayout(self._kv(('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs',
+                                'Clock', 'Group types', 'Data services'), 2,
+                               wide=('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')))
+        self.absent['rds'] = dim_label()
+        self.absent['rds'].setWordWrap(True)
+        box.addWidget(self.absent['rds'])
+        box.addStretch(1)
+        cards.addWidget(rds, 0, 2)
+
+        # audio: loudness, the stereo image, and what Play plays
+        reset = QtWidgets.QToolButton()
+        reset.setText('reset I')
+        reset.setToolTip('Start the integrated loudness again')
+        reset.setStyleSheet('padding: 0 6px;')
+        reset.clicked.connect(station.audio_meter.reset_integrated)
+        audio, box = card('Audio', reset)
+        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 2))
+        self.audio_extra = box
+        self.gonio = Goniometer(size=104)
+        self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
+        self.gonio.setToolTip('Click for a larger view')
+        self.gonio.on_click = self._open_stereo
+        self.meters = {'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,))}
+        self.meters['corr'].setMinimumWidth(120)
+        self.meters['corr'].name_w = 44
+        stereo = QtWidgets.QHBoxLayout()
+        stereo.setSpacing(8)
+        stereo.addWidget(self.gonio, 0, QtCore.Qt.AlignTop)
+        side = QtWidgets.QVBoxLayout()
+        side.setSpacing(2)
+        side.addWidget(self.meters['corr'])
+        side.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R', 'Correlation'), 1))
+        side.addStretch(1)
+        stereo.addLayout(side, 1)
+        box.addLayout(stereo)
         self.source = QtWidgets.QComboBox()
-        self.source.setMinimumHeight(30)
         for key, label in AUDIO_SOURCES:
             self.source.addItem(label, key)
         self.source.setToolTip('What Play plays')
         self.source.activated.connect(lambda i: on_source(self, self.source.itemData(i)) if on_source else None)
-        self.play = QtWidgets.QPushButton('▶  Play audio')
+        self.play = QtWidgets.QPushButton('▶  Play')
         self.play.setCheckable(True)
-        self.play.setMinimumHeight(30)
-        self.play.setStyleSheet('QPushButton { font-weight: 600; }'
+        self.play.setStyleSheet('QPushButton { font-weight: 600; padding: 3px 10px; }'
                                 'QPushButton:checked { background: #2e7d32; color: white;'
                                 ' border: 1px solid #69db7c; border-radius: 6px; }'
                                 'QPushButton:checked:hover { background: #37913c; }')
         self.play.toggled.connect(lambda on: on_play(self, on))
+        box.addStretch(1)
         audio_row = QtWidgets.QHBoxLayout()
-        audio_row.addWidget(self.source)
         audio_row.addWidget(self.play, 1)
-        layout.addLayout(audio_row)
+        audio_row.addWidget(self.source, 1)
+        box.addLayout(audio_row)
+        cards.addWidget(audio, 0, 3)
+        for col, stretch in enumerate((24, 26, 24, 22)):
+            cards.setColumnStretch(col, stretch)
+        # readouts the tapes show instead: kept (hidden) so every reading still has its text
+        for name in ('Peak + / −', 'MPX S/N', 'Carrier offset', 'Pilot (19 kHz)'):
+            self.values[name] = QtWidgets.QLabel('-')
 
-    def _grid(self, names, cols, wide=()):
-        """Label/value pairs in `cols` equal columns with one label width (so values
-        line up across sections); readouts in `wide` get a full-width row each."""
+    def _kv(self, names, cols, wide=()):
+        """Label/value pairs in `cols` columns; readouts in `wide` get a full-width
+        row each at the end. Long values are cut at the card edge, never widening it."""
         grid = QtWidgets.QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(3)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
         normal = [n for n in names if n not in wide]
         rows = (len(normal) + cols - 1) // cols
         for i, name in enumerate(normal + [n for n in names if n in wide]):
@@ -4296,17 +4360,16 @@ class StationPanel(QtCore.QObject):
                 row, col, span = i // cols, i % cols, 1
             else:
                 row, col, span = rows + i - len(normal), 0, cols * 2 - 1
-            label = QtWidgets.QLabel(name + ':')
+            label = QtWidgets.QLabel(name)
             label.setStyleSheet('color: #9aa0a6;')
-            label.setFixedWidth(self._label_w)
             value = QtWidgets.QLabel('-')
             value.setTextFormat(QtCore.Qt.RichText)
-            value.setStyleSheet('font-weight: bold;')
-            # long text is cut at the column edge rather than pushing the columns out of line
+            value.setStyleSheet('font-weight: 600;')
             value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
             grid.addWidget(label, row, col * 2)
             grid.addWidget(value, row, col * 2 + 1, 1, span)
             self.values[name] = value
+            self._kv_rows[name] = (label, value)
         for col in range(cols):
             grid.setColumnStretch(col * 2 + 1, 1)
         return grid
@@ -4504,7 +4567,7 @@ class StationPanel(QtCore.QObject):
         self.history.reset()
         for m in self.meters.values():
             m.set_value(None, '-')
-        for t in self.tapes.values():
+        for t in (*self.tapes.values(), *self.peak_tapes.values(), *self.mpx_tapes.values()):
             t.clear()
         self.meta.setText('')
         self.annunciator.set_states({})
@@ -4785,8 +4848,13 @@ class StationPanel(QtCore.QObject):
             window = '' if r['mpx_window_s'] >= MPX_POWER_S else f"  ({r['mpx_window_s']:.0f} s)"
             v['MPX power'].setText(_num(r['mpx_dbr'], 'dBr', '+.1f') + window)
             self.mpx.set_data(r['mpx_db'])
-            self.meters['snr'].set_value(r['snr_db'], _num(r['snr_db'], 'dB', '.0f'))
             self._show_tapes(r)
+            self._show_detail_tapes(r)
+            self.values['Limit'].setToolTip(r['limit_why'])
+        self._collapse(r)
+        rate = r['rds_rate']
+        self.rds_note.setText('' if r['pi'] is None else f'{rate:.1f}/s' + (
+            f" \u00b7 loss {r['rds_loss_pct']:.0f}%" if r['rds_loss_pct'] is not None else ''))
 
         parts = []
         for d in r['data_services']:
@@ -4836,6 +4904,59 @@ class StationPanel(QtCore.QObject):
                                    'alarm' if r['rf_dbfs'] < -75 else None)
         self.tapes['rf'].setToolTip(f"RF level {_num(r['rf_dbfs'], 'dBFS')}, MPX S/N {_num(r['snr_db'], 'dB')}")
         self.tapes['am'].set_value(r['am_pct'], f"{r['am_pct']:.1f}%", lv.get('am_pct'))
+
+    def _show_detail_tapes(self, r):
+        lv = r['levels']
+        lim = r['limit_pct']
+        for key in ('pos', 'neg'):
+            pct = r[f'{key}_pct']
+            state = lv.get(f'{key}_pct')
+            if state == 'alarm' and lv.get('am_pct'):
+                state = 'warn'
+            self.peak_tapes[key].set_value(pct, f"{pct:.0f}%  {pct * 0.75:.1f} kHz", state, limit=lim, band=(85, lim))
+        self.limit_note.setText(f'limit {lim:.1f}% \u24d8')
+        self.limit_note.setToolTip(f"Over-modulation limit in force: {r['limit_why']}")
+        snr = r['snr_db']
+        self.mpx_tapes['snr'].set_value(snr, _num(snr, 'dB'), 'alarm' if snr < self.settings.min_snr_db else None)
+        lim_ = r['limits']
+        if r['stereo_mode'] == 'mono':
+            self.mpx_tapes['pilot'].set_value(None, 'none (mono)')
+        else:
+            self.mpx_tapes['pilot'].set_value(r['pilot_pct'], f"{r['pilot_pct']:.1f}%  {r['stereo_mode']}",
+                                              lv.get('pilot_pct'), band=(lim_['pilot_min_pct'], lim_['pilot_max_pct']))
+        tol = lim_['freq_tol_hz']
+        off = self.mpx_tapes['offset']
+        off.lo, off.hi = -3 * tol, 3 * tol
+        off.set_value(r['offset_hz'], f"{r['offset_hz']:+.0f} Hz", lv.get('offset_hz'), band=(-tol, tol))
+
+    def _collapse(self, r):
+        """Hide the readouts a station doesn't carry, listing them once instead."""
+        rds, mpx = [], []
+        if r['pi'] is None:
+            rds = ['PI', 'PTY', 'PTYN', 'ECC', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types',
+                   'Data services']
+        else:
+            rds = [n for n, gone in (('PTYN', not r['ptyn']), ('ECC', r['ecc'] is None), ('ODA', not r['oda']),
+                                     ('Alt. freqs', not r['af']), ('Clock', not r['clock']),
+                                     ('Data services', not r['data_services'] and not r['data_lost'])) if gone]
+        if r['has_signal']:
+            mpx = [n for n, gone in (('Pilot freq', r['pilot_hz'] is None), ('RDS injection', r['pi'] is None),
+                                     ('RDS phase', r['rds_phase_mode'] is None), ('Sync AM', r['sync_am_pct'] is None),
+                                     ('SCA 67 kHz', r['sca67_pct'] is None), ('SCA 92 kHz', r['sca92_pct'] is None),
+                                     ('IBOC signal', r['iboc_found'] != 'detected')) if gone]
+        hidden = set(rds) | set(mpx)
+        for name, widgets in self._kv_rows.items():
+            for w in widgets:
+                if w.isHidden() != (name in hidden):
+                    w.setVisible(name not in hidden)
+        short = {'SCA 67 kHz': 'SCA 67', 'SCA 92 kHz': 'SCA 92', 'IBOC signal': 'IBOC', 'RDS injection': 'RDS',
+                 'Pilot freq': 'pilot', 'RDS phase': 'RDS phase', 'Sync AM': 'sync AM'}
+        on_air = [short[n] for n in mpx if n in ('SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal', 'RDS injection')]
+        self.absent['mpx'].setText('Not on air: ' + ' \u00b7 '.join(on_air) if on_air else '')
+        self.absent['mpx'].setVisible(bool(on_air))
+        self.absent['rds'].setText('No RDS decoded' if r['pi'] is None else
+                                   'Not sent: ' + ' \u00b7 '.join(rds) if rds else '')
+        self.absent['rds'].setVisible(bool(rds))
 
     def _meta_text(self, r):
         """The row's second line: PI, PTY, RDS rate, stereo, receiver number."""
@@ -4935,6 +5056,12 @@ class StationPanel(QtCore.QObject):
         self.meta.setText(self._meta_text(r))
         self.meta.setToolTip(self.feed_label.text())
         self.detail_title.setText(self.title)
+        ecc = r['ecc']
+        sub = [f"PI {r['pi']}" if r['pi'] else 'no RDS', _html(r['pty'] or '') if r['pi'] else '',
+               f'ECC {ecc:02X}' if ecc else '', f"{RULES[self.rules()]['name'] if self.rules() in RULES else 'custom'} rules"]
+        self.detail_sub.setText(' \u00b7 '.join(x for x in sub if x))
+        if self.window:
+            self.window.setWindowTitle(f'{self.title} \u2013 {APP_NAME}')
         if self.rt.toolTip() != r['rt']:
             self.rt.setToolTip(r['rt'])
         self.annunciator.set_states(r['alarms'], self._alarm_notes(r))
@@ -6427,6 +6554,26 @@ class WebView:
         return Handler
 
 
+class DetailWindow(QtWidgets.QWidget):
+    """A receiver's detail view popped out of the main window (so a wall display
+    can show several side by side); closing it puts the detail back."""
+
+    def __init__(self, main, panel, on_close):
+        super().__init__(main, QtCore.Qt.Window)
+        self.panel, self.on_close = panel, on_close
+        box = QtWidgets.QVBoxLayout(self)
+        box.setContentsMargins(8, 8, 8, 8)
+        box.addWidget(panel.detail)
+        panel.detail.show()
+        self.setWindowTitle(f'{panel.title} \u2013 {APP_NAME}')
+        self.resize(max(panel.detail.sizeHint().width(), main.width(), 1500), panel.detail.sizeHint().height() + 16)
+
+    def closeEvent(self, event):
+        if self.on_close:
+            self.on_close(self.panel)
+        super().closeEvent(event)
+
+
 class ChipRow(QtWidgets.QWidget):
     """The header's status chips. When the window is too narrow for them all, the least
     important (sample rate, SDR window, stations found) are hidden; the SDR and gain
@@ -6611,7 +6758,7 @@ class MainWindow(QtWidgets.QWidget):
     def _add_panel(self, slot, st, settings=None):
         panel = StationPanel(st, self.stations, self._on_play, self._on_select, self.iboc_scan,
                              self._remove_receiver, self._on_settings, self._on_source,
-                             self.radiodns, self.country, on_focus=self.focus)
+                             self.radiodns, self.country, on_focus=self.focus, on_pop=self.pop_out)
         panel.slot = slot
         panel.settings = settings or ReceiverSettings()
         panel.set_source(panel.settings.audio_source)
@@ -6630,12 +6777,37 @@ class MainWindow(QtWidgets.QWidget):
             self.focus(panel)
 
     def focus(self, panel):
-        """Select a receiver: its row is highlighted and its detail shown."""
+        """Select a receiver: its row is highlighted and its detail shown (or, when
+        popped out, its window raised)."""
         self.selected = panel
         for p in self.panels:
             p.row.set_selected(p is panel)
-        if panel is not None:
+        if panel is not None and panel.window:
+            panel.window.raise_()
+            panel.window.activateWindow()
+        elif panel is not None:
             self.details.setCurrentWidget(panel.detail)
+        self.details.setVisible(self.details.count() > 0)
+
+    def pop_out(self, panel):
+        """A receiver's detail in its own window, or (popped out already) back."""
+        if panel.window:
+            panel.window.close()
+            return
+        self.details.removeWidget(panel.detail)
+        panel.window = DetailWindow(self, panel, self._pop_in)
+        panel.pop_btn.setText('\u29c8  Dock')
+        panel.pop_btn.setToolTip('Put this receiver back under the station rows')
+        panel.window.show()
+        docked = [p for p in self.panels if not p.window]
+        self.focus(docked[0] if docked else panel)
+
+    def _pop_in(self, panel):
+        panel.window = None
+        panel.pop_btn.setText('\u29c9  Pop out')
+        panel.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
+        self.details.addWidget(panel.detail)
+        self.focus(panel)
 
     def _feed_port(self, panel):
         """The receiver's RDS feed port: its own setting, else --rds-port + receiver number - 1."""
@@ -6966,6 +7138,10 @@ class MainWindow(QtWidgets.QWidget):
         if audio:
             audio.close_all()
         self.tb.remove_receiver(panel.slot)
+        if panel.window:
+            panel.window.on_close = None
+            panel.window.close()
+            panel.window = None
         self.panels.remove(panel)
         self.rows_box.removeWidget(panel.row)
         self.details.removeWidget(panel.detail)
