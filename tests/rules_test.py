@@ -105,6 +105,19 @@ check('echo: ...but over-modulation is not judged at ~10% AM', judge(st, 'fcc')[
 check('echo: pilot rules still judged under 15% AM', judge(st, 'custom', pilot_min_pct=9.5)[0], ['PILOT_SPEC'])
 st = station(**bright(0.52), echo=(2e-6, 0.1, 0.0))
 check('weak echo (~1% AM): real over-modulation still raised', judge(st, 'fcc')[0], ['OVERMOD'])
+# The limit is per station: 100% + 0.5 x (RDS + SCA injection), never above 110%
+# (47 CFR 73.1570(b)(2), BETS-6 A.2.2.4.4)
+st = station(left=[(997, 0.72)], right=[(997, 0.72)], pilot=0.09, rds=0.04, sca=[(67, 0.10, 1000, 6000)])
+s = st.meter.stats
+got, _, p, _ = judge(st, 'fcc')
+check(f'limit with SCA 10% + RDS 4%: 107% (peak {max(s["pos_pct"], s["neg_pct"]):.1f}%)',
+      round(p.readings['limit_pct'], 1), round(100 + 0.5 * (s['rds_pct'] + s['sca67_pct']), 1))
+check('...a peak under it raises nothing', got, [])
+check('...a flat 100% limit would have raised it', judge(st, 'custom', mod_base_pct=100, mod_per_sub=0)[0], ['OVERMOD'])
+st = station(left=[(997, 0.35)], right=[(997, 0.35)], pilot=0.09, rds=0.04,
+             sca=[(67, 0.12, 1000, 6000), (92, 0.11, 700, 6000)])
+check('limit with 27% of subcarriers: capped at 110%', round(judge(st, 'fcc')[2].readings['limit_pct'], 1), 110.0)
+
 # ITU-R SM.1268: over 1e-6 of 15 min of valid samples above the limit + 2 kHz. Judged once 15 min is held.
 def held(st):
     """The station as if it had held EXCEED_MIN_S of valid time with the same statistics."""
