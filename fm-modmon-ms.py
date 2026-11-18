@@ -246,9 +246,11 @@ AUDIO_BATCH = 512          # so they are called ~100x/s, not ~900x/s; powers
 SRC_BUFFER = 1 << 18       # SDR output buffer, samples (~27 ms). GNU Radio's default
                            # (4096) makes every block downstream run on ~100-sample
                            # scraps thousands of times a second: 4x the CPU.
-CHAN_CHUNK = 512           # channel filters wait for this many outputs (~2 ms), so the
+CHAN_CHUNK = 8192          # channel filters wait for this many outputs (~21 ms), so the
                            # whole station runs in chunks of this size whatever the
-                           # SDR delivers per read
+                           # SDR delivers per read. Each station is ~50 blocks, one
+                           # thread each: 512 (~1.3 ms) cost ~25% more CPU in wake-ups.
+                           # Needs CHAN_CHUNK * CHAN_DECIM < SRC_BUFFER.
 RDS_CREST = 1.443          # IEC 62106 RDS waveform: peak / RMS (random data)
 GUARD_TO_AUDIO = (15e3 ** 3 / 3) / ((18.3e3 ** 3 - 16e3 ** 3) / 3 / 2.3e3)  # f^2 noise: 0-15 kHz power
                            # per (Hz of guard-band noise density)
