@@ -1462,10 +1462,11 @@ class RdsGroupServer:
 
     HEARTBEAT_S = 1.0
     SEND_TIMEOUT_S = 2.0  # a client that can't take a line in this long is dropped
+    BACKLOG = 64          # lines queued for one client; a client this far behind is dropped
 
     def __init__(self, bind, port):
         self.port = port
-        self._clients = []
+        self._clients = {}  # socket -> its queue of lines, sent by its own thread
         self._lock = threading.Lock()
         self._last = 0.0
         self._closed = False
@@ -1497,11 +1498,13 @@ class RdsGroupServer:
                 break
             conn.settimeout(self.SEND_TIMEOUT_S)
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            q = queue.Queue(self.BACKLOG)
             with self._lock:
                 if self._closed:
                     conn.close()
-                else:
-                    self._clients.append(conn)
+                    continue
+                self._clients[conn] = q
+            threading.Thread(target=self._writer, args=(conn, q), daemon=True).start()
         self._sock.close()
 
     def close(self):
@@ -1509,9 +1512,8 @@ class RdsGroupServer:
         (a tenth of a second at most), so it can be opened again at once."""
         self._closed = True
         with self._lock:
-            for conn in self._clients:
-                conn.close()
-            self._clients.clear()
+            for conn in list(self._clients):
+                self._drop(conn)
         self._acceptor.join(1.0)
 
     def _heartbeat(self):
@@ -1521,13 +1523,31 @@ class RdsGroupServer:
                 self._send(b'---- ---- ---- ----\r\n')
 
     def _send(self, data):
+        # Never blocks: the RDS decoder calls this. Each client's own thread
+        # does the sending, so a stalled client can't hold the decoder up.
         with self._lock:
-            for conn in list(self._clients):
+            for conn, q in list(self._clients.items()):
                 try:
-                    conn.sendall(data)
-                except OSError:
-                    self._clients.remove(conn)
-                    conn.close()
+                    q.put_nowait(data)
+                except queue.Full:
+                    self._drop(conn)
+
+    def _drop(self, conn):
+        """Forget a client and close it; its writer then stops. Call holding _lock."""
+        q = self._clients.pop(conn, None)
+        if q is not None:
+            with contextlib.suppress(queue.Full):
+                q.put_nowait(None)
+        conn.close()
+
+    def _writer(self, conn, q):
+        while (data := q.get()) is not None:
+            try:
+                conn.sendall(data)
+            except OSError:
+                with self._lock:
+                    self._drop(conn)
+                return
 
 
 _cache_root = None
