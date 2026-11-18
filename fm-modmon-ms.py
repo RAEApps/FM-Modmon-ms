@@ -230,6 +230,7 @@ for _var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
 import numpy as np
 import pmt
 from PyQt5 import QtCore, QtGui, QtWidgets
+from scipy import fft as spfft
 from scipy import signal as sps
 from gnuradio import analog, audio, blocks, digital, filter, gr
 from gnuradio.filter import firdes
@@ -263,6 +264,11 @@ CHAN_CHUNK = 8192          # channel filters wait for this many outputs (~21 ms)
                            # thread each: 512 (~1.3 ms) cost ~25% more CPU in wake-ups.
                            # Needs CHAN_CHUNK * CHAN_DECIM < SRC_BUFFER.
 RDS_CREST = 1.443          # IEC 62106 RDS waveform: peak / RMS (random data)
+RDS_BW = 2.4e3             # RDS occupies 57 kHz +/- this
+RDS_SEARCH_HZ = 15         # RDS carrier offsets looked for (IEC 62106 allows +/-6 Hz unlocked)
+RDS_MIN_LINE = 6.0         # RDS shown once its line stands this many times the median of the search band
+RDS_AVG_S = 2.0            # RDS injection is integrated coherently over this long
+RDS_ZZ_AVG = 16            # RDS: z² samples averaged into one point of the line search (>= 300 points/s)
 GUARD_TO_AUDIO = (15e3 ** 3 / 3) / ((18.3e3 ** 3 - 16e3 ** 3) / 3 / 2.3e3)  # f^2 noise: 0-15 kHz power
                            # per (Hz of guard-band noise density)
 RTPLUS_LEAD_S = 3.0        # RT+ tags may come this far before or after the RadioText they tag
@@ -727,6 +733,10 @@ class FmMeter(gr.sync_block):
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
         self._am_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # AM per update, for the peak gate
+        self._rds = None
+        self._rds_fft = None    # (block length, envelope length) the RDS measurement is set up for
+        self._rds_hist = deque()  # per block: z² averaged down (RDS_ZZ_AVG), the last RDS_AVG_S
+        self._rds_samples = 0     # MPX samples since the RDS measurement started (its 57 kHz phase)
         self._env_sum = 0.0
         self._settle = SETTLE_UPDATES
         self._reset = False
@@ -741,7 +751,8 @@ class FmMeter(gr.sync_block):
         if self._reset:
             self._reset = False
             self._chunks, self._count, self._iq_energy = [], 0, 0.0
-            self._psd = self._rf = self._offset = self._am = None
+            self._psd = self._rf = self._offset = self._am = self._rds = None
+            self._rds_fft = None
             self._env_sum = 0.0
             for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._am_hist):
                 d.clear()
@@ -764,6 +775,53 @@ class FmMeter(gr.sync_block):
     @staticmethod
     def _smooth(old, new, alpha):
         return new if old is None else old + alpha * (new - old)
+
+    def _rds_power(self, x):
+        """(RDS power in the MPX as a variance, how far its line stands above
+        the median of the search band), over the last RDS_AVG_S.
+
+        RDS is double-sideband suppressed-carrier: a real baseband m(t) on a
+        57 kHz carrier. At complex baseband the band is z = m·e^(jφ) + n, so
+        z² carries a steady line of power E[m²], while noise and programme
+        leaking into the band, having no fixed phase, average out of it. So RDS
+        needs no noise estimate. The blocks are joined on one 57 kHz phase
+        reference and z² is integrated coherently over RDS_AVG_S, so bursty
+        noise (multipath) averages out too. The carrier may be a few Hz off
+        57 kHz (an encoder not locked to the pilot), which puts the line at twice
+        the offset: the strongest within 2 x RDS_SEARCH_HZ is taken. Each block is
+        Hann-windowed: unwindowed, the sidelobes of loud audio reach 57 kHz with a
+        fixed phase and read as RDS."""
+        n = len(x)
+        df = QUAD_RATE / n
+        k0, kw = round(57e3 / df), int(RDS_BW / df)
+        m = 1 << (2 * kw + 1).bit_length()
+        if self._rds_fft != (n, m):   # (first block, or a new block length: start over)
+            self._rds_fft = (n, m)
+            self._rds_win = np.hanning(n).astype(np.float32)
+            t = np.arange(m) * (n / QUAD_RATE / m)
+            self._rds_shift = np.exp(-2j * np.pi * (57e3 - k0 * df) * t)   # bin k0 -> exactly 57 kHz
+            self._rds_hist.clear()
+        start = self._rds_samples
+        self._rds_samples += n
+        # float32 FFT: 3x faster, and its error sits far below any RDS
+        sel = spfft.rfft(x.astype(np.float32, copy=False) * self._rds_win)[k0 - kw:k0 + kw + 1] / np.sinc(57e3 / QUAD_RATE)
+        spec = np.zeros(m, complex)
+        spec[:kw + 1], spec[m - kw:] = sel[kw:], sel[:kw]
+        z = np.fft.ifft(spec) * (2 * m / n)   # complex envelope: A cos(wt + p) -> A e^(jp)
+        # on the 57 kHz phase running from the first block
+        z *= self._rds_shift * np.exp(-2j * np.pi * (57000 * start % int(QUAD_RATE)) / QUAD_RATE)
+        self._rds_hist.append((z * z).reshape(-1, RDS_ZZ_AVG).mean(axis=1))
+        while len(self._rds_hist) * n > RDS_AVG_S * QUAD_RATE:
+            self._rds_hist.popleft()
+        zz = np.concatenate(self._rds_hist)
+        nfft = 1 << (8 * len(zz) - 1).bit_length()   # zero-padded: a line falls between bins by little
+        lines = np.abs(np.fft.fft(zz, nfft)) / len(zz)
+        rate = m / RDS_ZZ_AVG * QUAD_RATE / n
+        hz = np.fft.fftfreq(nfft, 1 / rate)
+        w2 = 0.375   # mean of the Hann window squared: the power it takes away
+        search = lines[np.abs(hz) <= 2 * RDS_SEARCH_HZ]
+        peak = float(np.max(search))
+        return peak / w2 / 2, peak / max(float(np.median(search)), 1e-30)
 
     @staticmethod
     def _sca(band, lo, hi):
@@ -833,10 +891,7 @@ class FmMeter(gr.sync_block):
             return float(np.sum(self._psd[(self._freqs >= lo) & (self._freqs <= hi)])) + 1e-20
 
         noise_per_hz = band(16e3, 18.3e3) / 2.3e3
-        # FM noise density rises with f^2; remove the expected noise from the RDS band.
-        # The guard band and RDS band got different demod corrections; apply the ratio.
-        rds_noise = (noise_per_hz * (57e3 / 17.15e3) ** 2 * 4.8e3
-                     * (np.sinc(17.15e3 / QUAD_RATE) / np.sinc(57e3 / QUAD_RATE)) ** 2)
+        self._rds, rds_line = self._rds_power(x)
         return {
             'rf_dbfs': _db(self._rf),
             'snr_db': _db(0.5 / (noise_per_hz * GUARD_TO_AUDIO)),
@@ -852,9 +907,8 @@ class FmMeter(gr.sync_block):
             'am_pct': (self._am or 0.0) * 100,
             'am_max_pct': max(self._am_hist, default=0.0) * 100,  # over the last PEAK_AM_S
             'pilot_pct': math.sqrt(2 * band(18.9e3, 19.1e3)) * 100,
-            # Report RDS only when it stands 3 dB above the expected noise.
-            'rds_pct': (math.sqrt(2 * (band(54.6e3, 59.4e3) - rds_noise)) * RDS_CREST * 100
-                        if band(54.6e3, 59.4e3) > 2 * rds_noise else 0.0),
+            # Report RDS only when its line stands clear of the search band's noise.
+            'rds_pct': math.sqrt(2 * self._rds) * RDS_CREST * 100 if rds_line >= RDS_MIN_LINE else 0.0,
             **{f'sca{khz}_{key}': v for khz, lo, hi in ((67, 60e3, 74e3), (92, 85e3, 99e3))
                for key, v in zip(('pct', 'db'), self._sca(band, lo, hi) or (None, None))},
             # 500 Hz buckets centred on 0.5, 1.0 ... 100 kHz (so 19/38/57 kHz sit

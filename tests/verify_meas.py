@@ -204,6 +204,24 @@ rows.append((S, 'Correlation (L only; R is crosstalk)', '~+1', a['correlation'],
 check(S, 'Balance shown', None, None, 0)
 rows[-1] = (S, 'Balance shown', '>30 dB L', plain(p.values['Balance']), '', 'info')
 
+# ================================================================ S5: programme in the 16-18.3 kHz guard band
+# (clipper products, encoder LPF skirt) must not hide RDS; and no RDS reads 0
+S = 'S5 guard band'
+# (and the last: weak unlocked RDS in heavy noise, as on a distant mono station: measured though undecodable)
+for rds_inj, unlocked, noise in ((0.05, 0.0, 0.0005), (0.02, 5.0, 0.0005), (0.0, 0.0, 0.0005), (0.0, 0.0, 0.006),
+                                 (0.02, 1.4, 0.006)):
+    x, info = fmtx.mpx(rm, SECS, left=[(997, 0.5)], right=[(1500, 0.3)], pilot=0.09)
+    t = np.arange(len(x)) / fmtx.FS
+    x = x + (0.012 * (np.sin(2 * np.pi * 16.7e3 * t) + np.sin(2 * np.pi * 17.6e3 * t))).astype(np.float32)
+    if rds_inj:   # unlocked: the RDS carrier a few Hz off 3 x pilot
+        bb, _ = fmtx.rds_baseband(fmtx.RdsContent(), SECS)
+        x = x + (rds_inj * bb[:len(x)] * np.sin(2 * np.pi * (57e3 + unlocked) * t)).astype(np.float32)
+    st = fmtx.run(rm, x, rf_amp=0.1, noise=noise)
+    what = (f'{rds_inj * 100:.0f}%' + (f', carrier +{unlocked:g} Hz' if unlocked else '') if rds_inj else 'none')         + (', noisy' if noise > 0.001 else '')
+    check(S, f'RDS injection % ({what})', rds_inj * 100, st.meter.stats['rds_pct'], 0.15, '%')
+    if noise > 0.001 and rds_inj:
+        rows.append((S, '  groups decoded there', '', st.rds.groups, '', 'info'))
+
 # ================================================================ report
 w = max(len(r[1]) for r in rows)
 for scn, name, exp, got, unit, verdict in rows:
