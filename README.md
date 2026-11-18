@@ -198,6 +198,21 @@ Stomp, SRV failover, trigger times, bad slides) against local fake servers.
 `tests\centre_test.py` checks where the RSP1A centres: no carrier on its DC offset or on
 another station's IQ image, and none past the IF filter's usable edge.
 
+## CPU profile
+
+`tools\profile_cpu.py` shows where the monitor's CPU goes on the real RSP1A: the GUI
+thread, the Python meters, GNU Radio's C++ blocks, and the rest (mostly a thread per
+block waking and passing buffers). Close the monitor first, then run it from the app
+folder (the installer puts it in `app\tools`):
+
+```bash
+C:\ProgramData\radioconda\python.exe tools\profile_cpu.py
+```
+
+It runs the monitor with the saved receivers for about 70 s, prints the report and
+saves it as `fm-modmon-profile.txt` on the Desktop. Arguments after the script name go
+to the monitor, such as `--freqs 94.5 101.7`.
+
 ## Examples
 
 `examples/` has the simple single-station GNU Radio Companion flowgraphs this started from
