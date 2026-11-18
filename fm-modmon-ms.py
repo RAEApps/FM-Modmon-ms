@@ -130,7 +130,9 @@ Measurements (refreshed 10x per second):
                     band (FM noise rises as f^2; the estimate allows for it)
     Carrier offset  DC of demodulated MPX (station + SDR tuning error)
     AM / multipath  envelope ripple of the carrier, RMS, as % of 100% AM
-                    (10% sine AM reads 10%; 0% = clean reception)
+                    (10% sine AM reads 10%; 0% = clean reception). Peaks
+                    are judged only while it stays under 5% (ITU-R SM.1268:
+                    echoes 26 dB down); the other rules under 15%
     Sync AM         synchronous AM: the envelope ripple that follows the
                     modulation, as the AM depth it reaches at +/-75 kHz, in %
                     and dB. Mistuned transmitter, filter, combiner or antenna
@@ -304,6 +306,10 @@ PS_NAME_STABLE_S = 10      # a PS names the station once it has held this long
 OVERMOD_WINDOW_S = 0.001   # over-modulation is counted per 1 ms window
 OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes)
 MPX_POWER_S = 60           # ITU-R BS.412 MPX power integration time
+PEAK_AM_PCT = 5.0          # over-modulation is judged only while AM / multipath has stayed
+PEAK_AM_S = 10             # ...under this for this long (ITU-R SM.1268: echoes 26 dB down,
+                           # AM averaged over 10 s); echoes or noise above it inflate peaks
+CLEAN_AM_PCT = 15.0        # the other technical rules are judged under this
 IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor
 WEB_PORT = 8765            # web view; 0 turns it off
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fm-modmon-ms-web.html')
@@ -739,6 +745,7 @@ class FmMeter(gr.sync_block):
         self._over_prev = np.zeros(2, bool)                # was the last 1 ms window over 100/110%?
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
+        self._am_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # AM per update, for the peak gate
         self._env_sum = 0.0
         self._env = []                                       # |IQ| chunks for this update
         self._rds_win = None
@@ -759,7 +766,8 @@ class FmMeter(gr.sync_block):
             self._chunks, self._count, self._iq_energy = [], 0, 0.0
             self._psd = self._rf = self._offset = self._am = None
             self._env_sum, self._env, self._sync = 0.0, [], None
-            for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._rds_z):
+            for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._am_hist,
+                      self._rds_z):
                 d.clear()
             self._over_prev = np.zeros(2, bool)
             self._settle = SETTLE_UPDATES
@@ -912,6 +920,8 @@ class FmMeter(gr.sync_block):
         if env_mean > 0:
             # RMS ripple x sqrt(2): the % of a sine AM with the same RMS
             self._am = self._smooth(self._am, math.sqrt(2 * max(iq_power - env_mean ** 2, 0.0)) / env_mean, 0.3)
+            if not self._settle:  # filters' start-up ripple isn't multipath
+                self._am_hist.append(self._am)
         over = np.sum(self._over, axis=0) if self._over else np.zeros(2)
         sync_am = self._sync_am(x, env) if env is not None and not self._settle else None
 
@@ -950,6 +960,7 @@ class FmMeter(gr.sync_block):
             'mpx_dbr': _db(np.mean(self._mpx_ms) * MAX_DEV ** 2 / (19e3 ** 2 / 2)) if self._mpx_ms else -math.inf,
             'mpx_window_s': len(self._mpx_ms) / UPDATE_HZ,
             'am_pct': (self._am or 0.0) * 100,
+            'am_max_pct': max(self._am_hist, default=0.0) * 100,  # over the last PEAK_AM_S
             'sync_am_pct': None if sync_am is None else sync_am * 100,
             'pilot_pct': pilot_pct,
             # Report RDS only when it stands 3 dB above the expected noise.
@@ -4258,8 +4269,8 @@ class StationPanel(QtWidgets.QGroupBox):
                 lv['sync_am_pct'] = 'warn'
             if tol and abs(s['offset_hz']) > tol:
                 lv['offset_hz'] = 'alarm'
-            if s['am_pct'] >= 10:
-                lv['am_pct'] = 'alarm' if s['am_pct'] >= 20 else 'warn'
+            if s['am_pct'] >= PEAK_AM_PCT:  # peaks aren't judged above this, nor other rules above CLEAN_AM_PCT
+                lv['am_pct'] = 'alarm' if s['am_pct'] >= CLEAN_AM_PCT else 'warn'
             if st.pilot and not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']:
                 lv['pilot_pct'] = 'alarm'
             if st.pilot_hz is not None and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']:
@@ -4350,8 +4361,8 @@ class StationPanel(QtWidgets.QGroupBox):
             v['MPX S/N'].setText(_num(r['snr_db'], 'dB'))
             v['Carrier offset'].setText(_coloured(f"{r['offset_hz']:+.0f} Hz", lv.get('offset_hz')))
             am_text = f"{r['am_pct']:.1f}%"
-            v['AM / multipath'].setText(_coloured(f'{am_text}  peaks unreliable' if lv.get('am_pct') == 'alarm'
-                                                  else am_text, lv.get('am_pct')))
+            am_note = {'warn': '  peaks unreliable', 'alarm': '  readings unreliable'}.get(lv.get('am_pct'), '')
+            v['AM / multipath'].setText(_coloured(am_text + am_note, lv.get('am_pct')))
             v['Pilot (19 kHz)'].setText(
                 _coloured(f"{r['pilot_pct']:.1f}%", lv.get('pilot_pct')) + '  ' +
                 {'stereo': f'<span style="color:{RED}">STEREO</span>',
@@ -4460,8 +4471,10 @@ class StationPanel(QtWidgets.QGroupBox):
                 self.alarms.seen_rds |= rate > 5
             pi = f.get(0, '').strip().upper()
             # Multipath and noise spikes look like over-modulation (and upset the
-            # other readings); only judge the technical rules on clean reception.
-            clean = not carrier and s['am_pct'] < 15 and s['snr_db'] > 25
+            # other readings); only judge the technical rules on clean reception,
+            # and peaks only on reception clean enough for them (ITU-R SM.1268).
+            clean = not carrier and s['am_pct'] < CLEAN_AM_PCT and s['snr_db'] > 25
+            peaks_clean = clean and s['am_max_pct'] < PEAK_AM_PCT
             rules = self.rules()
             lim = cfg.limits(self.country)
             limit, _ = mod_limit(rules, lim, s)
@@ -4470,7 +4483,7 @@ class StationPanel(QtWidgets.QGroupBox):
             conditions = {
                 'CARRIER': carrier,
                 'SILENCE': not carrier and a['momentary'] < cfg.silence_lufs,
-                'OVERMOD': (clean and max(s['pos_pct'], s['neg_pct']) > limit),
+                'OVERMOD': (peaks_clean and max(s['pos_pct'], s['neg_pct']) > limit),
                 'PILOT_SPEC': (clean and st.pilot and (not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']
                                                        or (st.pilot_hz is not None
                                                            and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']))),
