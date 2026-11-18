@@ -22,14 +22,16 @@ fake = types.SimpleNamespace(monotonic=lambda: clock['t'], time=real_time.time, 
                              sleep=real_time.sleep)
 
 
-def judge(st, rules, country='CA', keep=(), **settings):
+def judge(st, rules, country='CA', keep=(), rds_seen=False, **settings):
     """Alarms a panel raises for this station after 60 s of the same readings
-    (RDS, PILOT and SILENCE left out unless in keep)."""
+    (RDS, PILOT and SILENCE left out unless in keep). rds_seen: the station had
+    RDS before (the synthetic run is over, so there is none now)."""
     p = rm.StationPanel(st, [(st.freq_hz, None)], lambda *a: None, lambda *a: None, country=country)
     p.settings = rm.ReceiverSettings.from_dict({**CUSTOM.get(rules, {'rules': rules}), **settings})
     rm.time = fake
     try:
         p.alarms.reset()
+        p.alarms.seen_rds = rds_seen
         for _ in range(70):            # 70 s of refreshes, 1 s apart (grace 5 s, holds up to 30 s)
             clock['t'] += 1.0
             p._groups.clear()
@@ -106,6 +108,67 @@ check('echo: pilot rules still judged under 15% AM', judge(st, 'custom', pilot_m
 st = station(**bright(0.52), echo=(2e-6, 0.1, 0.0))
 check('weak echo (~1% AM): real over-modulation still raised', judge(st, 'fcc')[0], ['OVERMOD'])
 check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
+
+print('--- RDS gone: plain fault or N+1 backup (its exciter has no RDS encoder)')
+st = station(**music)
+check('carrier, pilot and audio fine: possibly on N+1', judge(st, '', keep=('RDS',), rds_seen=True)[0], ['BACKUP'])
+check('...with that alarm switched off: RDS lost', judge(st, '', keep=('RDS',), rds_seen=True,
+                                                         alarms={'BACKUP': False})[0], ['RDS'])
+check('RDS still there: neither', judge(st, '', keep=('RDS',))[0], [])
+check('silent programme too: RDS lost, not N+1',
+      judge(station(pilot=0.09, rds=0.04), '', keep=('RDS', 'SILENCE'), rds_seen=True)[0], ['RDS', 'SILENCE'])
+check('carrier lost too: RDS lost, not N+1',
+      judge(station(rf_amp=0.0001, **music), '', keep=('RDS',), rds_seen=True)[0], ['CARRIER', 'RDS'])
+check('pilot lost too: RDS lost, not N+1', rm.rds_conditions(True, 0.0, False, False, False), (True, False))
+check('mono station (never had a pilot): N+1', rm.rds_conditions(True, 0.0, False, True, False), (False, True))
+check('RDS at 11.4 groups/s: neither', rm.rds_conditions(True, 11.4, False, True, False), (False, False))
+
+print('--- wideband ADC overload')
+from gnuradio import blocks, gr
+x = np.full(rm.ADC_BATCH * 4, 0.1 + 0.1j, np.complex64)
+x[rm.ADC_BATCH + 7] = 0.2 - 0.95j                                   # one sample near full scale, on Q
+tb = gr.top_block()
+meter = rm.AdcMeter()
+tb.connect(blocks.vector_source_c(x.tolist(), False), rm._batch(gr.sizeof_gr_complex, rm.ADC_BATCH, 8), meter)
+tb.run()
+check('peak meter finds the largest |I| or |Q|', round(meter.take(), 3), 0.95)
+check('...and starts again after take()', meter.take(), None)
+ov = rm.AdcOverload()
+seen = []
+for t in range(80):
+    peak = 0.97 if t in (10, 14, 16, 50, 57, 64) else None if t == 30 else 0.5
+    if (got := ov.update(peak, now=float(t))) is not None:
+        seen.append((t, got))
+check('raised on the 3rd clipping second within 10 s, cleared 30 s after the last; lone peaks 7 s apart '
+      'never raise', seen, [(16, True), (46, False)])
+check('overload is where gain calibration counts overload', rm.CAL_CLIP <= 0.97, True)
+
+print('--- a named data service (7A = Alert FM)')
+DATA_STEADY_S = rm.DATA_STEADY_S
+st = station(**music)
+p = rm.StationPanel(st, [(st.freq_hz, None)], lambda *a: None, lambda *a: None, country='CA')
+p.settings = rm.ReceiverSettings.from_dict({'service_names': '7A=Alert FM'})
+rm.time, rm.DATA_STEADY_S = fake, 20.0
+changes = []
+try:
+    p.alarms.reset()
+    for second in range(130):
+        clock['t'] += 1.0
+        st.rds.groups += 11                                          # RDS itself stays fine throughout
+        if second < 40:                                              # paging on air for 40 s: steady
+            with st.rds._lock:
+                st.rds._decode(0xC6B2, (14 << 11), 0x1234, 0x5678)
+        changes += p.refresh()
+        if second == 39:
+            on_air = QtGui.QTextDocumentFragment.fromHtml(p.values['Data services'].text()).toPlainText()
+finally:
+    rm.time, rm.DATA_STEADY_S = real_time, DATA_STEADY_S
+lost = QtGui.QTextDocumentFragment.fromHtml(p.values['Data services'].text()).toPlainText()
+check('Data services row names it while on air', on_air.startswith('Alert FM Paging (7A)'), True)
+check('...and names it once lost', lost, 'Alert FM Paging (7A) lost')
+check('"data service lost" alarm names it', [(desc, raised, detail) for desc, raised, detail in changes],
+      [('data service lost (paging, EWS, ODA or SCA data)', True,
+        f'not on air for {rm.DATA_GAP_S:.0f}+ s: Alert FM (Paging (7A))')])
 
 rm.time = fake
 try:
