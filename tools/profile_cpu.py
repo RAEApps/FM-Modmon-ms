@@ -14,6 +14,9 @@ blocks (meters, RDS), the C++ blocks' work, and the rest: mostly GNU Radio
 waking a thread per block and passing buffers between them, plus the SDR
 driver. Block work times come from GNU Radio's performance counters and are
 wall time inside work(), so the SDR source's includes waiting for samples.
+It also totals each thread's CPU by the DLL the thread started in: GNU Radio
+and Python threads show as ucrtbase.dll, the SDR driver's as sdrplay_api.dll,
+numpy's maths threads as libiomp5md.dll.
 """
 import collections
 import ctypes
@@ -91,6 +94,61 @@ def main_thread_cpu():
     return (kernel.value + user.value) / 1e7
 
 
+class THREADENTRY32(ctypes.Structure):
+    _fields_ = [('dwSize', ctypes.c_ulong), ('cntUsage', ctypes.c_ulong), ('th32ThreadID', ctypes.c_ulong),
+                ('th32OwnerProcessID', ctypes.c_ulong), ('tpBasePri', ctypes.c_long),
+                ('tpDeltaPri', ctypes.c_long), ('dwFlags', ctypes.c_ulong)]
+
+
+ntdll = ctypes.windll.ntdll
+kernel32.GetModuleHandleExW.argtypes = [ctypes.c_ulong, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_ulong]
+ntdll.NtQueryInformationThread.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong,
+                                           ctypes.c_void_p]
+kernel32.OpenThread.restype = ctypes.c_void_p
+kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+kernel32.GetThreadTimes.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
+module_of = {}  # thread id -> DLL its start address is in
+
+
+def _start_module(h, tid):
+    """The DLL a thread started in (sdrplay_api.dll, Qt5Core.dll ...). GNU Radio's
+    and Python's threads start in the C runtime (ucrtbase.dll)."""
+    if tid not in module_of:
+        addr = ctypes.c_void_p()
+        name = '?'
+        if ntdll.NtQueryInformationThread(h, 9, ctypes.byref(addr), ctypes.sizeof(addr), None) == 0 and addr.value:
+            mod = ctypes.c_void_p()
+            if kernel32.GetModuleHandleExW(0x4 | 0x2, addr, ctypes.byref(mod)):  # FROM_ADDRESS, UNCHANGED_REFCOUNT
+                buf = ctypes.create_unicode_buffer(260)
+                kernel32.GetModuleFileNameW(mod, buf, 260)
+                name = os.path.basename(buf.value)
+        module_of[tid] = name
+    return module_of[tid]
+
+
+def thread_cpu():
+    """{thread id: CPU seconds} for this process, noting each thread's start DLL."""
+    snap = kernel32.CreateToolhelp32Snapshot(0x4, 0)  # TH32CS_SNAPTHREAD
+    te = THREADENTRY32()
+    te.dwSize = ctypes.sizeof(te)
+    out = {}
+    ok = kernel32.Thread32First(snap, ctypes.byref(te))
+    while ok:
+        if te.th32OwnerProcessID == os.getpid():
+            h = kernel32.OpenThread(0x0040, False, te.th32ThreadID)  # THREAD_QUERY_INFORMATION
+            if h:
+                created, exited, kernel, user = (ctypes.c_ulonglong() for _ in range(4))
+                kernel32.GetThreadTimes(h, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel),
+                                        ctypes.byref(user))
+                _start_module(h, te.th32ThreadID)
+                out[te.th32ThreadID] = (kernel.value + user.value) / 1e7
+                kernel32.CloseHandle(h)
+        ok = kernel32.Thread32Next(snap, ctypes.byref(te))
+    kernel32.CloseHandle(snap)
+    return out
+
+
 def snapshot():
     t = os.times()
     work = {}
@@ -99,7 +157,7 @@ def snapshot():
             work[f'{owner} / {b.alias()}'] = b.pc_work_time_total()
         except RuntimeError:
             pass
-    return time.time(), t.user + t.system, main_thread_cpu(), work, dict(cpu)
+    return time.time(), t.user + t.system, main_thread_cpu(), work, dict(cpu), thread_cpu()
 
 
 def report(a, b):
@@ -108,6 +166,10 @@ def report(a, b):
     process, main = (b[1] - a[1]) / dt, (b[2] - a[2]) / dt
     work = {k: (v - a[3].get(k, 0)) / tps / dt for k, v in b[3].items()}
     py = {k: (v - a[4].get(k, 0)) / dt for k, v in b[4].items()}
+    threads = {t: (v - a[5].get(t, v)) / dt for t, v in b[5].items()}
+    by_module = collections.Counter()
+    for t, v in threads.items():
+        by_module[module_of.get(t, '?')] += v
     py_blocks = sum(v for k, v in py.items() if k.endswith('.work'))
     cpp = sum(v for k, v in work.items()
               if k.split(' / ')[-1].rstrip('0123456789') not in PYTHON_BLOCK_NAMES | {'source'})
@@ -129,7 +191,12 @@ def report(a, b):
     lines += [f'  {v:6.3f}  {k}' for k, v in kinds.most_common(15)]
     lines += ['', 'Python block methods (CPU, cores, inclusive)']
     lines += [f'  {v:6.3f}  {k}' for k, v in sorted(py.items(), key=lambda kv: -kv[1])[:12]]
-    lines += ['', json.dumps({'process': process, 'main': main, 'work': work, 'python': py})]
+    lines += ['', f'threads by the DLL they started in (CPU, cores; {len(threads)} threads)']
+    lines += [f'  {v:6.3f}  {k}' for k, v in by_module.most_common(8)]
+    lines += ['', 'busiest threads (CPU, cores)']
+    lines += [f'  {v:6.3f}  {module_of.get(t, "?")}' for t, v in sorted(threads.items(), key=lambda kv: -kv[1])[:10]]
+    lines += ['', json.dumps({'process': process, 'main': main, 'work': work, 'python': py,
+                              'threads': {f'{t} {module_of.get(t, "?")}': v for t, v in threads.items()}})]
     text = '\n'.join(lines) + '\n'
     with open(OUT, 'w', encoding='utf-8') as fh:
         fh.write(text)
