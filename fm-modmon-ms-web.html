@@ -201,6 +201,13 @@ legend { color: var(--accent); }
 #stereo-phase { margin: 10px 16px 0; --tn: 50px; --tv: 60px; }
 #stereo-readouts { margin: 6px 16px 0; color: var(--muted); text-align: center; }
 #stereo-readouts b { color: var(--text); }
+canvas.mpx { cursor: pointer; }
+#mpxwin { max-width: 94vw; width: 960px; padding: 0 0 12px; }
+#mpxwin .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 8px; }
+#mpxwin .help-head h2 { margin: 0; }
+#mpx-big { display: block; width: calc(100% - 32px); height: min(60vh, 420px); margin: 0 16px; border-radius: 6px; }
+#mpx-readouts { margin: 8px 16px 0; color: var(--muted); text-align: center; }
+#mpx-readouts b { color: var(--text); }
 #helpdlg .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; }
 #helpdlg .help-head h2 { margin: 0; }
 #help-toc { padding: 6px 16px; color: var(--muted); }
@@ -296,6 +303,11 @@ legend { color: var(--accent); }
     <div class="err" id="s-err"></div>
     <div class="buttons"><button value="cancel" formnovalidate>Cancel</button><button class="primary" id="s-ok" value="ok">OK</button></div>
   </form>
+</dialog>
+<dialog id="mpxwin">
+  <div class="help-head"><h2 id="mpx-title">MPX spectrum</h2><button id="mpx-close">Close</button></div>
+  <canvas id="mpx-big" title="Grey: now. Amber: peak hold, falling 3 dB/s. dB re a 100% (75 kHz) sine, 500 Hz bins"></canvas>
+  <div id="mpx-readouts"></div>
 </dialog>
 <dialog id="stereo">
   <div class="help-head"><h2 id="stereo-title">Stereo image</h2><button id="stereo-close">Close</button></div>
@@ -586,7 +598,8 @@ function drawHist(cv, counts, [LO, HI, STEP], limit) {
   if (limit != null) { c.strokeStyle = C.red; c.setLineDash([2, 2]); c.beginPath(); c.moveTo(x(limit), 2); c.lineTo(x(limit), bottom); c.stroke(); c.setLineDash([]); }
 }
 const MARKERS = [[19, 'pilot', '#9aa0a6'], [38, '38k', '#6d737a'], [57, 'RDS', '#9aa0a6'], [67, 'SCA', '#6d737a'], [92, 'SCA', '#6d737a']];
-function drawMpx(cv, db) {
+function drawMpx(cv, db, opt = {}) {
+  // opt.hold: a peak-hold trace (dB per bin); opt.cursor: the mouse's x, for a readout
   const [c, w, hgt] = canvasCtx(cv);
   c.font = '11px "Segoe UI", system-ui, sans-serif';
   const left = c.measureText('-70 dB').width + 8, right = w - c.measureText('100').width / 2 - 6, top = 6, bottom = hgt - 18;
@@ -599,6 +612,10 @@ function drawMpx(cv, db) {
   for (let d = 0; d >= -70; d -= 10) c.fillText(d + ' dB', left - 6, y(d));
   c.textAlign = 'center'; c.textBaseline = 'top';
   for (let k = 0; k <= 100; k += 10) c.fillText(String(k), x(k), bottom + 3);
+  if (opt.hold) {
+    c.strokeStyle = 'rgba(240,163,94,0.67)'; c.lineWidth = 1; c.beginPath();
+    opt.hold.forEach((d, i) => i ? c.lineTo(x((i + 1) * 0.5), y(d)) : c.moveTo(x(0.5), y(d))); c.stroke();
+  }
   if (db) {
     const trace = new Path2D(); trace.moveTo(x(0), y(db[0])); db.forEach((d, i) => trace.lineTo(x((i + 1) * 0.5), y(d)));
     const area = new Path2D(trace); area.lineTo(x(db.length * 0.5), bottom); area.lineTo(x(0), bottom); area.closePath();
@@ -611,6 +628,12 @@ function drawMpx(cv, db) {
     c.fillStyle = col; c.fillText(label, x(k) + 4, top + 1);
   }
   c.setLineDash([]);
+  if (db && opt.cursor != null && opt.cursor >= left && opt.cursor <= right) {
+    const i = Math.min(Math.max(Math.round((opt.cursor - left) / (right - left) * 100 / 0.5) - 1, 0), db.length - 1), xi = x((i + 1) * 0.5);
+    c.strokeStyle = C.bright; c.setLineDash([2, 3]); c.beginPath(); c.moveTo(xi, top); c.lineTo(xi, bottom); c.stroke(); c.setLineDash([]);
+    c.fillStyle = C.bright; c.textAlign = 'right'; c.textBaseline = 'top';
+    c.fillText(`${((i + 1) * 0.5).toFixed(1)} kHz   ${db[i].toFixed(1)} dB` + (opt.hold ? `   (hold ${opt.hold[i].toFixed(1)} dB)` : ''), right - 6, top + 16);
+  }
 }
 function drawGonio(cv, data, frames) {
   // data: this update's [l, r] (or null); frames: earlier updates to draw fading behind it
@@ -663,6 +686,37 @@ function followStereo(r) {
   }
   for (const [k, v] of Object.entries(box._v)) setParts(v, o[k] ?? '-');
 }
+// The large MPX spectrum: peak hold falling 3 dB/s and a readout under the mouse,
+// with the multiplex readouts, following one receiver until closed (as the app's MpxWindow).
+const mpxv = {p: null, db: null, hold: null, t: 0, cx: null};
+function drawMpxBig() { drawMpx($('#mpx-big'), mpxv.db, {hold: mpxv.hold, cursor: mpxv.cx}); }
+function openMpx(p) {
+  mpxv.p = p; mpxv.hold = null;
+  $('#mpxwin').showModal();
+  if (p.r) followMpx(p.r);
+}
+function followMpx(r) {
+  setText($('#mpx-title'), `${r.title} – MPX spectrum`);
+  const db = r.mpx, now = performance.now(), fall = 3 * (now - mpxv.t) / 1000;
+  mpxv.t = now;
+  mpxv.hold = !db ? null : mpxv.hold && mpxv.hold.length === db.length ? db.map((d, i) => Math.max(d, mpxv.hold[i] - fall)) : db.slice();
+  mpxv.db = db;
+  drawMpxBig();
+  const rd = r.readings, o = readouts(rd), box = $('#mpx-readouts');
+  o['Pilot'] = rd.stereo_mode === 'mono' || !rd.has_signal ? 'none (mono)' : `${fx(rd.pilot_pct)}%  ${rd.stereo_mode}`;
+  if (!box._v) {
+    box._v = {};
+    for (const k of ['Pilot', 'RDS injection', 'SCA 67 kHz', 'SCA 92 kHz', 'MPX power', 'Noise >100 kHz']) {
+      const v = h('b'); box._v[k] = v; box.append(h('span', null, k + ': '), v, h('span', null, '   ·   '));
+    }
+    box.lastChild.remove();
+  }
+  for (const [k, v] of Object.entries(box._v)) setParts(v, o[k] ?? '-');
+}
+$('#mpx-big').addEventListener('mousemove', e => { mpxv.cx = e.offsetX; drawMpxBig(); });
+$('#mpx-big').addEventListener('mouseleave', () => { mpxv.cx = null; drawMpxBig(); });
+$('#mpx-close').onclick = () => $('#mpxwin').close();
+$('#mpxwin').addEventListener('close', () => { mpxv.p = null; mpxv.hold = null; });
 $('#stereo-close').onclick = () => $('#stereo').close();
 $('#stereo').addEventListener('close', () => { stereo.p = null; stereo.frames = []; });
 
@@ -760,7 +814,7 @@ function buildReceiver(r, alarmDefs) {
                        'Valid time', 'Limit', 'SM.1268'], 2, ['Valid time', 'Limit', 'SM.1268'])));
   // multiplex
   const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'));
-  p.mpx = h('canvas', 'mpx');
+  p.mpx = h('canvas', 'mpx'); p.mpx.title = 'Click for a larger view'; p.mpx.onclick = () => openMpx(p);
   p.mpxT = {snr: makeTape('S/N', 0, 70, {band: [30, 70], nameW: 50, valW: 110}), pilot: makeTape('Pilot', 6, 12, {band: [8, 10], nameW: 50, valW: 110}),
             offset: makeTape('Offset', -3000, 3000, {origin: 0, band: [-1000, 1000], nameW: 50, valW: 110})};
   p.absMpx = h('div', 'absent');
@@ -1187,6 +1241,7 @@ function render(s) {
   });
   for (const q of recv.values()) { q.row.classList.toggle('sel', q.n === selected); q.detail.style.display = q.n === selected ? '' : 'none'; }
   if (stereo.p && stereo.p.r) followStereo(stereo.p.r);
+  if (mpxv.p && mpxv.p.r) followMpx(mpxv.p.r);
   renderAlarms(s);
   if (s.events_seq !== eventsSeq) {
     eventsSeq = s.events_seq;
