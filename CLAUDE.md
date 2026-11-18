@@ -13,7 +13,7 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\centre_test.py` covers where the SDR centres (off DC, off IQ images, inside the IF filter).
 - CPU: `tools\profile_cpu.py` profiles the monitor on the RSP1A (~70 s; needs the SDR free).
   Pass `--config` with a copy that has notifications off when testing here.
-- Install on a new PC: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins
+- Install: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins
   download URLs + SHA-256; the SoapySDRPlay3 module and nrsc5 come from the `deps-2026.11`
   release. Rebuilt either? Publish a new release and update the URLs and hashes.
 - Public repo, GPL-3.0-or-later: no secrets, personal data, local paths or captured audio/IQ
