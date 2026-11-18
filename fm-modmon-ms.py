@@ -4982,7 +4982,7 @@ class StationPanel(QtCore.QObject):
             label.setToolTip(QtGui.QTextDocumentFragment.fromHtml(text).toPlainText() if text != '-' else '')
         self._update_media(r['pi'], r['ecc'])
         tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>')
-                + f'<span style="color:{DIM}">{_html(name)}</span> {_html(text)}</span>'
+                + f'<span style="color:{DIM}">{_html(name)}:</span> {_html(text)}</span>'
                 for t, name, text in r['rtplus']]
         self.rtplus.setText('   ·   '.join(tags) if tags else _flags_html(r['flags']) if r['flags'] else
                             f'<span style="color:{DIM}">no RDS</span>' if r['pi'] is None else '')
