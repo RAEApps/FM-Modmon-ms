@@ -96,6 +96,10 @@ check(S, 'Peak deviation kHz', t['dev'], s['peak_dev_khz'], 0.8, 'kHz')
 check(S, 'MPX power dBr', t['dbr'], s['mpx_dbr'], 0.2, 'dBr')
 check(S, 'Over 100% /min', 0, s['over100_min'], 0)
 check(S, 'AM %', 0.0, s['am_pct'], 0.3, '%')
+check(S, 'Sync AM % (none)', 0.0, s['sync_am_pct'], 0.05, '%')
+check(S, 'RDS phase deg (in phase)', 0.0, s['rds_phase_deg'], 2.0, 'deg')
+check(S, 'RDS lock (steady)', 1.0, s['rds_lock'], 0.02)
+check(S, 'RDS phase (text)', '+0° (in phase, locked)', plain(v['RDS phase']))
 check(S, 'MPX spectrum @19k dB', 20 * math.log10(0.09), s['mpx_db'][37], 0.5, 'dB')
 check(S, 'MPX spectrum @1k dB (L+R/2 tone)', None, None, 0)
 txL, txR = info['L_tx'], info['R_tx']
@@ -174,6 +178,8 @@ S = 'S3 SCA+AM+noise'
 check(S, 'SCA 67 %', 10.0, s['sca67_pct'], 0.3, '%')
 check(S, 'SCA 92 %', 7.0, s['sca92_pct'], 0.3, '%')
 check(S, 'AM % (10% sine AM)', 10.0, s['am_pct'], 0.5, '%')
+check(S, 'Sync AM % (AM not tied to modulation)', 0.0, s['sync_am_pct'], 0.1, '%')
+check(S, 'RDS phase shown (no RDS; SCA skirt in the band)', '-', plain(panel_for(st).values['RDS phase']))
 snr_shown = s['snr_db']
 # truth: same noise, no modulation; noise power in 0.05-15 kHz of the demodulated MPX, vs a 100% sine
 x0, _ = fmtx.mpx(rm, SECS, pilot=0.0)
@@ -203,6 +209,31 @@ rows.append((S, 'Separation (R below L)', '>40 dB', a['rms_r'] - a['rms_l'], 'dB
 rows.append((S, 'Correlation (L only; R is crosstalk)', '~+1', a['correlation'], '', 'info'))
 check(S, 'Balance shown', None, None, 0)
 rows[-1] = (S, 'Balance shown', '>30 dB L', plain(p.values['Balance']), '', 'info')
+
+# ================================================================ S5: RDS in quadrature, synchronous AM
+L5, R5 = [(997, 0.50), (240, 0.30)], [(1600, 0.40), (5000, 0.10)]
+sync = (0.015, 0.03)  # envelope 1 + a*x + b*(x^2 - mean): a sloped and a narrow RF chain
+x, info = fmtx.mpx(rm, SECS, left=L5, right=R5, pilot=0.09, rds=0.045, rds_phase_deg=90)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, sync_am=sync)
+p = panel_for(st)
+s, v = st.meter.stats, p.values
+S = 'S5 quad+syncAM'
+fit = sync[0] * np.linspace(-1, 1, 201) + sync[1] * np.linspace(-1, 1, 201) ** 2
+check(S, 'Sync AM % (depth at +/-75 kHz)', (fit.max() - fit.min()) / 2 * 100, s['sync_am_pct'], 0.1, '%')
+check(S, 'Sync AM shown (amber > -35 dB)', True, '#' in v['Sync AM'].text(), 0)
+rows[-1] = rows[-1][:3] + (plain(v['Sync AM']),) + rows[-1][4:]
+check(S, 'RDS phase deg (quadrature)', 90.0, abs(s['rds_phase_deg']), 2.0, 'deg')
+check(S, 'RDS lock (steady)', 1.0, s['rds_lock'], 0.02)
+
+# ================================================================ S6: RDS encoder free-running (not locked to the pilot)
+x, info = fmtx.mpx(rm, SECS, left=L5, right=R5, pilot=0.09, rds=0.045, rds_hz=57000.7)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+p = panel_for(st)
+s, v = st.meter.stats, p.values
+S = 'S6 RDS unlocked'
+check(S, 'RDS lock (drifting)', True, s['rds_lock'] < rm.RDS_LOCKED, 0)
+rows[-1] = rows[-1][:3] + (round(s['rds_lock'], 2),) + rows[-1][4:]
+check(S, 'RDS phase (text)', 'drifting: not locked to the pilot', plain(v['RDS phase']))
 
 # ================================================================ report
 w = max(len(r[1]) for r in rows)

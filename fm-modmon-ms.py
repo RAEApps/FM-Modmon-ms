@@ -131,10 +131,24 @@ Measurements (refreshed 10x per second):
     Carrier offset  DC of demodulated MPX (station + SDR tuning error)
     AM / multipath  envelope ripple of the carrier, RMS, as % of 100% AM
                     (10% sine AM reads 10%; 0% = clean reception)
+    Sync AM         synchronous AM: the envelope ripple that follows the
+                    modulation, as the AM depth it reaches at +/-75 kHz, in %
+                    and dB. Mistuned transmitter, filter, combiner or antenna
+                    match causes it (Orban: <= -35 dB, -40 dB preferred). Read
+                    it where reception is clean (AM / multipath low), and
+                    compare readings (before/after a retune, dummy load vs
+                    antenna) rather than trust the absolute figure: the
+                    SDR's own filters add a little. '-' while the
+                    modulation is too light to judge
     Pilot           19 kHz injection, % of 75 kHz (>3% = stereo), and its
                     frequency from the stereo PLL (spec 19 kHz +/- 2 Hz)
     RDS injection   57 kHz subcarrier peak deviation, % of 75 kHz (as
                     encoders are set: 2 kHz = 2.7%), noise removed
+    RDS phase       the 57 kHz subcarrier against the pilot's third harmonic,
+                    over 5 s: 0 = in phase, +/-90 = quadrature (IEC 62106:
+                    either, +/-10 deg). 'drifting' = the RDS encoder isn't
+                    locked to the pilot (free-running, or its 19 kHz feed is
+                    lost or too low): late RadioText, skipped PS
     SCA 67/92 kHz   subcarrier injection, % of 75 kHz, when one stands
                     10 dB above the empty 77-82 kHz gap; else 'none'. What it
                     carries, from its demodulated signal over ~6 s: AUDIO
@@ -261,6 +275,11 @@ CHAN_CHUNK = 8192          # channel filters wait for this many outputs (~21 ms)
                            # thread each: 512 (~1.3 ms) cost ~25% more CPU in wake-ups.
                            # Needs CHAN_CHUNK * CHAN_DECIM < SRC_BUFFER.
 RDS_CREST = 1.443          # IEC 62106 RDS waveform: peak / RMS (random data)
+RDS_PHASE_S = 5            # RDS phase vs 3x pilot: averaged over this long; locked when
+RDS_LOCKED = 0.9           # ...the phase holds this steady (1 = constant, 0 = drifting)
+RDS_PHASE_TOL = 10.0       # IEC 62106: in phase or quadrature with 3x the pilot, +/-10 deg
+SYNC_AM_ALPHA = 0.05       # synchronous AM: smoothing per update (~2 s)
+SYNC_AM_MIN_MOD = 0.1      # ...judged only while the MPX RMS is at least this (7.5 kHz)
 GUARD_TO_AUDIO = (15e3 ** 3 / 3) / ((18.3e3 ** 3 - 16e3 ** 3) / 3 / 2.3e3)  # f^2 noise: 0-15 kHz power
                            # per (Hz of guard-band noise density)
 RTPLUS_LEAD_S = 3.0        # RT+ tags may come this far before or after the RadioText they tag
@@ -721,6 +740,10 @@ class FmMeter(gr.sync_block):
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
         self._env_sum = 0.0
+        self._env = []                                       # |IQ| chunks for this update
+        self._rds_win = None
+        self._rds_z = deque(maxlen=RDS_PHASE_S * UPDATE_HZ)  # RDS vs 3x pilot phasors (angle doubled)
+        self._sync = None                                    # synchronous AM regression sums
         self._settle = SETTLE_UPDATES
         self._reset = False
 
@@ -735,21 +758,24 @@ class FmMeter(gr.sync_block):
             self._reset = False
             self._chunks, self._count, self._iq_energy = [], 0, 0.0
             self._psd = self._rf = self._offset = self._am = None
-            self._env_sum = 0.0
-            for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms):
+            self._env_sum, self._env, self._sync = 0.0, [], None
+            for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._rds_z):
                 d.clear()
             self._over_prev = np.zeros(2, bool)
             self._settle = SETTLE_UPDATES
             self.stats = None
         self._iq_energy += float(np.vdot(iq, iq).real)
-        self._env_sum += float(np.sum(np.abs(iq)))
+        env = np.abs(iq)
+        self._env.append(env)
+        self._env_sum += float(np.sum(env))
         self._chunks.append(mpx.copy())
         self._count += len(mpx)
         if self._count >= self._period:
             self.last_update = time.monotonic()
             self.stats = self._measure(np.concatenate(self._chunks),
-                                       self._iq_energy / self._count, self._env_sum / self._count)
-            self._chunks, self._count, self._iq_energy, self._env_sum = [], 0, 0.0, 0.0
+                                       self._iq_energy / self._count, self._env_sum / self._count,
+                                       np.concatenate(self._env))
+            self._chunks, self._count, self._iq_energy, self._env_sum, self._env = [], 0, 0.0, 0.0, []
             if self._on_stats:
                 self._on_stats(self.stats)
         return len(input_items[0])
@@ -772,7 +798,75 @@ class FmMeter(gr.sync_block):
             return None
         return math.sqrt(2 * (power - floor)) * 100, _db(power / floor)
 
-    def _measure(self, x, iq_power, env_mean):
+    RDS_M = 640  # RDS phase: pilot and RDS as complex baseband at 6.4 kS/s (640 of the 10 Hz bins)
+
+    def _rds_phasor(self, x):
+        """RDS's 57 kHz subcarrier against the pilot's third harmonic, for one
+        update: a unit phasor at twice the phase difference, or None.
+
+        One FFT of the MPX (a Hann-windowed block of QUAD_RATE / UPDATE_HZ
+        samples: 10 Hz bins) gives both as complex baseband: the pilot
+        (18.9-19.1 kHz) shifted down 19 kHz, made unit size and cubed, is the
+        57 kHz reference; RDS (54.6-59.4 kHz) shifted down 57 kHz and
+        multiplied by its conjugate leaves the BPSK data times e^(j phase).
+        Squaring removes the data's sign, so the sum's angle is 2 x phase.
+        A delay anywhere in the chain moves the pilot's third harmonic and
+        RDS alike, so it cancels."""
+        n = int(QUAD_RATE / UPDATE_HZ)
+        if len(x) < n:
+            return None
+        if self._rds_win is None:
+            self._rds_win = np.hanning(n).astype(np.float32)
+        spec = np.fft.rfft(x[:n] * self._rds_win)
+        df = QUAD_RATE / n
+        m = self.RDS_M
+
+        def baseband(lo, hi, centre):
+            k0, k1, kc = round(lo / df), round(hi / df), round(centre / df)
+            buf = np.zeros(m, np.complex128)
+            buf[np.arange(k0 - kc, k1 - kc + 1) % m] = spec[k0:k1 + 1]
+            return np.fft.ifft(buf)
+
+        pilot = baseband(18.9e3, 19.1e3, 19e3)
+        ref = pilot / np.maximum(np.abs(pilot), 1e-30)
+        b = baseband(54.6e3, 59.4e3, 57e3) * np.conj(ref * ref * ref)
+        z = complex(np.sum(b * b))
+        return z / abs(z) if abs(z) > 0 else None
+
+    def _sync_am(self, x, env):
+        """Synchronous AM: the part of the carrier's envelope that follows the
+        modulation, as the AM depth it gives at +/-75 kHz, or None while the
+        modulation is too light to judge.
+
+        The relative envelope is fitted to a*x + b*(x^2 - mean) (x = MPX,
+        1.0 = 75 kHz): a sloped response (tuning off-centre) gives the x term,
+        one too narrow for the sidebands the x^2 term. Envelope ripple not
+        tied to the modulation (noise, hum, most multipath) averages out.
+        A fit, not a filter: every 4th sample (envelope and MPX at the same
+        instants) gives the same answer for a quarter of the CPU."""
+        n = min(len(x), len(env))
+        x, env = np.ascontiguousarray(x[:n:4]), np.ascontiguousarray(env[:n:4])
+        n = len(x)
+        mean = float(np.mean(env))
+        if mean <= 0:
+            return None
+        e = env / mean - 1.0
+        q = x * x
+        q -= float(np.mean(q))
+        sums = np.array([np.dot(x, x), np.dot(x, q), np.dot(q, q), np.dot(x, e), np.dot(q, e)],
+                        dtype=np.float64) / n
+        self._sync = self._smooth(self._sync, sums, SYNC_AM_ALPHA)
+        xx, xq, qq, xe, qe = self._sync
+        det = xx * qq - xq * xq
+        if xx < SYNC_AM_MIN_MOD ** 2 or det <= 0:
+            return None
+        a = (qq * xe - xq * qe) / det
+        b = (xx * qe - xq * xe) / det
+        t = np.linspace(-1.0, 1.0, 201)
+        fit = a * t + b * t * t
+        return float(np.max(fit) - np.min(fit)) / 2
+
+    def _measure(self, x, iq_power, env_mean, env=None):
         # Carrier offset = DC of the MPX; Hann-weighted so bass leaks less,
         # then smoothed over a few seconds.
         if len(x) != len(self._dc_win):
@@ -819,6 +913,7 @@ class FmMeter(gr.sync_block):
             # RMS ripple x sqrt(2): the % of a sine AM with the same RMS
             self._am = self._smooth(self._am, math.sqrt(2 * max(iq_power - env_mean ** 2, 0.0)) / env_mean, 0.3)
         over = np.sum(self._over, axis=0) if self._over else np.zeros(2)
+        sync_am = self._sync_am(x, env) if env is not None and not self._settle else None
 
         def band(lo, hi):
             return float(np.sum(self._psd[(self._freqs >= lo) & (self._freqs <= hi)])) + 1e-20
@@ -828,6 +923,20 @@ class FmMeter(gr.sync_block):
         # The guard band and RDS band got different demod corrections; apply the ratio.
         rds_noise = (noise_per_hz * (57e3 / 17.15e3) ** 2 * 4.8e3
                      * (np.sinc(17.15e3 / QUAD_RATE) / np.sinc(57e3 / QUAD_RATE)) ** 2)
+        pilot_pct = math.sqrt(2 * band(18.9e3, 19.1e3)) * 100
+        rds_pct = (math.sqrt(2 * (band(54.6e3, 59.4e3) - rds_noise)) * RDS_CREST * 100
+                   if band(54.6e3, 59.4e3) > 2 * rds_noise else 0.0)
+        # RDS phase against the pilot's third harmonic, while both are on air.
+        z = self._rds_phasor(x) if pilot_pct > 3.0 and rds_pct > 0.5 else None
+        if z is None:
+            self._rds_z.clear()
+        else:
+            self._rds_z.append(z)
+        rds_phase = rds_lock = None
+        if len(self._rds_z) >= UPDATE_HZ:  # a second's worth
+            zs = complex(np.sum(self._rds_z))
+            rds_lock = abs(zs) / len(self._rds_z)
+            rds_phase = math.degrees(np.angle(zs)) / 2  # (-90, 90]: 0 = in phase, +/-90 = quadrature
         return {
             'rf_dbfs': _db(self._rf),
             'snr_db': _db(0.5 / (noise_per_hz * GUARD_TO_AUDIO)),
@@ -841,10 +950,12 @@ class FmMeter(gr.sync_block):
             'mpx_dbr': _db(np.mean(self._mpx_ms) * MAX_DEV ** 2 / (19e3 ** 2 / 2)) if self._mpx_ms else -math.inf,
             'mpx_window_s': len(self._mpx_ms) / UPDATE_HZ,
             'am_pct': (self._am or 0.0) * 100,
-            'pilot_pct': math.sqrt(2 * band(18.9e3, 19.1e3)) * 100,
+            'sync_am_pct': None if sync_am is None else sync_am * 100,
+            'pilot_pct': pilot_pct,
             # Report RDS only when it stands 3 dB above the expected noise.
-            'rds_pct': (math.sqrt(2 * (band(54.6e3, 59.4e3) - rds_noise)) * RDS_CREST * 100
-                        if band(54.6e3, 59.4e3) > 2 * rds_noise else 0.0),
+            'rds_pct': rds_pct,
+            'rds_phase_deg': rds_phase,  # vs 3x the pilot; None without both
+            'rds_lock': rds_lock,        # 0-1: how steady that phase is
             **{f'sca{khz}_{key}': v for khz, lo, hi in ((67, 60e3, 74e3), (92, 85e3, 99e3))
                for key, v in zip(('pct', 'db'), self._sca(band, lo, hi) or (None, None))},
             # 500 Hz buckets centred on 0.5, 1.0 ... 100 kHz (so 19/38/57 kHz sit
@@ -3444,6 +3555,36 @@ def _pct_html(v, level):
     return _coloured(f'{v:.0f}%', level)
 
 
+def rds_phase(phase, lock):
+    """RDS phase vs 3x the pilot as (mode, level): mode 'in phase' |
+    'quadrature' | 'drifting' (not locked to the pilot), or (None, None)."""
+    if phase is None or lock is None:
+        return None, None
+    if lock < RDS_LOCKED:
+        return 'drifting', 'warn'
+    quad = abs(phase) > 45
+    err = abs(phase) - 90 if quad else phase
+    return ('quadrature' if quad else 'in phase'), ('alarm' if abs(err) > RDS_PHASE_TOL else None)
+
+
+def _rds_phase_html(phase, mode, level):
+    if mode is None:
+        return '-'
+    if mode == 'drifting':
+        return _coloured('drifting: not locked to the pilot', level)
+    return _coloured(f'{round(phase):+d}\u00b0 ({mode}, locked)', level)
+
+
+def _sync_am_db(pct):
+    return 20 * math.log10(pct / 100) if pct else -math.inf
+
+
+def _sync_am_html(pct, level):
+    if pct is None:
+        return '-'
+    return _coloured(f'{pct:.2f}%  ({_num(_sync_am_db(pct), "dB", ".0f")})', level)
+
+
 class _Ring:
     """The last n (time, row of values) pairs, oldest first from view()."""
 
@@ -3527,7 +3668,7 @@ class StationPanel(QtWidgets.QGroupBox):
          ('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')),
         ('Signal', 2, ('RF level', 'MPX S/N', 'Carrier offset', 'AM / multipath',
                        'Pilot (19 kHz)', 'Pilot freq', 'RDS injection', 'IBOC signal',
-                       'SCA 67 kHz', 'SCA 92 kHz'), ('SCA 67 kHz', 'SCA 92 kHz')),
+                       'RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz'), ('SCA 67 kHz', 'SCA 92 kHz')),
         ('Modulation', 2, ('Peak + / −', 'Peak deviation', 'Over 100%', 'Over 110%',
                            'L / R', 'L+R / L−R', 'MPX power', 'Limit'), ('Limit',)),
         ('MPX spectrum 0–100 kHz', 0, (), ()),
@@ -4107,6 +4248,14 @@ class StationPanel(QtWidgets.QGroupBox):
                      pos_pct=s['pos_pct'], neg_pct=s['neg_pct'], limit_pct=limit, limit_why=why,
                      dev_khz=s['peak_dev_khz'], over100_min=s['over100_min'], over110_min=s['over110_min'],
                      mpx_dbr=s['mpx_dbr'], mpx_window_s=s['mpx_window_s'], mpx_db=s['mpx_db'])
+            # RDS phase only for a station with RDS: an SCA's skirt or noise in the 57 kHz band has a phase too.
+            r['rds_phase_deg'] = s['rds_phase_deg'] if total else None
+            r['rds_phase_mode'], level = rds_phase(r['rds_phase_deg'], s['rds_lock'])
+            if level:
+                lv['rds_phase_deg'] = level
+            r['sync_am_pct'] = s['sync_am_pct']
+            if s['sync_am_pct'] is not None and _sync_am_db(s['sync_am_pct']) > -35:
+                lv['sync_am_pct'] = 'warn'
             if tol and abs(s['offset_hz']) > tol:
                 lv['offset_hz'] = 'alarm'
             if s['am_pct'] >= 10:
@@ -4214,6 +4363,8 @@ class StationPanel(QtWidgets.QGroupBox):
             else:
                 v['Pilot freq'].setText('-')
             v['RDS injection'].setText(f"{r['rds_pct']:.1f}%")
+            v['RDS phase'].setText(_rds_phase_html(r['rds_phase_deg'], r['rds_phase_mode'], lv.get('rds_phase_deg')))
+            v['Sync AM'].setText(_sync_am_html(r['sync_am_pct'], lv.get('sync_am_pct')))
             v['IBOC signal'].setText(self._iboc_text(r['iboc_found'], r['iboc_dbc']))
             for khz in (67, 92):
                 pct = r[f'sca{khz}_pct']
