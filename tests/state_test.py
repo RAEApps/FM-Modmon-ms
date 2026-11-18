@@ -117,8 +117,9 @@ states = settle(p, rds_seen=True, changes=changes)
 check('N+1: possibly-on-N+1 pending, then raised', 'pending' in [x['BACKUP'] for x in states]
       and states[-1]['BACKUP'] == 'raised', [x['BACKUP'] for x in states][:16])
 check('N+1: not shown as an RDS fault', states[-1]['RDS'] == 'clear', states[-1]['RDS'])
-check('N+1: the alarm pill says so', 'possibly on N+1 (backup transmitter has no RDS)' in p.alarm_label.text()
-      and 'RDS lost' not in p.alarm_label.text(), p.alarm_label.text())
+lamps = p.annunciator.states
+check('N+1: the annunciator lights N+1, not RDS', lamps.get('BACKUP') == 'raised' and lamps.get('RDS') == 'clear'
+      and rm.Annunciator.SHORT['BACKUP'] == 'N+1', lamps)
 check('N+1: the event names the backup and what is fine',
       [(d, up) for d, up, _ in changes] == [('possibly on N+1 (backup transmitter has no RDS)', True)]
       and 'no RDS encoder' in changes[0][2] and 'pilot' in changes[0][2], changes)

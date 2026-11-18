@@ -274,6 +274,8 @@ DC_CLEAR_HZ = 250e3        # SDR centre this far from every carrier: the RSP1A's
 IMAGE_CLEAR_HZ = 300e3     # each station's IQ image (mirrored about the centre) this far from every other carrier
 PLAY_GAIN = 0.7
 UPDATE_HZ = 10             # measurement and display rate
+TREND_S = 0.5              # sparklines and the histogram are redrawn this often
+TREND_SPAN_S = 300         # ...over this long
 MAX_RECEIVERS = 4          # receivers the app runs at once
 FM_BATCH = 2048            # Python meters get samples in batches (~8.5 ms),
 AUDIO_BATCH = 512          # so they are called ~100x/s, not ~900x/s; powers
@@ -2998,6 +3000,10 @@ class FmMonitor(gr.top_block):
 # --------------------------------------------------------------------------- GUI
 
 RED, GREEN, DIM, ACCENT = '#ff6b6b', '#69db7c', '#8c9197', '#8ab4f8'
+# High-performance HMI (ISA-101): normal readings are drawn in greys, so that
+# amber (abnormal, or not judged) and red (out of limits, alarm) stand out.
+NORMAL = '#7b8794'      # a bar or trace in its normal range
+TEXT_LIT = '#e3e4e6'    # a flag that is set, a value
 # Contrast (WCAG 2.1) on the dark backgrounds #16171a-#222328: text 4.5:1 or more
 # (DIM 4.9, muted #9aa0a6 5.9, the rest higher); control outlines 3:1 or more
 # (BORDER 3.3); disabled controls (exempt) stay readable at DISABLED 3.3.
@@ -3007,9 +3013,20 @@ LCD = 'background: #0b1a0b; border: 1px solid #1f3a1f; border-radius: 6px;'
 APP_QSS = """
 QWidget { font-family: "Segoe UI"; font-size: 9pt; }
 QToolTip { background: #2b2d31; color: #e0e0e0; border: 1px solid #3c4043; padding: 4px 6px; }
-QGroupBox#panel { background: #1c1d21; border: 1px solid #2c2e33; border-radius: 12px; }
+QFrame#row { background: #1e1f22; border: 1px solid #2e3035; border-radius: 6px; }
+QFrame#row[selected="true"] { background: #1f232a; border-color: #3d5f8f; }
+QFrame#detail { background: #1b1c20; border: 1px solid #3d5f8f; border-radius: 6px; }
+QLabel#colHead { color: #8c9197; font-family: Consolas; font-size: 7pt; font-weight: 600; letter-spacing: 1px; }
+QComboBox#freq { font-size: 15pt; font-weight: 600; padding: 0 4px; border-color: transparent; background: transparent; }
+QComboBox#freq:hover { border-color: %BORDER%; }
+QToolButton#rowBtn { padding: 0 4px; border-color: transparent; background: transparent; color: #9aa0a6; }
+QToolButton#rowBtn:hover { border-color: %BORDER%; color: #e0e0e0; }
+QTabBar#detailTabs::tab { background: transparent; color: #9aa0a6; padding: 2px 10px; border: none;
+                          border-radius: 4px; margin-left: 2px; }
+QTabBar#detailTabs::tab:selected { background: #2b2d31; color: #e3e4e6; }
+QTabBar#detailTabs::tab:hover { color: #e3e4e6; }
 QFrame#card { background: #222328; border: 1px solid #2a2c31; border-radius: 8px; }
-QLabel#cardTitle { color: #8ab4f8; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }
+QLabel#cardTitle { color: #9aa0a6; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }
 QLabel#chip { background: #24262b; border: 1px solid #30333a; border-radius: 10px; padding: 3px 10px; color: #c4c7cc; }
 QLabel#appTitle { font-size: 15pt; font-weight: 600; color: #e8eaed; padding-right: 8px; }
 QPushButton, QToolButton { background: #2b2d31; border: 1px solid %BORDER%; border-radius: 6px; padding: 5px 12px; }
@@ -3272,7 +3289,679 @@ class Meter(QtWidgets.QWidget):
         p.drawText(QtCore.QRectF(w - val_w, 0, val_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, self.text)
 
 
-RDS_FLAGS = ('TP', 'TA', 'music', 'stereo', 'AH', 'CMP')  # gr-rds flag string order (then static PTY)
+# Widths of a station row's fixed columns (the text column takes the rest); the
+# column headings above the rows use the same widths.
+ROW_COLS = (('station', 'Station', 250), ('text', 'Text · RT+ · flags', 0),
+            ('tapes', 'Now · peak hold · limit ▼', 300), ('trend', 'Trend · 5 min', 176),
+            ('alarms', 'Alarms', 150))
+TAPE_COLOURS = {None: NORMAL, 'warn': '#f0a35e', 'alarm': RED, 'off': '#5d6167'}
+
+
+class Tape(QtWidgets.QWidget):
+    """A slim labelled bar for the station rows and the detail cards: the value
+    from `origin` in its state's colour, the normal range as a band on the
+    track, an optional limit notch and (hold=True) a tick at the highest value
+    of the last HOLD_S, as on a modulation monitor's peak-hold bar."""
+    HOLD_S = 2.0
+
+    def __init__(self, name, lo, hi, band=None, origin=None, hold=False, name_w=34, val_w=92):
+        super().__init__()
+        self.name, self.lo, self.hi, self.band, self.hold = name, lo, hi, band, hold
+        self.origin = lo if origin is None else origin
+        self.name_w, self.val_w = name_w, val_w
+        self.value, self.text, self.state, self.limit, self.peak = None, '-', None, None, None
+        self._peaks = deque()
+        self._shown = None
+        self.setMinimumHeight(16)
+        self.setMinimumWidth(name_w + val_w + 60)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def sizeHint(self):
+        return QtCore.QSize(self.name_w + self.val_w + 160, 16)
+
+    def set_value(self, value, text, state=None, limit=None, band=None):
+        """value None: nothing to show. state: None (normal) | 'warn' | 'alarm' | 'off' (not judged)."""
+        now = time.monotonic()
+        if self.hold and value is not None and math.isfinite(value):
+            self._peaks.append((now, value))
+        while self._peaks and now - self._peaks[0][0] > self.HOLD_S:
+            self._peaks.popleft()
+        self.peak = max(v for _, v in self._peaks) if self._peaks else None
+        if band is not None:
+            self.band = band
+        self.value, self.text, self.state, self.limit = value, text, state, limit
+        shown = (value, text, state, limit, self.peak, self.band)
+        if shown != self._shown:
+            self._shown = shown
+            self.update()
+
+    def clear(self):
+        self._peaks.clear()
+        self.set_value(None, '-')
+
+    def _x(self, track, v):
+        v = min(max(v, self.lo), self.hi)
+        return track.left() + track.width() * (v - self.lo) / (self.hi - self.lo)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.drawText(QtCore.QRectF(0, 0, self.name_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.name)
+        track = QtCore.QRectF(self.name_w, h / 2 - 3.5, max(w - self.name_w - self.val_w - 6, 10), 7)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor('#2a2c31'))
+        p.drawRoundedRect(track, 2, 2)
+        if self.band:
+            a, b = self._x(track, self.band[0]), self._x(track, self.band[1])
+            p.setBrush(QtGui.QColor('#30353c'))
+            p.drawRect(QtCore.QRectF(a, track.top(), b - a, track.height()))
+        colour = QtGui.QColor(TAPE_COLOURS.get(self.state, TAPE_COLOURS[None]))
+        if self.value is not None and math.isfinite(self.value):
+            x0, x1 = sorted((self._x(track, self.origin), self._x(track, self.value)))
+            p.setBrush(colour)
+            p.drawRoundedRect(QtCore.QRectF(x0, track.top(), max(x1 - x0, 2), track.height()), 1.5, 1.5)
+        if self.origin != self.lo:
+            p.setPen(QtGui.QPen(QtGui.QColor('#5d6167'), 1))
+            x = self._x(track, self.origin)
+            p.drawLine(QtCore.QPointF(x, track.top() - 3), QtCore.QPointF(x, track.bottom() + 3))
+        if self.peak is not None:
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor('#e3e4e6'))
+            x = self._x(track, self.peak)
+            p.drawRect(QtCore.QRectF(x - 1, track.top() - 2, 2, track.height() + 4))
+        if self.limit is not None:
+            x = self._x(track, self.limit)
+            p.setPen(QtGui.QPen(QtGui.QColor(RED), 1))
+            p.drawLine(QtCore.QPointF(x, track.top() - 1), QtCore.QPointF(x, track.bottom() + 1))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(RED))
+            p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(x - 3.5, 0), QtCore.QPointF(x + 3.5, 0),
+                                           QtCore.QPointF(x, track.top() - 0.5)]))
+        font = p.font()
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QtGui.QColor('#e3e4e6') if self.state in (None, 'off') else colour)
+        p.drawText(QtCore.QRectF(w - self.val_w, 0, self.val_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
+                   self.text)
+
+
+class FreqCombo(QtWidgets.QComboBox):
+    """The station selector as a row's headline: shows only the frequency (the
+    list still names each station), and its list is as wide as the names."""
+
+    def paintEvent(self, event):
+        p = QtWidgets.QStylePainter(self)
+        opt = QtWidgets.QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        freq = self.currentData()
+        if freq:
+            opt.currentText = f'{freq / 1e6:.1f}'
+        p.drawComplexControl(QtWidgets.QStyle.CC_ComboBox, opt)
+        p.drawControl(QtWidgets.QStyle.CE_ComboBoxLabel, opt)
+
+    def sizeHint(self):
+        return QtCore.QSize(self.fontMetrics().horizontalAdvance('000.0') + 46, super().sizeHint().height())
+
+    minimumSizeHint = sizeHint
+
+    def showPopup(self):
+        self.view().setMinimumWidth(self.view().sizeHintForColumn(0) + 24)
+        super().showPopup()
+
+
+class StationRow(QtWidgets.QFrame):
+    """A receiver as one line in the main window (StationPanel fills it). A click
+    selects the receiver for the detail view; a double click pops its detail out."""
+
+    def __init__(self, on_click=None, on_double=None):
+        super().__init__()
+        self.setObjectName('row')
+        self.on_click, self.on_double = on_click, on_double
+        self.setProperty('selected', False)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+
+    def set_selected(self, on):
+        if self.property('selected') != on:
+            self.setProperty('selected', on)
+            self.style().unpolish(self)
+            self.style().polish(self)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self.on_click:
+            self.on_click()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self.on_double:
+            self.on_double()
+
+
+class Annunciator(QtWidgets.QWidget):
+    """Every alarm as a lamp in a fixed grid, in the same place on every row, like
+    a transmitter remote control's annunciator panel. The lamp's look says the
+    alarm's state (StationPanel._alarm_states); hover one for what it means."""
+    COLS = 4
+    SHORT = {'CARRIER': 'CARR', 'SILENCE': 'SIL', 'OVERMOD': 'OVMD', 'PILOT': 'PILOT', 'PILOT_SPEC': 'P.SPEC',
+             'SUBCARRIERS': 'SUBS', 'FREQUENCY': 'FREQ', 'RDS': 'RDS', 'BACKUP': 'N+1', 'PI': 'PI', 'ALERT': 'ALERT',
+             'DATA': 'DATA'}
+    # state: (fill, text, outline or None, hatched)
+    LOOK = {'clear': ('#26282d', '#7d838a', None, False),
+            'waiting': ('#26282d', '#4f545a', None, False),
+            'raised': ('#7a1f26', '#ffe0e0', '#c24a52', False),
+            'pending': ('#4a3a1c', '#f0a35e', None, False),
+            'suppressed': ('#26282d', '#f0a35e', None, True),
+            'off': (None, '#4f545a', '#3a3d44', False)}
+    MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, or no readings)',
+             'raised': 'RAISED', 'pending': 'its condition holds; raises once its delay has run',
+             'suppressed': 'not judged now: reception not clean enough for the technical rules',
+             'off': 'switched off for this receiver (Settings)'}
+
+    def __init__(self):
+        super().__init__()
+        self.states = {}
+        self.notes = {}
+        self.setMinimumHeight(50)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self.setMouseTracking(True)
+
+    def sizeHint(self):
+        return QtCore.QSize(150, 50)
+
+    def set_states(self, states, notes=None):
+        """states: {alarm: state}; notes: {alarm: extra text for its tooltip}."""
+        notes = notes or {}
+        if states != self.states or notes != self.notes:
+            self.states, self.notes = dict(states), dict(notes)
+            self.update()
+
+    def _cells(self):
+        rows = (len(ALARM_DEFS) + self.COLS - 1) // self.COLS
+        w, h, gap = self.width(), self.height(), 2
+        cw, ch = (w - gap * (self.COLS - 1)) / self.COLS, (h - gap * (rows - 1)) / rows
+        for i, (name, desc, _) in enumerate(ALARM_DEFS):
+            r, c = divmod(i, self.COLS)
+            yield name, desc, QtCore.QRectF(c * (cw + gap), r * (ch + gap), cw, ch)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        font = QtGui.QFont('Consolas')
+        font.setPointSizeF(7)
+        font.setBold(True)
+        p.setFont(font)
+        for name, _, rect in self._cells():
+            fill, text, outline, hatched = self.LOOK[self.states.get(name, 'waiting')]
+            p.setPen(QtCore.Qt.NoPen)
+            if fill:
+                p.setBrush(QtGui.QColor(fill))
+                p.drawRoundedRect(rect, 2, 2)
+            if hatched:
+                p.setBrush(QtGui.QBrush(QtGui.QColor('#5a4424'), QtCore.Qt.BDiagPattern))
+                p.drawRoundedRect(rect, 2, 2)
+            if outline:
+                p.setPen(QtGui.QPen(QtGui.QColor(outline), 1, QtCore.Qt.SolidLine if fill else QtCore.Qt.DashLine))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2)
+            p.setPen(QtGui.QColor(text))
+            p.drawText(rect, QtCore.Qt.AlignCenter, self.SHORT[name])
+
+    def event(self, event):
+        if event.type() == QtCore.QEvent.ToolTip:
+            for name, desc, rect in self._cells():
+                if rect.contains(QtCore.QPointF(event.pos())):
+                    state = self.states.get(name, 'waiting')
+                    tip = f'<b>{self.SHORT[name]}</b>: {desc}<br>{self.MEANS[state]}'
+                    if self.notes.get(name):
+                        tip += f'<br>{_html(self.notes[name])}'
+                    QtWidgets.QToolTip.showText(event.globalPos(), tip, self, rect.toRect())
+                    return True
+            QtWidgets.QToolTip.hideText()
+            return True
+        return super().event(event)
+
+
+def bucket(t, v, span, n, peak=True, end=None):
+    """Readings (times t, values v) over the last `span` seconds into n equal
+    buckets, oldest first: each bucket's maximum (peak) or mean; NaN where empty."""
+    out = np.full(n, np.nan)
+    if not len(t):
+        return out
+    end = t[-1] if end is None else end
+    keep = (t > end - span) & np.isfinite(v)
+    t, v = t[keep], v[keep]
+    if not len(t):
+        return out
+    i = np.clip(((t - (end - span)) / span * n).astype(int), 0, n - 1)
+    if peak:
+        np.fmax.at(out, i, v)
+    else:
+        sums, counts = np.zeros(n), np.zeros(n)
+        np.add.at(sums, i, v)
+        np.add.at(counts, i, 1)
+        with np.errstate(invalid='ignore'):
+            out = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+    return out
+
+
+class Spark(QtWidgets.QWidget):
+    """A word-sized trend (Tufte's sparkline): the last few minutes of one reading
+    as a filled line on a fixed scale, a dashed limit with the excursions over it
+    filled red, a dotted reference line, and a dot on the newest value."""
+
+    def __init__(self, lo, hi, limit=None, ref=None, height=26):
+        super().__init__()
+        self.lo, self.hi, self.limit, self.ref = lo, hi, limit, ref
+        self.data = np.array([])
+        self.excess = RED
+        self.setFixedHeight(height)
+        self.setMinimumWidth(80)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def set_data(self, values, limit=None, excess=RED):
+        """values: bucketed readings, oldest first (NaN: no reading); excess: the
+        colour of excursions over the limit (amber while the limit isn't judged)."""
+        self.data = np.asarray(values, dtype=float)
+        self.excess = excess
+        self.limit = limit if limit is not None else self.limit
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(self.rect(), QtGui.QColor('#1a1b1f'))
+        n = len(self.data)
+
+        def y(v):
+            v = min(max(v, self.lo), self.hi)
+            return h - 2 - (h - 4) * (v - self.lo) / (self.hi - self.lo)
+
+        def x(i):
+            return 1 + i * (w - 2) / max(n - 1, 1)
+
+        if self.ref is not None:
+            p.setPen(QtGui.QPen(QtGui.QColor('#5d6167'), 1, QtCore.Qt.DotLine))
+            p.drawLine(QtCore.QPointF(0, y(self.ref)), QtCore.QPointF(w, y(self.ref)))
+        if n:
+            ok = np.isfinite(self.data)
+            # one filled run per stretch of readings (a gap stays a gap)
+            runs, start = [], None
+            for i in range(n + 1):
+                if i < n and ok[i]:
+                    start = i if start is None else start
+                elif start is not None:
+                    runs.append((start, i))
+                    start = None
+            colour = QtGui.QColor(TAPE_COLOURS[None])
+            for a, b in runs:
+                pts = [QtCore.QPointF(x(i), y(self.data[i])) for i in range(a, b)]
+                fill = QtGui.QPolygonF([QtCore.QPointF(x(a), h - 2)] + pts + [QtCore.QPointF(x(b - 1), h - 2)])
+                c = QtGui.QColor(colour)
+                c.setAlpha(45)
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(c)
+                p.drawPolygon(fill)
+                p.setPen(QtGui.QPen(colour, 1.1))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawPolyline(QtGui.QPolygonF(pts))
+            if self.limit is not None:
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(QtGui.QColor(self.excess))
+                for i in np.nonzero(ok & (self.data > self.limit))[0]:
+                    p.drawRect(QtCore.QRectF(x(i) - 0.8, y(self.data[i]), 1.8, y(self.limit) - y(self.data[i])))
+            last = np.nonzero(ok)[0]
+            if len(last):
+                p.setBrush(QtGui.QColor('#e3e4e6'))
+                p.drawEllipse(QtCore.QPointF(x(last[-1]), y(self.data[last[-1]])), 2, 2)
+        if self.limit is not None:
+            p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
+            p.drawLine(QtCore.QPointF(0, y(self.limit)), QtCore.QPointF(w, y(self.limit)))
+
+
+class PeakHistogram(QtWidgets.QWidget):
+    """How peak modulation spreads: the share of updates (10 a second) at each
+    peak level over the last few minutes, log height, in 2% bins. A tight peak
+    just under the limit is a processed station; a tail past it, overshoot that a
+    per-minute count flattens (the SOFIA 568's program-dynamics histogram)."""
+    LO, HI, STEP = 60, 130, 2
+
+    def __init__(self):
+        super().__init__()
+        self.counts, self.limit = None, None
+        self.setFixedHeight(64)
+        self.setMinimumWidth(160)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def set_data(self, peaks, limit):
+        peaks = np.asarray(peaks, dtype=float)
+        peaks = peaks[np.isfinite(peaks)]
+        edges = np.arange(self.LO, self.HI + self.STEP, self.STEP)
+        self.counts = np.histogram(np.clip(peaks, self.LO, self.HI - 1e-6), edges)[0] if len(peaks) else None
+        self.limit = limit
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        fm_ = p.fontMetrics()
+        axis = fm_.height()
+        top, bottom = 2, h - axis - 1
+        n = (self.HI - self.LO) // self.STEP
+
+        def x(pct):
+            return w * (pct - self.LO) / (self.HI - self.LO)
+
+        p.fillRect(QtCore.QRectF(0, top, w, bottom - top), QtGui.QColor('#1a1b1f'))
+        p.setPen(QtGui.QColor('#9aa0a6'))
+        for pct in range(self.LO, self.HI, 10):
+            left_ = pct == self.LO
+            p.drawText(QtCore.QRectF(x(pct) - (0 if left_ else 20), bottom + 1, 40, axis),
+                       QtCore.Qt.AlignLeft if left_ else QtCore.Qt.AlignHCenter, f'{pct}%' if pct % 20 == 0 else str(pct))
+        if self.counts is not None and self.counts.max() > 0:
+            top_log = math.log1p(self.counts.max())
+            bw = w / n
+            p.setPen(QtCore.Qt.NoPen)
+            for i, c in enumerate(self.counts):
+                if not c:
+                    continue
+                lo = self.LO + i * self.STEP
+                colour = RED if self.limit is not None and lo >= self.limit else AMBER if lo >= 100 else TAPE_COLOURS[None]
+                bh = (bottom - top) * math.log1p(c) / top_log
+                p.setBrush(QtGui.QColor(colour))
+                p.drawRect(QtCore.QRectF(i * bw + 0.5, bottom - bh, bw - 1, bh))
+        if self.limit is not None:
+            p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
+            p.drawLine(QtCore.QPointF(x(self.limit), top), QtCore.QPointF(x(self.limit), bottom))
+
+
+def alarm_episodes(log, end):
+    """The alarm log's raise/clear pairs as [(name, start, stop or None while raised)]."""
+    out, open_ = [], {}
+    for t, name, raised in log:
+        if raised:
+            open_.setdefault(name, t)
+        elif name in open_:
+            out.append((name, open_.pop(name), t))
+    out += [(name, t, None) for name, t in open_.items()]
+    return sorted(out, key=lambda e: e[1])
+
+
+def duration_text(seconds):
+    s = int(max(seconds, 0))
+    if s < 60:
+        return f'{s} s'
+    if s < 3600:
+        return f'{s // 60} min {s % 60:02d} s'
+    return f'{s // 3600} h {s % 3600 // 60:02d} min'
+
+
+class HistoryStrips(QtWidgets.QWidget):
+    """A receiver's readings over one time span as stacked strips on one time
+    axis, with the alarm episodes underneath, and one cursor (follows the mouse)
+    that reads every strip at the same instant, as on the Inovonics 541's
+    history plots. Peak readings show each pixel's maximum, the rest its mean."""
+    # title, unit, history keys, low, high, peak?, reference line
+    STRIPS = (('Peak modulation', '%', ('pos_pct', 'neg_pct'), 0, 130, True, 100),
+              ('RF level', 'dBFS', ('rf_dbfs',), -90, -10, False, None),
+              ('MPX S/N', 'dB', ('snr_db',), 0, 70, False, None),
+              ('AM / multipath', '%', ('am_pct',), 0, 40, True, PEAK_AM_PCT),
+              ('Pilot', '%', ('pilot_pct',), 0, 12, False, None),
+              ('RDS groups', '/s', ('rds_rate',), 0, 12, False, None),
+              ('Loudness S', 'LUFS', ('short_term',), -40, 0, False, -23),
+              ('MPX power', 'dBr', ('mpx_dbr',), -12, 6, False, 0))
+    STRIP_H, LABEL_W, ALARM_H = 34, 150, 22
+
+    def __init__(self, panel):
+        super().__init__()
+        self.panel = panel
+        self.span = 300
+        self.cursor_x = None
+        self._data = None      # (end time, [(strip values)], episodes)
+        self.setMouseTracking(True)
+        self.setMinimumHeight(len(self.STRIPS) * self.STRIP_H + self.ALARM_H + 22)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def refresh(self):
+        h = self.panel.history
+        end = time.time()
+        # one point per pixel, but no finer than the readings (a gap would break the line)
+        rate = UPDATE_HZ if self.span <= History.FAST_S else 1
+        n = min(max(self.width() - self.LABEL_W - 8, 50), int(self.span * rate))
+        strips = []
+        for _, _, keys, *_rest in self.STRIPS:
+            peak = _rest[2]
+            rows = [bucket(*h.series(k, self.span), self.span, n, peak, end) for k in keys]
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                strips.append(np.nanmax(rows, axis=0) if len(rows) > 1 else rows[0])
+        self._data = (end, strips, alarm_episodes(h.alarm_log, end))
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self.cursor_x = event.pos().x() if event.pos().x() >= self.LABEL_W else None
+        self.update()
+
+    def leaveEvent(self, event):
+        self.cursor_x = None
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w = self.width()
+        left, right = self.LABEL_W, w - 8
+        fm_ = p.fontMetrics()
+        if not self._data:
+            return
+        end, strips, episodes = self._data
+        n = len(strips[0])
+        at = None
+        if self.cursor_x is not None and right > left:
+            at = int(min(max((self.cursor_x - left) / (right - left) * n, 0), n - 1))
+        for k, ((title, unit, _, lo, hi, _, ref), values) in enumerate(zip(self.STRIPS, strips)):
+            top = k * self.STRIP_H
+            box = QtCore.QRectF(left, top + 2, right - left, self.STRIP_H - 4)
+            p.fillRect(box, QtGui.QColor('#141518'))
+
+            def y(v):
+                v = min(max(v, lo), hi)
+                return box.bottom() - box.height() * (v - lo) / (hi - lo)
+
+            limit = self.panel.readings.get('limit_pct') if title == 'Peak modulation' else None
+            for line, style in ((ref, QtCore.Qt.DotLine), (limit, QtCore.Qt.DashLine)):
+                if line is not None:
+                    p.setPen(QtGui.QPen(QtGui.QColor(RED if style == QtCore.Qt.DashLine else '#5d6167'), 1, style))
+                    p.drawLine(QtCore.QPointF(left, y(line)), QtCore.QPointF(right, y(line)))
+            p.setPen(QtGui.QPen(QtGui.QColor(TAPE_COLOURS[None]), 1.1))
+            pts, last = [], None
+            gap = max(2, 2 * n / self.span)   # buckets: a gap over 2 s breaks the line
+            for i in np.nonzero(np.isfinite(values))[0]:
+                if last is not None and i - last > gap:
+                    p.drawPolyline(QtGui.QPolygonF(pts))
+                    pts = []
+                pts.append(QtCore.QPointF(left + (right - left) * (i + 0.5) / n, y(values[i])))
+                last = i
+            if len(pts) > 1:
+                p.drawPolyline(QtGui.QPolygonF(pts))
+            if limit is not None:
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(QtGui.QColor(RED))
+                for i in np.nonzero(np.isfinite(values) & (values > limit))[0]:
+                    x = left + (right - left) * (i + 0.5) / n
+                    p.drawRect(QtCore.QRectF(x - 0.7, y(values[i]), 1.6, y(limit) - y(values[i])))
+            if at is not None:   # the reading nearest the cursor
+                near = [values[i] for i in range(max(at - 2, 0), min(at + 3, n)) if math.isfinite(values[i])]
+                shown = near[len(near) // 2] if near else math.nan
+            else:
+                shown = next((v for v in values[::-1] if math.isfinite(v)), math.nan)
+            p.setPen(QtGui.QColor('#9aa0a6'))
+            p.drawText(QtCore.QRectF(4, top, left - 10, self.STRIP_H / 2 + 2), QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom,
+                       title)
+            p.setPen(QtGui.QColor('#e3e4e6'))
+            p.drawText(QtCore.QRectF(4, top + self.STRIP_H / 2, left - 10, self.STRIP_H / 2),
+                       QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
+                       f'{shown:.1f} {unit}' if math.isfinite(shown) else '-')
+        # alarm episodes, on the same time axis
+        top = len(self.STRIPS) * self.STRIP_H
+        box = QtCore.QRectF(left, top + 2, right - left, self.ALARM_H - 4)
+        p.fillRect(box, QtGui.QColor('#141518'))
+        start = end - self.span
+
+        def tx(t):
+            return left + (right - left) * (t - start) / self.span
+
+        active_at = []
+        t_at = start + (at + 0.5) / n * self.span if at is not None else None
+        p.setPen(QtCore.Qt.NoPen)
+        for name, a, b in episodes:
+            b_ = end if b is None else b
+            if b_ < start:
+                continue
+            x0, x1 = tx(max(a, start)), tx(b_)
+            p.setBrush(QtGui.QColor(RED))
+            p.drawRect(QtCore.QRectF(x0, box.top(), max(x1 - x0, 2), box.height()))
+            if x1 - x0 > fm_.horizontalAdvance(Annunciator.SHORT[name]) + 6:
+                p.setPen(QtGui.QColor('#ffe0e0'))
+                p.drawText(QtCore.QRectF(x0, box.top(), x1 - x0, box.height()), QtCore.Qt.AlignCenter,
+                           Annunciator.SHORT[name])
+                p.setPen(QtCore.Qt.NoPen)
+            if t_at is not None and a <= t_at <= b_:
+                active_at.append(Annunciator.SHORT[name])
+        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.drawText(QtCore.QRectF(4, top, left - 10, self.ALARM_H), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                   'Alarms' + (f': {", ".join(active_at)}' if active_at else ''))
+        # time axis and the cursor
+        axis_top = top + self.ALARM_H
+        for frac in (0, 0.25, 0.5, 0.75, 1):
+            x = left + (right - left) * frac
+            ago = self.span * (1 - frac)
+            text = 'now' if not ago else (f'−{ago / 60:g} min' if ago >= 60 else f'−{ago:g} s')
+            align = QtCore.Qt.AlignLeft if frac == 0 else QtCore.Qt.AlignRight if frac == 1 else QtCore.Qt.AlignHCenter
+            rect = QtCore.QRectF(x - (0 if frac == 0 else 60 if frac == 1 else 30), axis_top + 2, 60, fm_.height())
+            p.drawText(rect, align, text)
+        if t_at is not None:
+            x = left + (right - left) * (at + 0.5) / n
+            p.setPen(QtGui.QPen(QtGui.QColor('#e3e4e6'), 1))
+            p.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, axis_top))
+            p.drawText(QtCore.QRectF(x + 4, axis_top + 2, 120, fm_.height()), QtCore.Qt.AlignLeft,
+                       time.strftime('%H:%M:%S', time.localtime(t_at)))
+
+
+class HistoryView(QtWidgets.QWidget):
+    """The detail view's History tab: a span to look back over and the strips."""
+    SPANS = (('1 min', 60), ('5 min', 300), ('1 hour', 3600))
+
+    def __init__(self, panel):
+        super().__init__()
+        box = QtWidgets.QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+        head = QtWidgets.QHBoxLayout()
+        self.span = QtWidgets.QComboBox()
+        for label, seconds in self.SPANS:
+            self.span.addItem(label, seconds)
+        self.span.setCurrentIndex(1)
+        self.span.activated.connect(lambda i: self._set_span(self.span.itemData(i)))
+        note = QtWidgets.QLabel('Hover to read every strip at one moment. Up to 5 min: every update; '
+                                'beyond: one point a second (peaks: its highest). Alarms: the last 24 h.')
+        note.setStyleSheet('color: #8c9197;')
+        head.addWidget(QtWidgets.QLabel('Span'))
+        head.addWidget(self.span)
+        head.addWidget(note, 1)
+        box.addLayout(head)
+        self.strips = HistoryStrips(panel)
+        box.addWidget(self.strips)
+        box.addStretch(1)
+
+    def _set_span(self, seconds):
+        self.strips.span = seconds
+        self.strips.refresh()
+
+    def refresh(self):
+        self.strips.refresh()
+
+
+class AlarmTable(QtWidgets.QTableWidget):
+    """The alarms of this session, one row per alarm (raised to cleared) with how
+    long it lasted, newest first; the ones still raised in red, their time running."""
+    COLS = ('Raised', 'Station', 'Alarm', 'Duration', 'Cleared', 'Measured')
+
+    def __init__(self):
+        super().__init__(0, len(self.COLS))
+        self.setHorizontalHeaderLabels(self.COLS)
+        self.verticalHeader().hide()
+        self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.setShowGrid(False)
+        self.setWordWrap(False)
+        hh = self.horizontalHeader()
+        hh.setStretchLastSection(True)
+        for i, w in enumerate((130, 120, 200, 100, 70)):
+            self.setColumnWidth(i, w)
+        self.verticalHeader().setDefaultSectionSize(20)
+        self.episodes = []   # {'key', 'station', 'desc', 'start', 'end' (None while raised), 'detail'}
+
+    def raised(self, key, station, desc, detail, t=None):
+        """key: which receiver and station (its title can change while the alarm is up)."""
+        self.episodes.append({'key': key, 'station': station, 'desc': desc, 'start': t or time.time(), 'end': None,
+                              'detail': detail})
+        self.episodes = self.episodes[-500:]
+        self.redraw()
+
+    def cleared(self, key, desc, t=None):
+        for e in reversed(self.episodes):
+            if e['key'] == key and e['desc'] == desc and e['end'] is None:
+                e['end'] = t or time.time()
+                break
+        self.redraw()
+
+    def raised_now(self):
+        return sum(e['end'] is None for e in self.episodes)
+
+    def redraw(self):
+        """Fill the table (and keep the running durations going): call once a second."""
+        now = time.time()
+        rows = list(reversed(self.episodes))
+        if self.rowCount() != len(rows):
+            self.setRowCount(len(rows))
+        for r, e in enumerate(rows):
+            on = e['end'] is None
+            cells = (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(e['start'])), e['station'], e['desc'],
+                     duration_text((now if on else e['end']) - e['start']) + (' …' if on else ''),
+                     'raised' if on else time.strftime('%H:%M:%S', time.localtime(e['end'])), e['detail'])
+            for c, text in enumerate(cells):
+                item = self.item(r, c)
+                if item is None:
+                    item = QtWidgets.QTableWidgetItem()
+                    self.setItem(r, c, item)
+                if item.text() != text:
+                    item.setText(text)
+                    item.setToolTip(text)
+                item.setForeground(QtGui.QColor(RED if on else '#c4c7cc'))
+
+
+def column_heads():
+    """The headings over the station rows, at the rows' column widths."""
+    head = QtWidgets.QWidget()
+    box = QtWidgets.QHBoxLayout(head)
+    box.setContentsMargins(11, 0, 11, 0)
+    box.setSpacing(12)
+    for _, title, width in ROW_COLS:
+        label = QtWidgets.QLabel(title.upper())
+        label.setObjectName('colHead')
+        if width:
+            label.setFixedWidth(width)
+            box.addWidget(label)
+        else:
+            box.addWidget(label, 1)
+    box.addSpacing(30)   # the row's settings / remove buttons
+    return head
+
+
+RDS_FLAGS =('TP', 'TA', 'music', 'stereo', 'AH', 'CMP')  # gr-rds flag string order (then static PTY)
 
 
 def rds_flags(f):
@@ -3289,7 +3978,7 @@ def _flags_html(flags):
         return '-'
 
     def lit(name, on):
-        return f'<b style="color:{RED}">{name}</b>' if on else f'<span style="color:{DIM}">{name}</span>'
+        return f'<b style="color:{TEXT_LIT}">{name}</b>' if on else f'<span style="color:{DIM}">{name}</span>'
 
     return ' '.join([
         lit('TP', flags['TP']), lit('TA', flags['TA']),
@@ -3316,8 +4005,8 @@ class MpxSpectrum(QtWidgets.QWidget):
     19 kHz pilot, the 38 kHz stereo subcarrier and 57 kHz RDS."""
 
     TOP, BOTTOM, MAX_KHZ = 0.0, -70.0, 100.0
-    MARKERS = ((19, 'pilot', GREEN), (38, '38k', '#9aa0a6'), (57, 'RDS', ACCENT),
-               (67, 'SCA', '#f0a35e'), (92, 'SCA', '#f0a35e'))
+    MARKERS = ((19, 'pilot', '#9aa0a6'), (38, '38k', '#6d737a'), (57, 'RDS', '#9aa0a6'),
+               (67, 'SCA', '#6d737a'), (92, 'SCA', '#6d737a'))
 
     def __init__(self):
         super().__init__()
@@ -3363,9 +4052,9 @@ class MpxSpectrum(QtWidgets.QWidget):
             fill.append(QtCore.QPointF(x(khz[-1]), bottom))
             fill.append(QtCore.QPointF(x(0), bottom))
             p.setPen(QtCore.Qt.NoPen)
-            p.setBrush(QtGui.QColor(79, 179, 191, 60))
+            p.setBrush(QtGui.QColor(159, 176, 191, 50))
             p.drawPolygon(fill)
-            p.setPen(QtGui.QPen(QtGui.QColor('#4fb3bf'), 1.2))
+            p.setPen(QtGui.QPen(QtGui.QColor('#9fb0bf'), 1.1))
             p.setBrush(QtCore.Qt.NoBrush)
             p.drawPolyline(trace)
 
@@ -3452,15 +4141,15 @@ class StereoWindow(QtWidgets.QDialog):
 
     READOUTS = ('Correlation', 'Balance', 'Width (S/M)', 'Level L/R')
 
-    def __init__(self, panel):
-        super().__init__(panel)
+    def __init__(self, panel, parent):
+        super().__init__(parent)
         self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
         self.resize(560, 660)
         layout = QtWidgets.QVBoxLayout(self)
         self.scope = Goniometer(size=None, history=8, points=None)
         self.scope.setMinimumSize(300, 300)
         layout.addWidget(self.scope, 1)
-        self.phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,))
+        self.phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))
         layout.addWidget(self.phase)
         self.readouts = QtWidgets.QLabel('')
         self.readouts.setAlignment(QtCore.Qt.AlignCenter)
@@ -3840,24 +4529,12 @@ class History:
 JUDGED_CLEAN = ('OVERMOD', 'PILOT_SPEC', 'SUBCARRIERS', 'FREQUENCY')
 
 
-class StationPanel(QtWidgets.QGroupBox):
-    # (title, columns, readouts, readouts long enough to get a full-width row at the end)
-    SECTIONS = (
-        ('RDS', 2, ('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss',
-                    'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'),
-         ('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')),
-        ('Signal', 2, ('RF level', 'MPX S/N', 'Carrier offset', 'AM / multipath',
-                       'Pilot (19 kHz)', 'Pilot freq', 'RDS injection', 'IBOC signal',
-                       'RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz'), ('SCA 67 kHz', 'SCA 92 kHz')),
-        ('Modulation', 2, ('Peak + / −', 'Peak deviation', 'Over 100%', 'Over 110%',
-                           'L / R', 'L+R / L−R', 'MPX power', 'Limit'), ('Limit',)),
-        ('MPX spectrum 0–100 kHz', 0, (), ()),
-        ('Loudness', 2, ('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), ()),
-        ('Stereo image', 1, ('Level L/R', 'Balance', 'Correlation', 'Width (S/M)'), ()),
-    )
+class StationPanel(QtCore.QObject):
+    """One receiver: measures it, judges its alarms, keeps its history, and shows
+    it as a station row (self.row) and a detail view (self.detail)."""
 
     def __init__(self, station, stations, on_play, on_select, iboc_scan=None, on_remove=None, on_settings=None,
-                 on_source=None, radiodns=None, country='CA'):
+                 on_source=None, radiodns=None, country='CA', on_focus=None, on_pop=None):
         super().__init__()
         self.station = station
         self.slot = 0
@@ -3876,73 +4553,189 @@ class StationPanel(QtWidgets.QGroupBox):
         self.history = History()
         self._web_lists = None  # (stations, sources) for the web page; None = rebuild
         self.setObjectName('panel')
+        self.on_focus, self.on_pop = on_focus, on_pop
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        # ---- the station row: station, text, tapes, alarms, settings / remove
+        self.row = StationRow(lambda: self.on_focus and self.on_focus(self),
+                              lambda: self.on_pop and self.on_pop(self))
+        row = QtWidgets.QHBoxLayout(self.row)
+        row.setContentsMargins(10, 5, 6, 5)
+        row.setSpacing(12)
+        widths = {key: w for key, _, w in ROW_COLS}
 
         # Station selector: every station the scan found; ones that can't share
-        # the SDR window with the other two receivers are greyed out.
-        self.combo = QtWidgets.QComboBox()
-        self.combo.setStyleSheet('font-size: 20pt; font-weight: bold; padding: 2px 8px;')
+        # the SDR window with the other receivers are greyed out.
+        self.combo = FreqCombo()
+        self.combo.setObjectName('freq')
         for freq, snr in stations:
             self.combo.addItem(f'{freq / 1e6:.1f} MHz', freq)
             if snr is not None:
                 self.combo.setItemData(self.combo.count() - 1,
                                        f'scan: {snr:.0f} dB above noise', QtCore.Qt.ToolTipRole)
         self.combo.setCurrentIndex(self.combo.findData(station.freq_hz))
+        self.combo.setToolTip('Station: choose another to retune this receiver')
         self.combo.activated.connect(lambda i: on_select(self, self.combo.itemData(i)))
-        self.remove_btn = QtWidgets.QToolButton()
-        self.remove_btn.setText('\u2715')
-        self.remove_btn.setToolTip('Remove this receiver')
-        self.remove_btn.setStyleSheet('font-size: 13pt; padding: 4px 10px;')
-        self.remove_btn.clicked.connect(lambda: on_remove(self) if on_remove else None)
-        self.settings_btn = QtWidgets.QToolButton()
-        self.settings_btn.setText('\u2699')
-        self.settings_btn.setToolTip('Settings for this receiver')
-        self.settings_btn.setStyleSheet('font-size: 13pt; padding: 4px 10px;')
-        self.settings_btn.clicked.connect(lambda: on_settings(self) if on_settings else None)
-        combo_row = QtWidgets.QHBoxLayout()
-        combo_row.addWidget(self.combo, 1)
-        combo_row.addWidget(self.settings_btn)
-        combo_row.addWidget(self.remove_btn)
-
         self.ps = QtWidgets.QLabel('--------')
         self.ps.setTextFormat(QtCore.Qt.PlainText)
         self.ps.setAlignment(QtCore.Qt.AlignCenter)
-        self.ps.setStyleSheet(LCD + 'font-family: Consolas, monospace; font-size: 18pt;'
-                              'font-weight: bold; color: #7cfc7c; padding: 2px;')
-        # Radiotext: up to 64 characters, always on one line; RT+ tags under it.
+        ps_font = QtGui.QFont('Consolas', 12, QtGui.QFont.Bold)
+        self.ps.setFont(ps_font)
+        self.ps.setStyleSheet(LCD + 'font-family: Consolas; font-size: 12pt; font-weight: bold;'
+                              'color: #7cfc7c; padding: 1px 4px; border-radius: 4px;')
+        self.ps.setFixedWidth(QtGui.QFontMetrics(ps_font).horizontalAdvance('M' * 8) + 14)
+        # DYNAMIC PS: an amber chip beside the PS, shown only while it applies
+        self.ps_mode = QtWidgets.QLabel('DYN')
+        self.ps_mode.setStyleSheet('border-radius: 3px; padding: 1px 4px; font-weight: 600; font-size: 7pt;'
+                                   'background: #33363c; color: #e3e4e6; border: 1px solid #44474e;')
+        self.ps_mode.setToolTip('Dynamic PS: the PS has changed 3 or more times in the last '
+                                f'{DYNAMIC_PS_S} s (scrolling or block text)')
+        self.ps_mode.hide()
+        self.meta = QtWidgets.QLabel('')
+        self.meta.setTextFormat(QtCore.Qt.RichText)
+        self.meta.setStyleSheet('color: #8c9197; font-size: 8pt;')
+        self.meta.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        station_box = QtWidgets.QWidget()
+        station_box.setFixedWidth(widths['station'])
+        sb = QtWidgets.QVBoxLayout(station_box)
+        sb.setContentsMargins(0, 0, 0, 0)
+        sb.setSpacing(2)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(6)
+        top.addWidget(self.combo)
+        top.addWidget(self.ps)
+        top.addWidget(self.ps_mode)
+        top.addStretch(1)
+        sb.addLayout(top)
+        sb.addWidget(self.meta)
+        row.addWidget(station_box)
+
+        # Radiotext: up to 64 characters on one line (cut at the column edge, all
+        # of it in the tooltip); RT+ tags, else the RDS flags, under it.
         self.rt = QtWidgets.QLabel('')
         self.rt.setTextFormat(QtCore.Qt.PlainText)
-        rt_font = QtGui.QFont('Consolas', 10)
-        self.rt.setFont(rt_font)
-        self.rt.setStyleSheet(LCD + 'color: #cfe8cf; padding: 4px 6px; font-family: Consolas; font-size: 10pt;')
-        self.rt.setMinimumWidth(QtGui.QFontMetrics(rt_font).horizontalAdvance('M' * 64) + 16)
+        self.rt.setFont(QtGui.QFont('Consolas', 10))
+        self.rt.setStyleSheet(LCD + 'color: #cfe8cf; padding: 2px 6px; font-family: Consolas; font-size: 10pt;'
+                              'border-radius: 4px;')
+        self.rt.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.rt.setMinimumHeight(QtGui.QFontMetrics(self.rt.font()).height() + 8)
         self.rtplus = QtWidgets.QLabel('')
-        self.rtplus.setStyleSheet(f'color: {ACCENT};')
-        self.alarm_label = QtWidgets.QLabel('')
-        self.alarm_label.setTextFormat(QtCore.Qt.PlainText)
-        self._alarm_state = None
+        self.rtplus.setTextFormat(QtCore.Qt.RichText)
+        self.rtplus.setStyleSheet('color: #c4c7cc;')
+        self.rtplus.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        text_box = QtWidgets.QVBoxLayout()
+        text_box.setSpacing(3)
+        text_box.addWidget(self.rt)
+        text_box.addWidget(self.rtplus)
+        row.addLayout(text_box, 1)
+
+        # now: peak modulation against the limit in force, RF level, AM / multipath
+        self.tapes = {
+            'mod': Tape('MOD', 0, 130, band=(85, 100), hold=True),
+            'rf': Tape('RF', -90, -10, band=(-60, -10)),
+            'am': Tape('AM', 0, 40, band=(0, PEAK_AM_PCT)),
+        }
+        self.tapes['mod'].setToolTip('Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force '
+                                     '(red notch); the grey band is the normal range')
+        self.tapes['rf'].setToolTip('RF level at the SDR')
+        self.tapes['am'].setToolTip('AM on the carrier: multipath or a transmitter fault. Over-modulation is '
+                                    f'not judged above {PEAK_AM_PCT:g}%, the other technical rules above '
+                                    f'{CLEAN_AM_PCT:g}%')
+        tapes = QtWidgets.QWidget()
+        tapes.setFixedWidth(widths['tapes'])
+        tb = QtWidgets.QVBoxLayout(tapes)
+        tb.setContentsMargins(0, 0, 0, 0)
+        tb.setSpacing(1)
+        for t in self.tapes.values():
+            tb.addWidget(t)
+        row.addWidget(tapes)
+
+        # trend: the last 5 minutes of peak modulation, excursions over the limit in red
+        self.trend_note = QtWidgets.QLabel('')
+        self.trend_note.setStyleSheet('color: #8c9197; font-size: 7pt;')
+        self.trend_note.setTextFormat(QtCore.Qt.RichText)
+        self.spark = Spark(70, 125, limit=100)
+        self.spark.setToolTip('Peak modulation, the last 5 minutes (each point: its highest); '
+                              'red: over the limit in force')
+        trend = QtWidgets.QWidget()
+        trend.setFixedWidth(widths['trend'])
+        tr = QtWidgets.QVBoxLayout(trend)
+        tr.setContentsMargins(0, 0, 0, 0)
+        tr.setSpacing(1)
+        tr.addWidget(self.trend_note)
+        tr.addWidget(self.spark)
+        row.addWidget(trend)
+        self._trend_t = -math.inf
+        self.web_trends = {}    # the sparklines and histogram for the web page
+
+        # every alarm, always in the same place: raised, holding off, not judged, off
+        self.annunciator = Annunciator()
+        self.annunciator.setFixedWidth(widths['alarms'])
+        row.addWidget(self.annunciator)
+
+        self.settings_btn = QtWidgets.QToolButton()
+        self.settings_btn.setObjectName('rowBtn')
+        self.settings_btn.setText('⚙')
+        self.settings_btn.setToolTip('Settings for this receiver')
+        self.settings_btn.clicked.connect(lambda: on_settings(self) if on_settings else None)
+        self.remove_btn = QtWidgets.QToolButton()
+        self.remove_btn.setObjectName('rowBtn')
+        self.remove_btn.setText('✕')
+        self.remove_btn.setToolTip('Remove this receiver')
+        self.remove_btn.clicked.connect(lambda: on_remove(self) if on_remove else None)
+        buttons = QtWidgets.QVBoxLayout()
+        buttons.setSpacing(0)
+        buttons.addWidget(self.settings_btn)
+        buttons.addWidget(self.remove_btn)
+        row.addLayout(buttons)
+
+        # ---- the detail view: this receiver in depth, under the rows or in its own window
+        self.window = None      # its DetailWindow while popped out
+        self.detail = QtWidgets.QFrame()
+        self.detail.setObjectName('detail')
+        layout = QtWidgets.QVBoxLayout(self.detail)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(6)
+        self.detail_title = QtWidgets.QLabel('')
+        self.detail_title.setStyleSheet('font-weight: 700; font-size: 10pt;')
+        self.detail_sub = QtWidgets.QLabel('')
+        self.detail_sub.setStyleSheet('color: #8c9197;')
+        self.detail_sub.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.feed = None  # RdsGroupServer for this receiver, if any
         self.feed_label = QtWidgets.QLabel('')
-        self.feed_label.setStyleSheet('color: #9aa0a6;')
-        status_row = QtWidgets.QHBoxLayout()
-        status_row.addWidget(self.alarm_label)
-        status_row.addStretch(1)
-        status_row.addWidget(self.feed_label)
-        layout.addLayout(combo_row)
+        self.feed_label.setStyleSheet('color: #8c9197;')
+        self.tabs = QtWidgets.QTabBar()
+        self.tabs.setObjectName('detailTabs')
+        self.tabs.setDrawBase(False)
+        self.tabs.setExpanding(False)
+        self.tabs.addTab('Overview')
+        self.tabs.addTab('History')
+        self.pop_btn = QtWidgets.QToolButton()
+        self.pop_btn.setText('⧉  Pop out')
+        self.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
+        self.pop_btn.clicked.connect(lambda: self.on_pop and self.on_pop(self))
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(self.detail_title)
+        head.addWidget(self.detail_sub, 1)
+        head.addWidget(self.feed_label)
+        head.addWidget(self.tabs)
+        head.addWidget(self.pop_btn)
+        layout.addLayout(head)
+        self.pages = QtWidgets.QStackedWidget()
+        self.tabs.currentChanged.connect(self.pages.setCurrentIndex)
+        self.tabs.currentChanged.connect(lambda i: i == 1 and self.history_view.refresh())
+        layout.addWidget(self.pages)
+        overview = QtWidgets.QWidget()
+        ov = QtWidgets.QVBoxLayout(overview)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.setSpacing(6)
+        self.pages.addWidget(overview)
+
+        # IBOC, PSD, SIS and RadioDNS lines (each only while there is something to say),
+        # with the station logo and album art beside them
         text_grid = QtWidgets.QGridLayout()
         text_grid.setHorizontalSpacing(8)
         text_grid.setVerticalSpacing(3)
-        # DYNAMIC PS: an amber pill beside the alarm pill, shown only while it applies
-        self.ps_mode = QtWidgets.QLabel('DYNAMIC PS')
-        self.ps_mode.setStyleSheet('border-radius: 10px; padding: 2px 10px; font-weight: 600; '
-                                   'background: #3a2e1b; color: #f0a35e; border: 1px solid #6b5228;')
-        self.ps_mode.setToolTip('The PS has changed 3 or more times in the last '
-                                f'{DYNAMIC_PS_S} s (scrolling or block text)')
-        self.ps_mode.hide()
-        status_row.insertWidget(1, self.ps_mode)
         self.iboc_line, self.psd_line, self.sis_line, self.rdns_line = (QtWidgets.QLabel('-') for _ in range(4))
         self._iboc_rows = []   # IBOC, PSD and SIS rows: shown only when the station has IBOC
         self._rdns_row = ()     # the RadioDNS row: shown only while RadioDNS works for the station
@@ -3958,121 +4751,161 @@ class StationPanel(QtWidgets.QGroupBox):
         # a RadioDNS slide's click-through link (TS 101 499 5.3.3) opens in the browser
         self.art_img.mousePressEvent = lambda e: self.art_img.link and QtGui.QDesktopServices.openUrl(
             QtCore.QUrl(self.art_img.link))
-        text_grid.addWidget(self.logo_img, 3, 3, 4, 1)
-        text_grid.addWidget(self.art_img, 3, 4, 4, 1)
-        for w in (self.rtplus, self.iboc_line, self.psd_line, self.sis_line, self.rdns_line):
+        text_grid.addWidget(self.logo_img, 0, 2, 4, 1)
+        text_grid.addWidget(self.art_img, 0, 3, 4, 1)
+        for w in (self.iboc_line, self.psd_line, self.sis_line, self.rdns_line):
             w.setTextFormat(QtCore.Qt.RichText)
-            w.setStyleSheet(f'color: {ACCENT};')
-            # long text is cut at the panel edge (full text in the tooltip), never widening it
+            w.setStyleSheet('color: #c4c7cc;')
+            # long text is cut at the edge (full text in the tooltip), never widening the view
             w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.psd_line.setToolTip('IBOC programme service data (PSD) of the programme playing')
         self.sis_line.setToolTip('IBOC station information service (SIS)')
-        for row, (title, widget) in enumerate((('PS', self.ps), ('RT', self.rt), ('RT+', self.rtplus),
-                                               ('IBOC', self.iboc_line), ('PSD', self.psd_line),
-                                               ('SIS', self.sis_line), ('RadioDNS', self.rdns_line))):
+        for i, (title, widget) in enumerate((('IBOC', self.iboc_line), ('PSD', self.psd_line),
+                                             ('SIS', self.sis_line), ('RadioDNS', self.rdns_line))):
             label = QtWidgets.QLabel(title)
-            label.setStyleSheet(f'font-weight: bold; color: {ACCENT};')
+            label.setStyleSheet('font-weight: bold; color: #9aa0a6;')
             label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-            text_grid.addWidget(label, row, 0)
-            if title in ('IBOC', 'PSD', 'SIS'):
-                self._iboc_rows.extend((label, widget))
-            elif title == 'RadioDNS':
+            text_grid.addWidget(label, i, 0)
+            text_grid.addWidget(widget, i, 1)
+            if title == 'RadioDNS':
                 self._rdns_row = (label, widget)
-            # PS, RT and RT+ span the image columns too, so their boxes end aligned
-            text_grid.addWidget(widget, row, 1, 1, 4 if row in (0, 1, 2) else 2)
+            else:
+                self._iboc_rows.extend((label, widget))
         text_grid.setColumnStretch(1, 1)
         # start without the rows refresh() would hide anyway, so the window opens at its final height
         for w in self._iboc_rows if not self._iboc_lines() else ():
             w.hide()
         for w in self._rdns_row:
             w.hide()
-        display, display_box = card()
-        display_box.addLayout(text_grid)
-        layout.addWidget(display)
-        layout.addLayout(status_row)
-
-        # live meters
-        self.meters = {
-            'rf': Meter('Signal', -90, -10, [(-70, RED), (-50, AMBER), (0, GREEN)]),
-            'snr': Meter('S/N', 0, 60, [(15, RED), (30, AMBER), (999, GREEN)]),
-            'mod': Meter('Peak mod', 0, 130, [(100, GREEN), (110, AMBER), (999, RED)], ticks=(100,)),
-            'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,)),
-        }
-        meters, meters_box = card('Levels')
-        meter_grid = QtWidgets.QGridLayout()
-        meter_grid.setHorizontalSpacing(18)
-        meter_grid.setVerticalSpacing(6)
-        for m in self.meters.values():
-            m.ensurePolished()
-        name_w = max(m.fontMetrics().horizontalAdvance(m.name) for m in self.meters.values()) + 14
-        for i, m in enumerate(self.meters.values()):
-            m.name_w = name_w
-            meter_grid.addWidget(m, i // 2, i % 2)
-        meters_box.addLayout(meter_grid)
-        layout.addWidget(meters)
+        ov.addLayout(text_grid)
 
         self.values = {}
-        # one label width for every section, so the values line up down the panel
-        probe = QtWidgets.QLabel(self)
-        probe.ensurePolished()  # measure in the font the stylesheet gives labels
-        self._label_w = max(probe.fontMetrics().horizontalAdvance(n + ':')
-                            for _, _, names, _ in self.SECTIONS for n in names) + 10
-        probe.deleteLater()
-        for title, cols, names, wide in self.SECTIONS:
-            extra = None
-            if title == 'Loudness':
-                extra = QtWidgets.QToolButton()
-                extra.setText('reset integrated')
-                extra.setStyleSheet('padding: 1px 8px;')
-                extra.clicked.connect(station.audio_meter.reset_integrated)
-            section, box = card(title, extra)
-            layout.addWidget(section)
-            if title.startswith('MPX spectrum'):
-                self.mpx = MpxSpectrum()
-                box.addWidget(self.mpx)
-                continue
-            grid = self._grid(names, cols, wide)
-            if title == 'Stereo image':
-                self.gonio = Goniometer()
-                self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
-                self.gonio.setToolTip('Click for a larger view')
-                self.gonio.on_click = self._open_stereo
-                row = QtWidgets.QHBoxLayout()
-                readouts = QtWidgets.QVBoxLayout()   # rows at their normal spacing, beside the goniometer
-                readouts.addLayout(grid)
-                readouts.addStretch(1)
-                row.addLayout(readouts, 1)
-                row.addWidget(self.gonio, 0, QtCore.Qt.AlignTop)
-                box.addLayout(row)
-            else:
-                box.addLayout(grid)
+        self._kv_rows = {}      # readout: its (label, value), to hide when it isn't on air
+        self.absent = {}        # card: its 'not on air' line
+        cards = QtWidgets.QGridLayout()
+        cards.setSpacing(8)
+        ov.addLayout(cards)
 
+        def dim_label(text=''):
+            label = QtWidgets.QLabel(text)
+            label.setStyleSheet('color: #8c9197; font-size: 8pt;')
+            return label
+
+        # modulation: peak tapes against the limit in force, then the counts and channels
+        self.limit_note = dim_label()
+        mod, box = card('Modulation', self.limit_note)
+        self.peak_tapes = {key: Tape(name, 0, 130, band=(85, 100), hold=True, name_w=50, val_w=110)
+                           for key, name in (('pos', '+ peak'), ('neg', '− peak'))}
+        for t in self.peak_tapes.values():
+            box.addWidget(t)
+        self.peak_hist = PeakHistogram()
+        self.peak_hist.setToolTip('How peak modulation spreads: the share of updates at each peak level over the '
+                                  'last 5 minutes (log height). Red: over the limit in force; amber: over 100%')
+        box.addWidget(dim_label('Peak distribution \u00b7 last 5 min'))
+        box.addWidget(self.peak_hist)
+        box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'L / R', 'L+R / L−R',
+                                'Limit'), 2, wide=('Limit',)))
+        box.addStretch(1)
+        cards.addWidget(mod, 0, 0)
+
+        # multiplex: spectrum, S/N, pilot and carrier tapes, the subcarriers
+        mpx_card, box = card('Multiplex', dim_label('0–100 kHz'))
+        self.mpx = MpxSpectrum()
+        self.mpx.setMinimumHeight(140)
+        box.addWidget(self.mpx)
+        self.mpx_tapes = {
+            'snr': Tape('S/N', 0, 70, band=(30, 70), name_w=50, val_w=110),
+            'pilot': Tape('Pilot', 6, 12, band=(8, 10), name_w=50, val_w=110),
+            'offset': Tape('Offset', -3000, 3000, origin=0, band=(-1000, 1000), name_w=50, val_w=110),
+        }
+        self.mpx_tapes['snr'].setToolTip('MPX S/N, unweighted 15 kHz; below the carrier alarm\'s setting is carrier low')
+        self.mpx_tapes['pilot'].setToolTip('Pilot injection; the grey band is the range the rules allow')
+        self.mpx_tapes['offset'].setToolTip('Carrier offset; the grey band is the tolerance (includes the SDR\'s own error)')
+        for t in self.mpx_tapes.values():
+            box.addWidget(t)
+        box.addLayout(self._kv(('RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'RDS phase', 'Sync AM',
+                                'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 2,
+                               wide=('RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal')))
+        self.absent['mpx'] = dim_label()
+        box.addWidget(self.absent['mpx'])
+        box.addStretch(1)
+        cards.addWidget(mpx_card, 0, 1)
+
+        # RDS
+        self.rds_note = dim_label()
+        rds, box = card('RDS', self.rds_note)
+        self.rds_spark = Spark(0, 12)
+        self.rds_spark.setToolTip('RDS groups per second, the last 5 minutes (11.4/s is every group)')
+        box.addWidget(self.rds_spark)
+        box.addLayout(self._kv(('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs',
+                                'Clock', 'Group types', 'Data services'), 2,
+                               wide=('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')))
+        self.absent['rds'] = dim_label()
+        self.absent['rds'].setWordWrap(True)
+        box.addWidget(self.absent['rds'])
+        box.addStretch(1)
+        cards.addWidget(rds, 0, 2)
+
+        # audio: loudness, the stereo image, and what Play plays
+        reset = QtWidgets.QToolButton()
+        reset.setText('reset I')
+        reset.setToolTip('Start the integrated loudness again')
+        reset.setStyleSheet('padding: 0 6px;')
+        reset.clicked.connect(station.audio_meter.reset_integrated)
+        audio, box = card('Audio', reset)
+        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 2))
+        self.lufs_spark = Spark(-40, 0, ref=-23)
+        self.lufs_spark.setToolTip('Short-term loudness, the last 5 minutes (dotted: -23 LUFS)')
+        box.addWidget(self.lufs_spark)
+        self.gonio = Goniometer(size=104)
+        self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
+        self.gonio.setToolTip('Click for a larger view')
+        self.gonio.on_click = self._open_stereo
+        self.meters = {'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))}
+        self.meters['corr'].setMinimumWidth(120)
+        self.meters['corr'].name_w = 44
+        stereo = QtWidgets.QHBoxLayout()
+        stereo.setSpacing(8)
+        stereo.addWidget(self.gonio, 0, QtCore.Qt.AlignTop)
+        side = QtWidgets.QVBoxLayout()
+        side.setSpacing(2)
+        side.addWidget(self.meters['corr'])
+        side.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R', 'Correlation'), 1))
+        side.addStretch(1)
+        stereo.addLayout(side, 1)
+        box.addLayout(stereo)
         self.source = QtWidgets.QComboBox()
-        self.source.setMinimumHeight(34)
         for key, label in AUDIO_SOURCES:
             self.source.addItem(label, key)
         self.source.setToolTip('What Play plays')
         self.source.activated.connect(lambda i: on_source(self, self.source.itemData(i)) if on_source else None)
-        self.play = QtWidgets.QPushButton('\u25b6  Play audio')
+        self.play = QtWidgets.QPushButton('▶  Play')
         self.play.setCheckable(True)
-        self.play.setMinimumHeight(34)
-        self.play.setStyleSheet('QPushButton { font-weight: 600; }'
-                                'QPushButton:checked { background: #2e7d32; color: white;'
-                                ' border: 1px solid #69db7c; border-radius: 6px; }'
-                                'QPushButton:checked:hover { background: #37913c; }')
+        self.play.setStyleSheet('QPushButton { font-weight: 600; padding: 3px 10px; }'
+                                'QPushButton:checked { background: #2f6db5; color: white;'
+                                ' border: 1px solid #8ab4f8; border-radius: 6px; }'
+                                'QPushButton:checked:hover { background: #3a7cc6; }')
         self.play.toggled.connect(lambda on: on_play(self, on))
+        box.addStretch(1)
         audio_row = QtWidgets.QHBoxLayout()
-        audio_row.addWidget(self.source)
         audio_row.addWidget(self.play, 1)
-        layout.addLayout(audio_row)
-        layout.addStretch(1)
+        audio_row.addWidget(self.source, 1)
+        box.addLayout(audio_row)
+        cards.addWidget(audio, 0, 3)
+        for col, stretch in enumerate((24, 26, 24, 22)):
+            cards.setColumnStretch(col, stretch)
+        self.history_view = HistoryView(self)
+        self.pages.addWidget(self.history_view)
+        # readouts the tapes show instead: kept (hidden) so every reading still has its text
+        for name in ('Peak + / −', 'MPX S/N', 'Carrier offset', 'Pilot (19 kHz)'):
+            self.values[name] = QtWidgets.QLabel('-')
 
-    def _grid(self, names, cols, wide=()):
-        """Label/value pairs in `cols` equal columns with one label width (so values
-        line up across sections); readouts in `wide` get a full-width row each."""
+    def _kv(self, names, cols, wide=()):
+        """Label/value pairs in `cols` columns; readouts in `wide` get a full-width
+        row each at the end. Long values are cut at the card edge, never widening it."""
         grid = QtWidgets.QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(3)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
         normal = [n for n in names if n not in wide]
         rows = (len(normal) + cols - 1) // cols
         for i, name in enumerate(normal + [n for n in names if n in wide]):
@@ -4080,17 +4913,16 @@ class StationPanel(QtWidgets.QGroupBox):
                 row, col, span = i // cols, i % cols, 1
             else:
                 row, col, span = rows + i - len(normal), 0, cols * 2 - 1
-            label = QtWidgets.QLabel(name + ':')
+            label = QtWidgets.QLabel(name)
             label.setStyleSheet('color: #9aa0a6;')
-            label.setFixedWidth(self._label_w)
             value = QtWidgets.QLabel('-')
             value.setTextFormat(QtCore.Qt.RichText)
-            value.setStyleSheet('font-weight: bold;')
-            # long text is cut at the column edge rather than pushing the columns out of line
+            value.setStyleSheet('font-weight: 600;')
             value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
             grid.addWidget(label, row, col * 2)
             grid.addWidget(value, row, col * 2 + 1, 1, span)
             self.values[name] = value
+            self._kv_rows[name] = (label, value)
         for col in range(cols):
             grid.setColumnStretch(col * 2 + 1, 1)
         return grid
@@ -4288,6 +5120,15 @@ class StationPanel(QtWidgets.QGroupBox):
         self.history.reset()
         for m in self.meters.values():
             m.set_value(None, '-')
+        for t in (*self.tapes.values(), *self.peak_tapes.values(), *self.mpx_tapes.values()):
+            t.clear()
+        self.meta.setText('')
+        self.annunciator.set_states({})
+        self._trend_t = -math.inf
+        self.web_trends = {}
+        for spark in (self.spark, self.rds_spark, self.lufs_spark):
+            spark.set_data([])
+        self.peak_hist.set_data([], None)
         self.gonio.set_data(None)
         self.mpx.set_data(None)
 
@@ -4312,13 +5153,12 @@ class StationPanel(QtWidgets.QGroupBox):
     @staticmethod
     def _sca_kind_html(kind, baud):
         return {
-            'audio': f'<span style="color:{AMBER}">AUDIO</span>',
-            'data': f'<span style="color:{ACCENT}">DATA</span>' + (f' ~{baud:.0f} Bd' if baud else '')
-                    + f' <span style="color:{DIM}">(not audio)</span>',
-            'tone': f'<span style="color:{AMBER}">TONE</span>',
+            'audio': 'AUDIO',
+            'data': 'DATA' + (f' ~{baud:.0f} Bd' if baud else '') + f' <span style="color:{DIM}">(not audio)</span>',
+            'tone': 'TONE',
             'idle': f'<span style="color:{DIM}">IDLE (no modulation)</span>',
-            'weak': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(too weak to tell)</span>',
-            'checking': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(checking…)</span>',
+            'weak': f'PRESENT <span style="color:{DIM}">(too weak to tell)</span>',
+            'checking': f'PRESENT <span style="color:{DIM}">(checking…)</span>',
         }[kind]
 
     def _sca_sources(self, sca):
@@ -4341,7 +5181,7 @@ class StationPanel(QtWidgets.QGroupBox):
 
     def _open_stereo(self):
         if self._stereo is None:
-            self._stereo = StereoWindow(self)
+            self._stereo = StereoWindow(self, self.detail)
         self._stereo.follow(self)
         self._stereo.show()
         self._stereo.raise_()
@@ -4370,7 +5210,7 @@ class StationPanel(QtWidgets.QGroupBox):
     @staticmethod
     def _iboc_text(found, dbc):
         if found == 'detected':
-            return f'<span style="color:{AMBER}">detected</span>, {dbc:.0f} dBc'
+            return f'detected, {dbc:.0f} dBc'
         return f'<span style="color:{DIM}">' + {'unscanned': 'unknown (not scanned)',
                                                 'adjacent': 'unknown (adjacent station)',
                                                 'absent': 'not detected'}[found] + '</span>'
@@ -4508,9 +5348,11 @@ class StationPanel(QtWidgets.QGroupBox):
             label.setText(text)
             label.setToolTip(QtGui.QTextDocumentFragment.fromHtml(text).toPlainText() if text != '-' else '')
         self._update_media(r['pi'], r['ecc'])
-        tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>') + _html(f'{name}: {text}') + '</span>'
+        tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>')
+                + f'<span style="color:{DIM}">{_html(name)}:</span> {_html(text)}</span>'
                 for t, name, text in r['rtplus']]
-        self.rtplus.setText('   ·   '.join(tags) if tags else '-')
+        self.rtplus.setText('   ·   '.join(tags) if tags else _flags_html(r['flags']) if r['flags'] else
+                            f'<span style="color:{DIM}">no RDS</span>' if r['pi'] is None else '')
         v['PI'].setText('-' if r['pi'] is None else r['pi'])
         v['PTY'].setText('-' if r['pty'] is None else r['pty'])
         v['Flags'].setText(_flags_html(r['flags']))
@@ -4537,7 +5379,7 @@ class StationPanel(QtWidgets.QGroupBox):
             v['AM / multipath'].setText(_coloured(am_text + am_note, lv.get('am_pct')))
             v['Pilot (19 kHz)'].setText(
                 _coloured(f"{r['pilot_pct']:.1f}%", lv.get('pilot_pct')) + '  ' +
-                {'stereo': f'<span style="color:{RED}">STEREO</span>',
+                {'stereo': 'stereo',
                  'forced mono': f'<span style="color:{AMBER}">mono (forced)</span>',
                  'mono': f'<span style="color:{DIM}">mono</span>'}[r['stereo_mode']])
             if r['pilot_hz'] is not None:
@@ -4564,10 +5406,13 @@ class StationPanel(QtWidgets.QGroupBox):
             window = '' if r['mpx_window_s'] >= MPX_POWER_S else f"  ({r['mpx_window_s']:.0f} s)"
             v['MPX power'].setText(_num(r['mpx_dbr'], 'dBr', '+.1f') + window)
             self.mpx.set_data(r['mpx_db'])
-            self.meters['rf'].set_value(r['rf_dbfs'], _num(r['rf_dbfs'], 'dBFS', '.0f'))
-            self.meters['snr'].set_value(r['snr_db'], _num(r['snr_db'], 'dB', '.0f'))
-            peak = max(r['pos_pct'], r['neg_pct'])
-            self.meters['mod'].set_value(peak, f'{peak:.0f}%')
+            self._show_tapes(r)
+            self._show_detail_tapes(r)
+            self.values['Limit'].setToolTip(r['limit_why'])
+        self._collapse(r)
+        rate = r['rds_rate']
+        self.rds_note.setText('' if r['pi'] is None else f'{rate:.1f}/s' + (
+            f" \u00b7 loss {r['rds_loss_pct']:.0f}%" if r['rds_loss_pct'] is not None else ''))
 
         parts = []
         for d in r['data_services']:
@@ -4592,7 +5437,7 @@ class StationPanel(QtWidgets.QGroupBox):
             v['Balance'].setText('centre' if abs(bal) < 0.5 else
                                  f"{abs(bal):.1f} dB {'L' if bal > 0 else 'R'}")
             corr = r['correlation']
-            v['Correlation'].setText(f'<span style="color:{RED if lv.get("correlation") else GREEN}">{corr:+.2f}</span>')
+            v['Correlation'].setText(_coloured(f'{corr:+.2f}', lv.get('correlation')))
             v['Width (S/M)'].setText('mono' if not math.isfinite(r['width_db']) or r['width_db'] < -40
                                      else _num(r['width_db'], 'dB'))
             self.meters['corr'].set_value(corr, f'{corr:+.2f}')
@@ -4600,6 +5445,88 @@ class StationPanel(QtWidgets.QGroupBox):
             self.gonio.set_data(st.audio_meter.scope)
         if self._stereo and self._stereo.isVisible():
             self._stereo.follow(self)
+
+    def _show_tapes(self, r):
+        """The station row's tapes: peak modulation against the limit in force, RF, AM."""
+        lv = r['levels']
+        peak = max(r['pos_pct'], r['neg_pct'])
+        mod_state = lv.get('pos_pct') if r['pos_pct'] >= r['neg_pct'] else lv.get('neg_pct')
+        if mod_state == 'alarm' and lv.get('am_pct'):
+            mod_state = 'warn'   # over the limit, but multipath: not judged
+        self.tapes['mod'].set_value(peak, f"+{r['pos_pct']:.0f} / −{r['neg_pct']:.0f}%", mod_state,
+                                    limit=r['limit_pct'], band=(85, r['limit_pct']))
+        self.tapes['mod'].setToolTip(f"Peak modulation +{r['pos_pct']:.0f}% / −{r['neg_pct']:.0f}% "
+                                     f"({r['dev_khz']:.1f} kHz); limit {r['limit_pct']:.1f}% ({r['limit_why']}). "
+                                     'Tick: 2 s peak hold; grey band: the normal range')
+        self.tapes['rf'].set_value(r['rf_dbfs'], _num(r['rf_dbfs'], 'dBFS', '.0f'),
+                                   'alarm' if r['rf_dbfs'] < -75 else None)
+        self.tapes['rf'].setToolTip(f"RF level {_num(r['rf_dbfs'], 'dBFS')}, MPX S/N {_num(r['snr_db'], 'dB')}")
+        self.tapes['am'].set_value(r['am_pct'], f"{r['am_pct']:.1f}%", lv.get('am_pct'))
+
+    def _show_detail_tapes(self, r):
+        lv = r['levels']
+        lim = r['limit_pct']
+        for key in ('pos', 'neg'):
+            pct = r[f'{key}_pct']
+            state = lv.get(f'{key}_pct')
+            if state == 'alarm' and lv.get('am_pct'):
+                state = 'warn'
+            self.peak_tapes[key].set_value(pct, f"{pct:.0f}%  {pct * 0.75:.1f} kHz", state, limit=lim, band=(85, lim))
+        self.limit_note.setText(f'limit {lim:.1f}% \u24d8')
+        self.limit_note.setToolTip(f"Over-modulation limit in force: {r['limit_why']}")
+        snr = r['snr_db']
+        self.mpx_tapes['snr'].set_value(snr, _num(snr, 'dB'), 'alarm' if snr < self.settings.min_snr_db else None)
+        lim_ = r['limits']
+        if r['stereo_mode'] == 'mono':
+            self.mpx_tapes['pilot'].set_value(None, 'none (mono)')
+        else:
+            self.mpx_tapes['pilot'].set_value(r['pilot_pct'], f"{r['pilot_pct']:.1f}%  {r['stereo_mode']}",
+                                              lv.get('pilot_pct'), band=(lim_['pilot_min_pct'], lim_['pilot_max_pct']))
+        tol = lim_['freq_tol_hz']
+        off = self.mpx_tapes['offset']
+        off.lo, off.hi = -3 * tol, 3 * tol
+        off.set_value(r['offset_hz'], f"{r['offset_hz']:+.0f} Hz", lv.get('offset_hz'), band=(-tol, tol))
+
+    def _collapse(self, r):
+        """Hide the readouts a station doesn't carry, listing them once instead."""
+        rds, mpx = [], []
+        if r['pi'] is None:
+            rds = ['PI', 'PTY', 'PTYN', 'ECC', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types',
+                   'Data services']
+        else:
+            rds = [n for n, gone in (('PTYN', not r['ptyn']), ('ECC', r['ecc'] is None), ('ODA', not r['oda']),
+                                     ('Alt. freqs', not r['af']), ('Clock', not r['clock']),
+                                     ('Data services', not r['data_services'] and not r['data_lost'])) if gone]
+        if r['has_signal']:
+            mpx = [n for n, gone in (('Pilot freq', r['pilot_hz'] is None), ('RDS injection', r['pi'] is None),
+                                     ('RDS phase', r['rds_phase_mode'] is None), ('Sync AM', r['sync_am_pct'] is None),
+                                     ('SCA 67 kHz', r['sca67_pct'] is None), ('SCA 92 kHz', r['sca92_pct'] is None),
+                                     ('IBOC signal', r['iboc_found'] != 'detected')) if gone]
+        hidden = set(rds) | set(mpx)
+        for name, widgets in self._kv_rows.items():
+            for w in widgets:
+                if w.isHidden() != (name in hidden):
+                    w.setVisible(name not in hidden)
+        short = {'SCA 67 kHz': 'SCA 67', 'SCA 92 kHz': 'SCA 92', 'IBOC signal': 'IBOC', 'RDS injection': 'RDS',
+                 'Pilot freq': 'pilot', 'RDS phase': 'RDS phase', 'Sync AM': 'sync AM'}
+        on_air = [short[n] for n in mpx if n in ('SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal', 'RDS injection')]
+        self.absent['mpx'].setText('Not on air: ' + ' \u00b7 '.join(on_air) if on_air else '')
+        self.absent['mpx'].setVisible(bool(on_air))
+        self.absent['rds'].setText('No RDS decoded' if r['pi'] is None else
+                                   'Not sent: ' + ' \u00b7 '.join(rds) if rds else '')
+        self.absent['rds'].setVisible(bool(rds))
+
+    def _meta_text(self, r):
+        """The row's second line: PI, PTY, RDS rate, stereo, receiver number."""
+        parts = [f"<b style=\"color:#e3e4e6\">{r['pi']}</b>" if r['pi'] else 'no RDS']
+        if r['pi']:
+            if r['pty']:
+                parts.append(_html(r['pty']))
+            parts.append(f"RDS {r['rds_rate']:.1f}/s")
+        if r.get('stereo_mode'):
+            parts.append(r['stereo_mode'])
+        parts.append(f'Rx {self.slot + 1}' + (f' {_html(self.settings.name)}' if self.settings.name else ''))
+        return ' · '.join(parts)
 
     def _alarm_states(self, conditions, clean):
         """{alarm: state} for an annunciator: 'off' (switched off for this receiver),
@@ -4683,22 +5610,74 @@ class StationPanel(QtWidgets.QGroupBox):
                 changes = [(desc, raised, details.get(name, '')) for name, desc, raised in changes]
         r['alarms'] = self._alarm_states(conditions, clean)
         self.history.add(time.time(), r)
+        if time.monotonic() - self._trend_t >= TREND_S:
+            self._trend_t = time.monotonic()
+            self._show_trends(r)
         feed = ''
         if self.feed:
             n = self.feed.clients
             feed = f' \u00b7 RDS feed TCP {self.feed.port} \u00b7 {n} client{"" if n == 1 else "s"}'
         name = f' \u00b7 {self.settings.name}' if self.settings.name else ''
         self.feed_label.setText(f'Receiver {self.slot + 1}{name}{feed}')
-        active = [desc for name, desc, _ in ALARM_DEFS if name in self.alarms.active]
-        state = tuple(active)
-        if state != self._alarm_state:  # a pill: green when clear, red with the alarms
-            self._alarm_state = state
-            self.alarm_label.setText(f'\u26a0  {", ".join(active)}' if active else '\u25cf  No alarms')
-            self.alarm_label.setStyleSheet(
-                'border-radius: 10px; padding: 2px 10px; font-weight: 600; ' +
-                ('background: #3a1d1f; color: #ff8a8a; border: 1px solid #6b2a2e;' if active else
-                 'background: #1b2f21; color: #69db7c; border: 1px solid #2c5236;'))
+        self.meta.setText(self._meta_text(r))
+        self.meta.setToolTip(self.feed_label.text())
+        self.detail_title.setText(self.title)
+        ecc = r['ecc']
+        sub = [f"PI {r['pi']}" if r['pi'] else 'no RDS', _html(r['pty'] or '') if r['pi'] else '',
+               f'ECC {ecc:02X}' if ecc else '', f"{RULES[self.rules()]['name'] if self.rules() in RULES else 'custom'} rules"]
+        self.detail_sub.setText(' \u00b7 '.join(x for x in sub if x))
+        if self.window:
+            self.window.setWindowTitle(f'{self.title} \u2013 {APP_NAME}')
+        if self.rt.toolTip() != r['rt']:
+            self.rt.setToolTip(r['rt'])
+        self.annunciator.set_states(r['alarms'], self._alarm_notes(r))
         return changes
+
+    def trends(self, n=88):
+        """The last TREND_SPAN_S, bucketed for sparklines: {'peak', 'rds_rate', 'short_term'}
+        (n points each, NaN where there was no reading), 'peaks' (every update's peak),
+        and 'over100' (updates over 100% in the last minute, as a count per minute)."""
+        h = self.history
+        t, pos = h.series('pos_pct', TREND_SPAN_S)
+        _, neg = h.series('neg_pct', TREND_SPAN_S)
+        with np.errstate(invalid='ignore'):
+            peaks = np.fmax(pos, neg)
+        end = t[-1] if len(t) else None
+        return {'peak': bucket(t, peaks, TREND_SPAN_S, n, True, end),
+                'rds_rate': bucket(*h.series('rds_rate', TREND_SPAN_S), TREND_SPAN_S, n, False, end),
+                'short_term': bucket(*h.series('short_term', TREND_SPAN_S), TREND_SPAN_S, n, False, end),
+                'peaks': peaks[np.isfinite(peaks)]}
+
+    def _show_trends(self, r):
+        tr = self.trends(max(self.spark.width() // 2, 40))
+        limit = r.get('limit_pct')
+        edges = np.arange(PeakHistogram.LO, PeakHistogram.HI + PeakHistogram.STEP, PeakHistogram.STEP)
+        self.web_trends = {k: _Finite(np.round(np.nan_to_num(tr[k], nan=-999.0), 1).tolist())
+                           for k in ('peak', 'rds_rate', 'short_term')}
+        self.web_trends['hist'] = (np.histogram(np.clip(tr['peaks'], edges[0], edges[-1] - 1e-6), edges)[0].tolist()
+                                   if len(tr['peaks']) else [])
+        self.spark.set_data(tr['peak'], limit, AMBER if r.get('alarms', {}).get('OVERMOD') == 'suppressed' else RED)
+        over = r.get('over100_min')
+        self.trend_note.setText('peak modulation' + ('' if over is None else
+                                                     f' \u00b7 {over}/min over 100%' if not over else
+                                                     f' \u00b7 <b style="color:{AMBER}">{over}/min over 100%</b>'))
+        if self.history_view.isVisible():
+            self.history_view.refresh()
+        if self.detail.isVisible():
+            self.peak_hist.set_data(tr['peaks'], limit)
+            self.rds_spark.set_data(tr['rds_rate'])
+            self.lufs_spark.set_data(tr['short_term'])
+
+    def _alarm_notes(self, r):
+        """Why an alarm isn't judged now, for the annunciator's tooltips."""
+        if not r.get('has_signal'):
+            return {}
+        why = (f"AM / multipath {r['am_pct']:.1f}%, S/N {_num(r['snr_db'], 'dB', '.0f')}"
+               f" (judged under {CLEAN_AM_PCT:g}% AM and over 25 dB S/N; over-modulation under {PEAK_AM_PCT:g}%)")
+        notes = {name: why for name, state in r['alarms'].items() if state == 'suppressed'}
+        if r['alarms'].get('OVERMOD') in ('raised', 'pending', 'clear'):
+            notes['OVERMOD'] = f"peak +{r['pos_pct']:.0f}% / \u2212{r['neg_pct']:.0f}%, limit {r['limit_pct']:.1f}%"
+        return notes
 
     def _service_label(self, key, html=False):
         """A data service as shown: the name this receiver gives it, with what it is."""
@@ -4736,12 +5715,27 @@ class StationPanel(QtWidgets.QGroupBox):
                      if self._data_lost else ''),
         }
 
+    def web_readings(self):
+        """self.readings as plain JSON values for the web page, which draws the
+        rows and the detail from them as the window does."""
+        r = {k: v for k, v in self.readings.items() if k != 'mpx_db'}
+        if r.get('clock'):
+            local, offset = r['clock']
+            r['clock'] = [local.strftime('%Y-%m-%d %H:%M'), offset]
+        r['data_services'] = [dict(d, label=self._service_label(d['key'])) for d in r.get('data_services', [])]
+        r['data_lost'] = [self._service_label(k) for k in r.get('data_lost', [])]
+        r['radiodns'] = (QtGui.QTextDocumentFragment.fromHtml(self.rdns_line.text()).toPlainText()
+                         if self._rdns_working else '')
+        r['rules_name'] = RULES[self.rules()]['name'] if self.rules() in RULES else 'custom'
+        return r
+
     def web_state(self, feed_port, default_port, listeners):
-        """Everything the web page shows for this receiver, as plain JSON values.
-        Readouts are the panel's own rich text (the page allows only colour
-        and bold through), so the page shows exactly what the app shows."""
+        """Everything the web page shows for this receiver, as plain JSON values:
+        the readings, alarm states and trends (the page formats and draws them),
+        and the controls' lists."""
         st = self.station
         scope = st.audio_meter.scope
+        mpx = self.readings.get('mpx_db')
 
         def items(combo):
             return [{'value': combo.itemData(i), 'label': combo.itemText(i),
@@ -4753,20 +5747,11 @@ class StationPanel(QtWidgets.QGroupBox):
             self._web_lists = items(self.combo), items(self.source)
         stations, sources = self._web_lists
         return {
-            'receiver': self.slot + 1, 'freq': st.freq_hz, 'title': self.title,
-            'ps': self.ps.text(), 'ps_dynamic': not self.ps_mode.isHidden(), 'rt': self.rt.text(),
-            'lines': [[t, w.text()] for t, w in (('RT+', self.rtplus), ('IBOC', self.iboc_line),
-                                                ('PSD', self.psd_line), ('SIS', self.sis_line),
-                                                ('RadioDNS', self.rdns_line))],
-            'sections': [[title, cols, [[n, self.values[n].text(), n in wide]
-                                        for n in [m for m in names if m not in wide] + [m for m in names if m in wide]]]
-                         for title, cols, names, wide in self.SECTIONS],
-            'iboc_lines': self._iboc_lines(), 'rdns_line': self._rdns_working,
-            'meters': [{'name': m.name, 'lo': m.lo, 'hi': m.hi, 'zones': m.zones, 'origin': m.origin,
-                        'ticks': list(m.ticks), 'value': m.value, 'text': m.text} for m in self.meters.values()],
-            'mpx': None if self.mpx._db is None else _Finite(np.round(np.nan_to_num(self.mpx._db), 1).tolist()),
+            'receiver': self.slot + 1, 'freq': st.freq_hz, 'title': self.title, 'name': self.settings.name,
+            'readings': self.web_readings(), 'notes': self._alarm_notes(self.readings) if self.readings else {},
+            'trends': self.web_trends,
+            'mpx': None if mpx is None else _Finite(np.round(np.nan_to_num(mpx), 1).tolist()),
             'gonio': None if scope is None else [_Finite(np.round(np.nan_to_num(x[-400::2]), 4).tolist()) for x in scope],
-            'alarms': [desc for name, desc, _ in ALARM_DEFS if name in self.alarms.active],
             'status': self.feed_label.text(),
             'stations': stations,
             'source': self.source_key(), 'sources': sources,
@@ -6190,6 +7175,26 @@ class WebView:
         return Handler
 
 
+class DetailWindow(QtWidgets.QWidget):
+    """A receiver's detail view popped out of the main window (so a wall display
+    can show several side by side); closing it puts the detail back."""
+
+    def __init__(self, main, panel, on_close):
+        super().__init__(main, QtCore.Qt.Window)
+        self.panel, self.on_close = panel, on_close
+        box = QtWidgets.QVBoxLayout(self)
+        box.setContentsMargins(8, 8, 8, 8)
+        box.addWidget(panel.detail)
+        panel.detail.show()
+        self.setWindowTitle(f'{panel.title} \u2013 {APP_NAME}')
+        self.resize(max(panel.detail.sizeHint().width(), main.width(), 1500), panel.detail.sizeHint().height() + 16)
+
+    def closeEvent(self, event):
+        if self.on_close:
+            self.on_close(self.panel)
+        super().closeEvent(event)
+
+
 class ChipRow(QtWidgets.QWidget):
     """The header's status chips. When the window is too narrow for them all, the least
     important (sample rate, SDR window, stations found) are hidden; the SDR and gain
@@ -6321,18 +7326,38 @@ class MainWindow(QtWidgets.QWidget):
         layout.addLayout(top)
         self.header_text = ''
         receivers = QtWidgets.QWidget()
-        self.row = QtWidgets.QHBoxLayout(receivers)
-        self.row.setContentsMargins(0, 0, 0, 0)
-        self.row.setSpacing(12)
+        box = QtWidgets.QVBoxLayout(receivers)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+        box.addWidget(column_heads())
+        self.rows_box = QtWidgets.QVBoxLayout()   # one StationRow per receiver
+        self.rows_box.setSpacing(4)
+        box.addLayout(self.rows_box)
+        self.details = QtWidgets.QStackedWidget()  # the selected receiver's detail view
+        box.addWidget(self.details)
+        box.addStretch(1)
+        self.selected = None
         self.scroll = ReceiverScroll(receivers)
         layout.addWidget(self.scroll, 1)   # spare height goes to the receivers, not the event log
-        events, events_box = card('Events')
+        events, events_box = card()
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
         self.log_view.setFont(QtGui.QFont('Consolas', 9))
-        self.log_view.setFixedHeight(86)
-        events_box.addWidget(self.log_view)
+        self.alarm_table = AlarmTable()
+        self.log_tabs = QtWidgets.QTabBar()
+        self.log_tabs.setObjectName('detailTabs')
+        self.log_tabs.setDrawBase(False)
+        self.log_tabs.setExpanding(False)
+        self.log_tabs.addTab('Alarms')
+        self.log_tabs.addTab('Events')
+        logs = QtWidgets.QStackedWidget()
+        logs.addWidget(self.alarm_table)
+        logs.addWidget(self.log_view)
+        logs.setFixedHeight(104)
+        self.log_tabs.currentChanged.connect(logs.setCurrentIndex)
+        events_box.addWidget(self.log_tabs, 0, QtCore.Qt.AlignLeft)
+        events_box.addWidget(logs)
         events.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         layout.addWidget(events)
         for slot, st in enumerate(tb.slots):
@@ -6367,7 +7392,7 @@ class MainWindow(QtWidgets.QWidget):
     def _add_panel(self, slot, st, settings=None):
         panel = StationPanel(st, self.stations, self._on_play, self._on_select, self.iboc_scan,
                              self._remove_receiver, self._on_settings, self._on_source,
-                             self.radiodns, self.country)
+                             self.radiodns, self.country, on_focus=self.focus, on_pop=self.pop_out)
         panel.slot = slot
         panel.settings = settings or ReceiverSettings()
         panel.set_source(panel.settings.audio_source)
@@ -6380,7 +7405,43 @@ class MainWindow(QtWidgets.QWidget):
         self.panels.sort(key=lambda p: p.slot)
         if self.web and self.ffmpeg and self.web.formats:
             self.web.audio[slot + 1] = WebAudio(self.ffmpeg, st.web_tap)
-        self.row.insertWidget(self.panels.index(panel), panel)
+        self.rows_box.insertWidget(self.panels.index(panel), panel.row)
+        self.details.addWidget(panel.detail)
+        if self.selected is None:
+            self.focus(panel)
+
+    def focus(self, panel):
+        """Select a receiver: its row is highlighted and its detail shown (or, when
+        popped out, its window raised)."""
+        self.selected = panel
+        for p in self.panels:
+            p.row.set_selected(p is panel)
+        if panel is not None and panel.window:
+            panel.window.raise_()
+            panel.window.activateWindow()
+        elif panel is not None:
+            self.details.setCurrentWidget(panel.detail)
+        self.details.setVisible(self.details.count() > 0)
+
+    def pop_out(self, panel):
+        """A receiver's detail in its own window, or (popped out already) back."""
+        if panel.window:
+            panel.window.close()
+            return
+        self.details.removeWidget(panel.detail)
+        panel.window = DetailWindow(self, panel, self._pop_in)
+        panel.pop_btn.setText('\u21a9  Dock')
+        panel.pop_btn.setToolTip('Put this receiver back under the station rows')
+        panel.window.show()
+        docked = [p for p in self.panels if not p.window]
+        self.focus(docked[0] if docked else panel)
+
+    def _pop_in(self, panel):
+        panel.window = None
+        panel.pop_btn.setText('\u29c9  Pop out')
+        panel.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
+        self.details.addWidget(panel.detail)
+        self.focus(panel)
 
     def _feed_port(self, panel):
         """The receiver's RDS feed port: its own setting, else --rds-port + receiver number - 1."""
@@ -6734,9 +7795,19 @@ class MainWindow(QtWidgets.QWidget):
         if audio:
             audio.close_all()
         self.tb.remove_receiver(panel.slot)
+        if panel.window:
+            panel.window.on_close = None
+            panel.window.close()
+            panel.window = None
         self.panels.remove(panel)
-        self.row.removeWidget(panel)
+        self.rows_box.removeWidget(panel.row)
+        self.details.removeWidget(panel.detail)
+        for w in (panel.row, panel.detail):
+            w.deleteLater()
         panel.deleteLater()
+        if self.selected is panel:
+            self.selected = None
+            self.focus(self.panels[0])
         self._feed_clients.pop(panel.slot, None)
         self._update_window()
         self.log(f'receiver {panel.slot + 1} removed ({title})')
@@ -6838,6 +7909,12 @@ class MainWindow(QtWidgets.QWidget):
         st.set_audio(key, on)
 
     def _alarm_event(self, panel, desc, raised, detail=''):
+        key = (panel.slot, panel.station.freq_hz)
+        if raised:
+            self.alarm_table.raised(key, panel.title, desc, detail)
+        else:
+            self.alarm_table.cleared(key, desc)
+        self._alarm_tab()
         text = f'{panel.title}: {"ALARM" if raised else "cleared"} - {desc}' + (f': {detail}' if detail else '')
         self.log(text)
         if not self._recovery:
@@ -6851,7 +7928,15 @@ class MainWindow(QtWidgets.QWidget):
                 self._alarm_event(panel, desc, False, why)
         panel.alarms.active.clear()
 
+    def _alarm_tab(self):
+        n = self.alarm_table.raised_now()
+        self.log_tabs.setTabText(0, f'Alarms \u00b7 {n} raised' if n else 'Alarms')
+        self.log_tabs.setTabTextColor(0, QtGui.QColor(RED if n else '#9aa0a6'))
+
     def _refresh(self):
+        self._ticks = getattr(self, '_ticks', 0) + 1
+        if self._ticks % UPDATE_HZ == 0 and self.alarm_table.raised_now():
+            self.alarm_table.redraw()   # the running durations
         for p in self.panels:
             if p.feed and p.feed.clients != self._feed_clients.get(p.slot, 0):
                 n, was = p.feed.clients, self._feed_clients.get(p.slot, 0)
@@ -6891,7 +7976,13 @@ class MainWindow(QtWidgets.QWidget):
             'audio_formats': [{'key': f, 'label': WEB_FORMATS[f]['label'], 'canplay': WEB_FORMATS[f]['canplay']}
                               for f in (web.formats if self.ffmpeg else [])],
             'listeners': web.listeners(), 'max_listeners': WEB_MAX_LISTENERS,
-            'alarm_defs': [[name, desc] for name, desc, _ in ALARM_DEFS],
+            'alarm_defs': [[name, desc, Annunciator.SHORT[name]] for name, desc, _ in ALARM_DEFS],
+            'alarm_means': Annunciator.MEANS,
+            'alarm_episodes': [{k: e[k] for k in ('station', 'desc', 'start', 'end', 'detail')}
+                               for e in self.alarm_table.episodes[-100:]],
+            'now': time.time(),
+            'peak_hist': [PeakHistogram.LO, PeakHistogram.HI, PeakHistogram.STEP],
+            'trend_span_s': TREND_SPAN_S, 'clean': [PEAK_AM_PCT, CLEAN_AM_PCT],
             'rules': {'presets': {k: v['limits'] for k, v in RULES.items()},
                       'by_country': 'ised' if self.country == 'CA' else 'fcc',
                       'limits': [list(x) for x in LIMITS]},

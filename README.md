@@ -28,6 +28,17 @@ Per station, refreshed 10× a second:
   Server-sent Events, Stomp or HTTP long polling, tried in that order with SRV failover
   (ETSI TS 103 270 / TS 101 499 v3.2)
 
+## The window
+
+Normal readings are grey; amber means abnormal or not judged, red out of limits or an
+alarm (ISA-101 high-performance HMI). Each station row has peak modulation against the
+limit in force with a 2 s peak hold, RF and AM bars, a 5-minute sparkline and an
+annunciator with every alarm in a fixed place (raised, holding off, not judged, off).
+The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
+Audio cards, listing what a station doesn't carry once instead of as dashes, and a History
+tab: the readings as stacked strips over 1 minute to 1 hour with one cursor across them.
+Under it, the Alarms tab lists each alarm once, with how long it lasted.
+
 ## Alarms
 
 Carrier low/lost, audio silence, over-modulation, pilot lost, RDS lost ("possibly on N+1"
@@ -54,11 +65,11 @@ overload (wideband peaks at full scale, which make every receiver's readings fal
 
 - **Windows 10/11** (developed and tested there; some parts – DNS SRV lookups for
   RadioDNS, sign-in autostart – use Windows APIs)
-- **A large screen.** Each receiver shows a lot at once: about 1,460 px tall at 100% display
-  scaling (1,690 at 150%), and 940 px wide (1,330 at 150%), up to four side by side. A **4K
-  monitor** (3840 × 2160) shows everything, all four receivers included, without scrolling.
-  On 1440p the receivers scroll a little, and on 1080p and laptop screens they scroll more;
-  everything still works, and the window always fits the screen.
+- **A 1080p screen or larger.** Each receiver is one row (station, text, modulation, RF
+  and AM now, a 5-minute trend and every alarm), with the selected receiver in detail
+  underneath: about 800 px tall with four receivers at 100% display scaling, so the whole
+  window fits 1920 × 1080 without scrolling. Pop a receiver's detail out (or double-click
+  its row) to watch several side by side on a larger screen.
 - **SDRplay RSP1A** and the [SDRplay API](https://www.sdrplay.com/api/) 3.x
 - **[radioconda](https://github.com/ryanvolz/radioconda)** (GNU Radio 3.10 with gr-rds,
   SoapySDR, NumPy, SciPy, PyQt5)
@@ -170,8 +181,9 @@ Receivers and settings are saved to `fm-modmon-ms_config.json`; events are logge
 
 ## Web version
 
-`http://<this-pc>:8765/` shows the same panels, updated 10× a second, with each receiver's
-audio in the browser. Anyone who can reach the port can watch and listen; the controls
+`http://<this-pc>:8765/` shows the same station rows and detail (without the History tab),
+drawn from the same readings and updated 10× a second, with each receiver's audio in the
+browser. Anyone who can reach the port can watch and listen; the controls
 need the web password (set in setup), or, without one, a browser on the monitor PC itself.
 
 **Security:** the web version is plain HTTP, so the password crosses the network
