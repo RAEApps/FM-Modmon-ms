@@ -268,6 +268,8 @@ DC_CLEAR_HZ = 250e3        # SDR centre this far from every carrier: the RSP1A's
 IMAGE_CLEAR_HZ = 300e3     # each station's IQ image (mirrored about the centre) this far from every other carrier
 PLAY_GAIN = 0.7
 UPDATE_HZ = 10             # measurement and display rate
+TREND_S = 0.5              # sparklines and the histogram are redrawn this often
+TREND_SPAN_S = 300         # ...over this long
 MAX_RECEIVERS = 4          # receivers the app runs at once
 FM_BATCH = 2048            # Python meters get samples in batches (~8.5 ms),
 AUDIO_BATCH = 512          # so they are called ~100x/s, not ~900x/s; powers
@@ -3192,7 +3194,8 @@ class Meter(QtWidgets.QWidget):
 # Widths of a station row's fixed columns (the text column takes the rest); the
 # column headings above the rows use the same widths.
 ROW_COLS = (('station', 'Station', 250), ('text', 'Text · RT+ · flags', 0),
-            ('tapes', 'Now · peak hold · limit ▼', 300), ('alarms', 'Alarms', 150))
+            ('tapes', 'Now · peak hold · limit ▼', 300), ('trend', 'Trend · 5 min', 176),
+            ('alarms', 'Alarms', 150))
 TAPE_COLOURS = {None: NORMAL, 'warn': '#f0a35e', 'alarm': RED, 'off': '#5d6167'}
 
 
@@ -3418,6 +3421,161 @@ class Annunciator(QtWidgets.QWidget):
             QtWidgets.QToolTip.hideText()
             return True
         return super().event(event)
+
+
+def bucket(t, v, span, n, peak=True, end=None):
+    """Readings (times t, values v) over the last `span` seconds into n equal
+    buckets, oldest first: each bucket's maximum (peak) or mean; NaN where empty."""
+    out = np.full(n, np.nan)
+    if not len(t):
+        return out
+    end = t[-1] if end is None else end
+    keep = (t > end - span) & np.isfinite(v)
+    t, v = t[keep], v[keep]
+    if not len(t):
+        return out
+    i = np.clip(((t - (end - span)) / span * n).astype(int), 0, n - 1)
+    if peak:
+        np.fmax.at(out, i, v)
+    else:
+        sums, counts = np.zeros(n), np.zeros(n)
+        np.add.at(sums, i, v)
+        np.add.at(counts, i, 1)
+        with np.errstate(invalid='ignore'):
+            out = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+    return out
+
+
+class Spark(QtWidgets.QWidget):
+    """A word-sized trend (Tufte's sparkline): the last few minutes of one reading
+    as a filled line on a fixed scale, a dashed limit with the excursions over it
+    filled red, a dotted reference line, and a dot on the newest value."""
+
+    def __init__(self, lo, hi, limit=None, ref=None, height=26):
+        super().__init__()
+        self.lo, self.hi, self.limit, self.ref = lo, hi, limit, ref
+        self.data = np.array([])
+        self.excess = RED
+        self.setFixedHeight(height)
+        self.setMinimumWidth(80)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def set_data(self, values, limit=None, excess=RED):
+        """values: bucketed readings, oldest first (NaN: no reading); excess: the
+        colour of excursions over the limit (amber while the limit isn't judged)."""
+        self.data = np.asarray(values, dtype=float)
+        self.excess = excess
+        self.limit = limit if limit is not None else self.limit
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(self.rect(), QtGui.QColor('#1a1b1f'))
+        n = len(self.data)
+
+        def y(v):
+            v = min(max(v, self.lo), self.hi)
+            return h - 2 - (h - 4) * (v - self.lo) / (self.hi - self.lo)
+
+        def x(i):
+            return 1 + i * (w - 2) / max(n - 1, 1)
+
+        if self.ref is not None:
+            p.setPen(QtGui.QPen(QtGui.QColor('#5d6167'), 1, QtCore.Qt.DotLine))
+            p.drawLine(QtCore.QPointF(0, y(self.ref)), QtCore.QPointF(w, y(self.ref)))
+        if n:
+            ok = np.isfinite(self.data)
+            # one filled run per stretch of readings (a gap stays a gap)
+            runs, start = [], None
+            for i in range(n + 1):
+                if i < n and ok[i]:
+                    start = i if start is None else start
+                elif start is not None:
+                    runs.append((start, i))
+                    start = None
+            colour = QtGui.QColor(TAPE_COLOURS[None])
+            for a, b in runs:
+                pts = [QtCore.QPointF(x(i), y(self.data[i])) for i in range(a, b)]
+                fill = QtGui.QPolygonF([QtCore.QPointF(x(a), h - 2)] + pts + [QtCore.QPointF(x(b - 1), h - 2)])
+                c = QtGui.QColor(colour)
+                c.setAlpha(45)
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(c)
+                p.drawPolygon(fill)
+                p.setPen(QtGui.QPen(colour, 1.1))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawPolyline(QtGui.QPolygonF(pts))
+            if self.limit is not None:
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(QtGui.QColor(self.excess))
+                for i in np.nonzero(ok & (self.data > self.limit))[0]:
+                    p.drawRect(QtCore.QRectF(x(i) - 0.8, y(self.data[i]), 1.8, y(self.limit) - y(self.data[i])))
+            last = np.nonzero(ok)[0]
+            if len(last):
+                p.setBrush(QtGui.QColor('#e3e4e6'))
+                p.drawEllipse(QtCore.QPointF(x(last[-1]), y(self.data[last[-1]])), 2, 2)
+        if self.limit is not None:
+            p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
+            p.drawLine(QtCore.QPointF(0, y(self.limit)), QtCore.QPointF(w, y(self.limit)))
+
+
+class PeakHistogram(QtWidgets.QWidget):
+    """How peak modulation spreads: the share of updates (10 a second) at each
+    peak level over the last few minutes, log height, in 2% bins. A tight peak
+    just under the limit is a processed station; a tail past it, overshoot that a
+    per-minute count flattens (the SOFIA 568's program-dynamics histogram)."""
+    LO, HI, STEP = 60, 130, 2
+
+    def __init__(self):
+        super().__init__()
+        self.counts, self.limit = None, None
+        self.setFixedHeight(64)
+        self.setMinimumWidth(160)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def set_data(self, peaks, limit):
+        peaks = np.asarray(peaks, dtype=float)
+        peaks = peaks[np.isfinite(peaks)]
+        edges = np.arange(self.LO, self.HI + self.STEP, self.STEP)
+        self.counts = np.histogram(np.clip(peaks, self.LO, self.HI - 1e-6), edges)[0] if len(peaks) else None
+        self.limit = limit
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        fm_ = p.fontMetrics()
+        axis = fm_.height()
+        top, bottom = 2, h - axis - 1
+        n = (self.HI - self.LO) // self.STEP
+
+        def x(pct):
+            return w * (pct - self.LO) / (self.HI - self.LO)
+
+        p.fillRect(QtCore.QRectF(0, top, w, bottom - top), QtGui.QColor('#1a1b1f'))
+        p.setPen(QtGui.QColor('#9aa0a6'))
+        for pct in range(self.LO, self.HI, 10):
+            left_ = pct == self.LO
+            p.drawText(QtCore.QRectF(x(pct) - (0 if left_ else 20), bottom + 1, 40, axis),
+                       QtCore.Qt.AlignLeft if left_ else QtCore.Qt.AlignHCenter, f'{pct}%' if pct % 20 == 0 else str(pct))
+        if self.counts is not None and self.counts.max() > 0:
+            top_log = math.log1p(self.counts.max())
+            bw = w / n
+            p.setPen(QtCore.Qt.NoPen)
+            for i, c in enumerate(self.counts):
+                if not c:
+                    continue
+                lo = self.LO + i * self.STEP
+                colour = RED if self.limit is not None and lo >= self.limit else AMBER if lo >= 100 else TAPE_COLOURS[None]
+                bh = (bottom - top) * math.log1p(c) / top_log
+                p.setBrush(QtGui.QColor(colour))
+                p.drawRect(QtCore.QRectF(i * bw + 0.5, bottom - bh, bw - 1, bh))
+        if self.limit is not None:
+            p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
+            p.drawLine(QtCore.QPointF(x(self.limit), top), QtCore.QPointF(x(self.limit), bottom))
 
 
 def column_heads():
@@ -4130,6 +4288,23 @@ class StationPanel(QtCore.QObject):
             tb.addWidget(t)
         row.addWidget(tapes)
 
+        # trend: the last 5 minutes of peak modulation, excursions over the limit in red
+        self.trend_note = QtWidgets.QLabel('')
+        self.trend_note.setStyleSheet('color: #8c9197; font-size: 7pt;')
+        self.trend_note.setTextFormat(QtCore.Qt.RichText)
+        self.spark = Spark(70, 125, limit=100)
+        self.spark.setToolTip('Peak modulation, the last 5 minutes (each point: its highest); '
+                              'red: over the limit in force')
+        trend = QtWidgets.QWidget()
+        trend.setFixedWidth(widths['trend'])
+        tr = QtWidgets.QVBoxLayout(trend)
+        tr.setContentsMargins(0, 0, 0, 0)
+        tr.setSpacing(1)
+        tr.addWidget(self.trend_note)
+        tr.addWidget(self.spark)
+        row.addWidget(trend)
+        self._trend_t = -math.inf
+
         # every alarm, always in the same place: raised, holding off, not judged, off
         self.annunciator = Annunciator()
         self.annunciator.setFixedWidth(widths['alarms'])
@@ -4259,7 +4434,11 @@ class StationPanel(QtCore.QObject):
                            for key, name in (('pos', '+ peak'), ('neg', '− peak'))}
         for t in self.peak_tapes.values():
             box.addWidget(t)
-        self.mod_extra = box   # sparklines and the histogram go here
+        self.peak_hist = PeakHistogram()
+        self.peak_hist.setToolTip('How peak modulation spreads: the share of updates at each peak level over the '
+                                  'last 5 minutes (log height). Red: over the limit in force; amber: over 100%')
+        box.addWidget(dim_label('Peak distribution \u00b7 last 5 min'))
+        box.addWidget(self.peak_hist)
         box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'L / R', 'L+R / L−R',
                                 'Limit'), 2, wide=('Limit',)))
         box.addStretch(1)
@@ -4291,7 +4470,9 @@ class StationPanel(QtCore.QObject):
         # RDS
         self.rds_note = dim_label()
         rds, box = card('RDS', self.rds_note)
-        self.rds_extra = box
+        self.rds_spark = Spark(0, 12)
+        self.rds_spark.setToolTip('RDS groups per second, the last 5 minutes (11.4/s is every group)')
+        box.addWidget(self.rds_spark)
         box.addLayout(self._kv(('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs',
                                 'Clock', 'Group types', 'Data services'), 2,
                                wide=('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')))
@@ -4309,7 +4490,9 @@ class StationPanel(QtCore.QObject):
         reset.clicked.connect(station.audio_meter.reset_integrated)
         audio, box = card('Audio', reset)
         box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 2))
-        self.audio_extra = box
+        self.lufs_spark = Spark(-40, 0, ref=-23)
+        self.lufs_spark.setToolTip('Short-term loudness, the last 5 minutes (dotted: -23 LUFS)')
+        box.addWidget(self.lufs_spark)
         self.gonio = Goniometer(size=104)
         self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
         self.gonio.setToolTip('Click for a larger view')
@@ -4575,6 +4758,10 @@ class StationPanel(QtCore.QObject):
             t.clear()
         self.meta.setText('')
         self.annunciator.set_states({})
+        self._trend_t = -math.inf
+        for spark in (self.spark, self.rds_spark, self.lufs_spark):
+            spark.set_data([])
+        self.peak_hist.set_data([], None)
         self.gonio.set_data(None)
         self.mpx.set_data(None)
 
@@ -5051,6 +5238,9 @@ class StationPanel(QtCore.QObject):
                 changes = [(desc, raised, details.get(name, '')) for name, desc, raised in changes]
         r['alarms'] = self._alarm_states(conditions, clean)
         self.history.add(time.time(), r)
+        if time.monotonic() - self._trend_t >= TREND_S:
+            self._trend_t = time.monotonic()
+            self._show_trends(r)
         feed = ''
         if self.feed:
             n = self.feed.clients
@@ -5070,6 +5260,34 @@ class StationPanel(QtCore.QObject):
             self.rt.setToolTip(r['rt'])
         self.annunciator.set_states(r['alarms'], self._alarm_notes(r))
         return changes
+
+    def trends(self, n=88):
+        """The last TREND_SPAN_S, bucketed for sparklines: {'peak', 'rds_rate', 'short_term'}
+        (n points each, NaN where there was no reading), 'peaks' (every update's peak),
+        and 'over100' (updates over 100% in the last minute, as a count per minute)."""
+        h = self.history
+        t, pos = h.series('pos_pct', TREND_SPAN_S)
+        _, neg = h.series('neg_pct', TREND_SPAN_S)
+        with np.errstate(invalid='ignore'):
+            peaks = np.fmax(pos, neg)
+        end = t[-1] if len(t) else None
+        return {'peak': bucket(t, peaks, TREND_SPAN_S, n, True, end),
+                'rds_rate': bucket(*h.series('rds_rate', TREND_SPAN_S), TREND_SPAN_S, n, False, end),
+                'short_term': bucket(*h.series('short_term', TREND_SPAN_S), TREND_SPAN_S, n, False, end),
+                'peaks': peaks[np.isfinite(peaks)]}
+
+    def _show_trends(self, r):
+        tr = self.trends(max(self.spark.width() // 2, 40))
+        limit = r.get('limit_pct')
+        self.spark.set_data(tr['peak'], limit, AMBER if r.get('alarms', {}).get('OVERMOD') == 'suppressed' else RED)
+        over = r.get('over100_min')
+        self.trend_note.setText('peak modulation' + ('' if over is None else
+                                                     f' \u00b7 {over}/min over 100%' if not over else
+                                                     f' \u00b7 <b style="color:{AMBER}">{over}/min over 100%</b>'))
+        if self.detail.isVisible():
+            self.peak_hist.set_data(tr['peaks'], limit)
+            self.rds_spark.set_data(tr['rds_rate'])
+            self.lufs_spark.set_data(tr['short_term'])
 
     def _alarm_notes(self, r):
         """Why an alarm isn't judged now, for the annunciator's tooltips."""
