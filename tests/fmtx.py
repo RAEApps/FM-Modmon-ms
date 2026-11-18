@@ -189,8 +189,9 @@ def mpx(rm, seconds, left=(), right=(), pilot=0.09, pilot_hz=19000.0, rds=0.0, r
     return x.astype(np.float32), info
 
 
-def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e6, seed=1):
-    """Feed the MPX through a transmitter and a real FmStation; returns the station."""
+def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e6, seed=1, echo=None):
+    """Feed the MPX through a transmitter and a real FmStation; returns the station.
+    echo: (delay_s, gain, phase_rad) adds one reflection (two-ray multipath)."""
     from gnuradio import analog, blocks, filter, gr
     from gnuradio.filter import firdes
     tb = gr.top_block()
@@ -205,6 +206,12 @@ def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e
         mul = blocks.multiply_cc()
         tb.connect(env, blocks.float_to_complex(), (mul, 1))
         chain.append(mul)
+    if echo:
+        delay_s, g, phase = echo
+        add = blocks.add_cc()
+        refl = blocks.multiply_const_cc(g * complex(math.cos(phase), math.sin(phase)))
+        tb.connect(chain[-1], blocks.delay(gr.sizeof_gr_complex, round(delay_s * rm.SAMP_RATE)), refl, (add, 1))
+        chain.append(add)
     if noise:
         add = blocks.add_cc()
         tb.connect(analog.noise_source_c(analog.GR_GAUSSIAN, noise, seed), (add, 1))

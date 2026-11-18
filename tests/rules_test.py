@@ -41,10 +41,15 @@ def judge(st, rules, country='CA', keep=(), **settings):
     return sorted(p.alarms.active - ({'RDS', 'PILOT', 'SILENCE'} - set(keep))), s, None, plain
 
 
-def station(seconds=6.0, rf_amp=0.1, **kw):
+def station(seconds=6.0, rf_amp=0.1, echo=None, **kw):
     dc = kw.pop('dc_hz', 0.0)
     x, _ = fmtx.mpx(rm, seconds, dc_hz=dc, **kw)
-    return fmtx.run(rm, x, rf_amp=rf_amp, noise=0.0003)
+    return fmtx.run(rm, x, rf_amp=rf_amp, noise=0.0003, echo=echo)
+
+
+# Programme with treble (echoes inflate peaks most where the deviation changes fastest)
+def bright(level):
+    return dict(left=[(997, level), (12000, 0.05)], right=[(1600, level), (14000, 0.04)], pilot=0.09, rds=0.04)
 
 
 cases = [
@@ -68,7 +73,7 @@ for title, kw, expect in cases:
     s = st.meter.stats
     print(f'--- {title}: peaks +{s["pos_pct"]:.1f}/-{s["neg_pct"]:.1f}%, pilot {s["pilot_pct"]:.1f}% '
           f'{st.pilot_hz and round(st.pilot_hz, 1)} Hz, RDS {s["rds_pct"]:.1f}%, SCA67 {s["sca67_pct"]}, '
-          f'SCA92 {s["sca92_pct"]}, offset {s["offset_hz"]:+.0f} Hz')
+          f'SCA92 {s["sca92_pct"]}, offset {s["offset_hz"]:+.0f} Hz, AM {s["am_pct"]:.1f}% (10 s max {s["am_max_pct"]:.1f}%)')
     for rules, want in expect.items():
         got, _, limit, shown = judge(st, rules)
         ok = got == sorted(want)
@@ -91,6 +96,15 @@ check('PI differs', judge(st, '', expected_pi='ABCD')[0], ['PI'])
 check('PI differs, alarm switched off', judge(st, '', expected_pi='ABCD', alarms={'PI': False})[0], [])
 check('silent programme', judge(station(pilot=0.09, rds=0.04), '', keep=('SILENCE',))[0], ['SILENCE'])
 check('carrier below -75 dBFS', judge(station(rf_amp=0.0001, **music), '')[0], ['CARRIER'])
+# Multipath: an echo 20 dB down and 10 us late reads ~10% AM and adds ~6% of false peak.
+# Over-modulation is judged only under 5% AM (ITU-R SM.1268); the other rules under 15%.
+st = station(**bright(0.44), echo=(10e-6, 0.1, 1.6))
+s = st.meter.stats
+check('echo: ~97% programme reads over the 102% limit', max(s['pos_pct'], s['neg_pct']) > 102, True)
+check('echo: ...but over-modulation is not judged at ~10% AM', judge(st, 'fcc')[0], [])
+check('echo: pilot rules still judged under 15% AM', judge(st, 'custom', pilot_min_pct=9.5)[0], ['PILOT_SPEC'])
+st = station(**bright(0.52), echo=(2e-6, 0.1, 0.0))
+check('weak echo (~1% AM): real over-modulation still raised', judge(st, 'fcc')[0], ['OVERMOD'])
 check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
 
 rm.time = fake

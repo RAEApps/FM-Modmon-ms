@@ -52,6 +52,11 @@ Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout.
 
 - **Windows 10/11** (developed and tested there; some parts – DNS SRV lookups for
   RadioDNS, sign-in autostart – use Windows APIs)
+- **A large screen.** Each receiver shows a lot at once: about 1,460 px tall at 100% display
+  scaling (1,690 at 150%), and 940 px wide (1,330 at 150%), up to four side by side. A **4K
+  monitor** (3840 × 2160) shows everything, all four receivers included, without scrolling.
+  On 1440p the receivers scroll a little, and on 1080p and laptop screens they scroll more;
+  everything still works, and the window always fits the screen.
 - **SDRplay RSP1A** and the [SDRplay API](https://www.sdrplay.com/api/) 3.x
 - **[radioconda](https://github.com/ryanvolz/radioconda)** (GNU Radio 3.10 with gr-rds,
   SoapySDR, NumPy, SciPy, PyQt5)
@@ -61,7 +66,7 @@ Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout.
 - Optional: **ffmpeg** on the PATH for web audio (MP3, AAC, Opus, FLAC)
 - Optional: **nrsc5** on the PATH (or in a sibling `../nrsc5*/build/src/` folder) for IBOC
 
-## Installing on a new PC
+## Installing
 
 In PowerShell (it asks for administrator rights):
 
@@ -69,8 +74,8 @@ In PowerShell (it asks for administrator rights):
 irm https://raw.githubusercontent.com/RAEApps/FM-Modmon-ms/main/install.ps1 | iex
 ```
 
-[`install.ps1`](install.ps1) brings a fresh Windows PC up to a running monitor, downloading
-each piece from its source and skipping what's already installed:
+[`install.ps1`](install.ps1) installs the monitor and everything it needs, downloading each
+piece from its source and skipping what's already installed:
 
 - **radioconda** 2025.03.14 from its GitHub release (about 630 MB)
 - **SDRplay API** (the RSP1A's USB driver and service): SDRplay only offers it from
