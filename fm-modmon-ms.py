@@ -3578,6 +3578,272 @@ class PeakHistogram(QtWidgets.QWidget):
             p.drawLine(QtCore.QPointF(x(self.limit), top), QtCore.QPointF(x(self.limit), bottom))
 
 
+def alarm_episodes(log, end):
+    """The alarm log's raise/clear pairs as [(name, start, stop or None while raised)]."""
+    out, open_ = [], {}
+    for t, name, raised in log:
+        if raised:
+            open_.setdefault(name, t)
+        elif name in open_:
+            out.append((name, open_.pop(name), t))
+    out += [(name, t, None) for name, t in open_.items()]
+    return sorted(out, key=lambda e: e[1])
+
+
+def duration_text(seconds):
+    s = int(max(seconds, 0))
+    if s < 60:
+        return f'{s} s'
+    if s < 3600:
+        return f'{s // 60} min {s % 60:02d} s'
+    return f'{s // 3600} h {s % 3600 // 60:02d} min'
+
+
+class HistoryStrips(QtWidgets.QWidget):
+    """A receiver's readings over one time span as stacked strips on one time
+    axis, with the alarm episodes underneath, and one cursor (follows the mouse)
+    that reads every strip at the same instant, as on the Inovonics 541's
+    history plots. Peak readings show each pixel's maximum, the rest its mean."""
+    # title, unit, history keys, low, high, peak?, reference line
+    STRIPS = (('Peak modulation', '%', ('pos_pct', 'neg_pct'), 0, 130, True, 100),
+              ('RF level', 'dBFS', ('rf_dbfs',), -90, -10, False, None),
+              ('MPX S/N', 'dB', ('snr_db',), 0, 70, False, None),
+              ('AM / multipath', '%', ('am_pct',), 0, 40, True, PEAK_AM_PCT),
+              ('Pilot', '%', ('pilot_pct',), 0, 12, False, None),
+              ('RDS groups', '/s', ('rds_rate',), 0, 12, False, None),
+              ('Loudness S', 'LUFS', ('short_term',), -40, 0, False, -23),
+              ('MPX power', 'dBr', ('mpx_dbr',), -12, 6, False, 0))
+    STRIP_H, LABEL_W, ALARM_H = 34, 150, 22
+
+    def __init__(self, panel):
+        super().__init__()
+        self.panel = panel
+        self.span = 300
+        self.cursor_x = None
+        self._data = None      # (end time, [(strip values)], episodes)
+        self.setMouseTracking(True)
+        self.setMinimumHeight(len(self.STRIPS) * self.STRIP_H + self.ALARM_H + 22)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def refresh(self):
+        h = self.panel.history
+        end = time.time()
+        # one point per pixel, but no finer than the readings (a gap would break the line)
+        rate = UPDATE_HZ if self.span <= History.FAST_S else 1
+        n = min(max(self.width() - self.LABEL_W - 8, 50), int(self.span * rate))
+        strips = []
+        for _, _, keys, *_rest in self.STRIPS:
+            peak = _rest[2]
+            rows = [bucket(*h.series(k, self.span), self.span, n, peak, end) for k in keys]
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                strips.append(np.nanmax(rows, axis=0) if len(rows) > 1 else rows[0])
+        self._data = (end, strips, alarm_episodes(h.alarm_log, end))
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        self.cursor_x = event.pos().x() if event.pos().x() >= self.LABEL_W else None
+        self.update()
+
+    def leaveEvent(self, event):
+        self.cursor_x = None
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        w = self.width()
+        left, right = self.LABEL_W, w - 8
+        fm_ = p.fontMetrics()
+        if not self._data:
+            return
+        end, strips, episodes = self._data
+        n = len(strips[0])
+        at = None
+        if self.cursor_x is not None and right > left:
+            at = int(min(max((self.cursor_x - left) / (right - left) * n, 0), n - 1))
+        for k, ((title, unit, _, lo, hi, _, ref), values) in enumerate(zip(self.STRIPS, strips)):
+            top = k * self.STRIP_H
+            box = QtCore.QRectF(left, top + 2, right - left, self.STRIP_H - 4)
+            p.fillRect(box, QtGui.QColor('#141518'))
+
+            def y(v):
+                v = min(max(v, lo), hi)
+                return box.bottom() - box.height() * (v - lo) / (hi - lo)
+
+            limit = self.panel.readings.get('limit_pct') if title == 'Peak modulation' else None
+            for line, style in ((ref, QtCore.Qt.DotLine), (limit, QtCore.Qt.DashLine)):
+                if line is not None:
+                    p.setPen(QtGui.QPen(QtGui.QColor(RED if style == QtCore.Qt.DashLine else '#5d6167'), 1, style))
+                    p.drawLine(QtCore.QPointF(left, y(line)), QtCore.QPointF(right, y(line)))
+            p.setPen(QtGui.QPen(QtGui.QColor(TAPE_COLOURS[None]), 1.1))
+            pts, last = [], None
+            gap = max(2, 2 * n / self.span)   # buckets: a gap over 2 s breaks the line
+            for i in np.nonzero(np.isfinite(values))[0]:
+                if last is not None and i - last > gap:
+                    p.drawPolyline(QtGui.QPolygonF(pts))
+                    pts = []
+                pts.append(QtCore.QPointF(left + (right - left) * (i + 0.5) / n, y(values[i])))
+                last = i
+            if len(pts) > 1:
+                p.drawPolyline(QtGui.QPolygonF(pts))
+            if limit is not None:
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(QtGui.QColor(RED))
+                for i in np.nonzero(np.isfinite(values) & (values > limit))[0]:
+                    x = left + (right - left) * (i + 0.5) / n
+                    p.drawRect(QtCore.QRectF(x - 0.7, y(values[i]), 1.6, y(limit) - y(values[i])))
+            if at is not None:   # the reading nearest the cursor
+                near = [values[i] for i in range(max(at - 2, 0), min(at + 3, n)) if math.isfinite(values[i])]
+                shown = near[len(near) // 2] if near else math.nan
+            else:
+                shown = next((v for v in values[::-1] if math.isfinite(v)), math.nan)
+            p.setPen(QtGui.QColor('#9aa0a6'))
+            p.drawText(QtCore.QRectF(4, top, left - 10, self.STRIP_H / 2 + 2), QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom,
+                       title)
+            p.setPen(QtGui.QColor('#e3e4e6'))
+            p.drawText(QtCore.QRectF(4, top + self.STRIP_H / 2, left - 10, self.STRIP_H / 2),
+                       QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
+                       f'{shown:.1f} {unit}' if math.isfinite(shown) else '-')
+        # alarm episodes, on the same time axis
+        top = len(self.STRIPS) * self.STRIP_H
+        box = QtCore.QRectF(left, top + 2, right - left, self.ALARM_H - 4)
+        p.fillRect(box, QtGui.QColor('#141518'))
+        start = end - self.span
+
+        def tx(t):
+            return left + (right - left) * (t - start) / self.span
+
+        active_at = []
+        t_at = start + (at + 0.5) / n * self.span if at is not None else None
+        p.setPen(QtCore.Qt.NoPen)
+        for name, a, b in episodes:
+            b_ = end if b is None else b
+            if b_ < start:
+                continue
+            x0, x1 = tx(max(a, start)), tx(b_)
+            p.setBrush(QtGui.QColor(RED))
+            p.drawRect(QtCore.QRectF(x0, box.top(), max(x1 - x0, 2), box.height()))
+            if x1 - x0 > fm_.horizontalAdvance(Annunciator.SHORT[name]) + 6:
+                p.setPen(QtGui.QColor('#ffe0e0'))
+                p.drawText(QtCore.QRectF(x0, box.top(), x1 - x0, box.height()), QtCore.Qt.AlignCenter,
+                           Annunciator.SHORT[name])
+                p.setPen(QtCore.Qt.NoPen)
+            if t_at is not None and a <= t_at <= b_:
+                active_at.append(Annunciator.SHORT[name])
+        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.drawText(QtCore.QRectF(4, top, left - 10, self.ALARM_H), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                   'Alarms' + (f': {", ".join(active_at)}' if active_at else ''))
+        # time axis and the cursor
+        axis_top = top + self.ALARM_H
+        for frac in (0, 0.25, 0.5, 0.75, 1):
+            x = left + (right - left) * frac
+            ago = self.span * (1 - frac)
+            text = 'now' if not ago else (f'−{ago / 60:g} min' if ago >= 60 else f'−{ago:g} s')
+            align = QtCore.Qt.AlignLeft if frac == 0 else QtCore.Qt.AlignRight if frac == 1 else QtCore.Qt.AlignHCenter
+            rect = QtCore.QRectF(x - (0 if frac == 0 else 60 if frac == 1 else 30), axis_top + 2, 60, fm_.height())
+            p.drawText(rect, align, text)
+        if t_at is not None:
+            x = left + (right - left) * (at + 0.5) / n
+            p.setPen(QtGui.QPen(QtGui.QColor('#e3e4e6'), 1))
+            p.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, axis_top))
+            p.drawText(QtCore.QRectF(x + 4, axis_top + 2, 120, fm_.height()), QtCore.Qt.AlignLeft,
+                       time.strftime('%H:%M:%S', time.localtime(t_at)))
+
+
+class HistoryView(QtWidgets.QWidget):
+    """The detail view's History tab: a span to look back over and the strips."""
+    SPANS = (('1 min', 60), ('5 min', 300), ('1 hour', 3600))
+
+    def __init__(self, panel):
+        super().__init__()
+        box = QtWidgets.QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+        head = QtWidgets.QHBoxLayout()
+        self.span = QtWidgets.QComboBox()
+        for label, seconds in self.SPANS:
+            self.span.addItem(label, seconds)
+        self.span.setCurrentIndex(1)
+        self.span.activated.connect(lambda i: self._set_span(self.span.itemData(i)))
+        note = QtWidgets.QLabel('Hover to read every strip at one moment. Up to 5 min: every update; '
+                                'beyond: one point a second (peaks: its highest). Alarms: the last 24 h.')
+        note.setStyleSheet('color: #8c9197;')
+        head.addWidget(QtWidgets.QLabel('Span'))
+        head.addWidget(self.span)
+        head.addWidget(note, 1)
+        box.addLayout(head)
+        self.strips = HistoryStrips(panel)
+        box.addWidget(self.strips)
+        box.addStretch(1)
+
+    def _set_span(self, seconds):
+        self.strips.span = seconds
+        self.strips.refresh()
+
+    def refresh(self):
+        self.strips.refresh()
+
+
+class AlarmTable(QtWidgets.QTableWidget):
+    """The alarms of this session, one row per alarm (raised to cleared) with how
+    long it lasted, newest first; the ones still raised in red, their time running."""
+    COLS = ('Raised', 'Station', 'Alarm', 'Duration', 'Cleared', 'Measured')
+
+    def __init__(self):
+        super().__init__(0, len(self.COLS))
+        self.setHorizontalHeaderLabels(self.COLS)
+        self.verticalHeader().hide()
+        self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.setShowGrid(False)
+        self.setWordWrap(False)
+        hh = self.horizontalHeader()
+        hh.setStretchLastSection(True)
+        for i, w in enumerate((130, 120, 200, 100, 70)):
+            self.setColumnWidth(i, w)
+        self.verticalHeader().setDefaultSectionSize(20)
+        self.episodes = []   # {'key', 'station', 'desc', 'start', 'end' (None while raised), 'detail'}
+
+    def raised(self, key, station, desc, detail, t=None):
+        """key: which receiver and station (its title can change while the alarm is up)."""
+        self.episodes.append({'key': key, 'station': station, 'desc': desc, 'start': t or time.time(), 'end': None,
+                              'detail': detail})
+        self.episodes = self.episodes[-500:]
+        self.redraw()
+
+    def cleared(self, key, desc, t=None):
+        for e in reversed(self.episodes):
+            if e['key'] == key and e['desc'] == desc and e['end'] is None:
+                e['end'] = t or time.time()
+                break
+        self.redraw()
+
+    def raised_now(self):
+        return sum(e['end'] is None for e in self.episodes)
+
+    def redraw(self):
+        """Fill the table (and keep the running durations going): call once a second."""
+        now = time.time()
+        rows = list(reversed(self.episodes))
+        if self.rowCount() != len(rows):
+            self.setRowCount(len(rows))
+        for r, e in enumerate(rows):
+            on = e['end'] is None
+            cells = (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(e['start'])), e['station'], e['desc'],
+                     duration_text((now if on else e['end']) - e['start']) + (' …' if on else ''),
+                     'raised' if on else time.strftime('%H:%M:%S', time.localtime(e['end'])), e['detail'])
+            for c, text in enumerate(cells):
+                item = self.item(r, c)
+                if item is None:
+                    item = QtWidgets.QTableWidgetItem()
+                    self.setItem(r, c, item)
+                if item.text() != text:
+                    item.setText(text)
+                    item.setToolTip(text)
+                item.setForeground(QtGui.QColor(RED if on else '#c4c7cc'))
+
+
 def column_heads():
     """The headings over the station rows, at the rows' column widths."""
     head = QtWidgets.QWidget()
@@ -4346,6 +4612,7 @@ class StationPanel(QtCore.QObject):
         self.tabs.setDrawBase(False)
         self.tabs.setExpanding(False)
         self.tabs.addTab('Overview')
+        self.tabs.addTab('History')
         self.pop_btn = QtWidgets.QToolButton()
         self.pop_btn.setText('⧉  Pop out')
         self.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
@@ -4360,6 +4627,7 @@ class StationPanel(QtCore.QObject):
         layout.addLayout(head)
         self.pages = QtWidgets.QStackedWidget()
         self.tabs.currentChanged.connect(self.pages.setCurrentIndex)
+        self.tabs.currentChanged.connect(lambda i: i == 1 and self.history_view.refresh())
         layout.addWidget(self.pages)
         overview = QtWidgets.QWidget()
         ov = QtWidgets.QVBoxLayout(overview)
@@ -4530,6 +4798,8 @@ class StationPanel(QtCore.QObject):
         cards.addWidget(audio, 0, 3)
         for col, stretch in enumerate((24, 26, 24, 22)):
             cards.setColumnStretch(col, stretch)
+        self.history_view = HistoryView(self)
+        self.pages.addWidget(self.history_view)
         # readouts the tapes show instead: kept (hidden) so every reading still has its text
         for name in ('Peak + / −', 'MPX S/N', 'Carrier offset', 'Pilot (19 kHz)'):
             self.values[name] = QtWidgets.QLabel('-')
@@ -5284,6 +5554,8 @@ class StationPanel(QtCore.QObject):
         self.trend_note.setText('peak modulation' + ('' if over is None else
                                                      f' \u00b7 {over}/min over 100%' if not over else
                                                      f' \u00b7 <b style="color:{AMBER}">{over}/min over 100%</b>'))
+        if self.history_view.isVisible():
+            self.history_view.refresh()
         if self.detail.isVisible():
             self.peak_hist.set_data(tr['peaks'], limit)
             self.rds_spark.set_data(tr['rds_rate'])
@@ -6939,13 +7211,25 @@ class MainWindow(QtWidgets.QWidget):
         self.selected = None
         self.scroll = ReceiverScroll(receivers)
         layout.addWidget(self.scroll, 1)   # spare height goes to the receivers, not the event log
-        events, events_box = card('Events')
+        events, events_box = card()
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
         self.log_view.setFont(QtGui.QFont('Consolas', 9))
-        self.log_view.setFixedHeight(86)
-        events_box.addWidget(self.log_view)
+        self.alarm_table = AlarmTable()
+        self.log_tabs = QtWidgets.QTabBar()
+        self.log_tabs.setObjectName('detailTabs')
+        self.log_tabs.setDrawBase(False)
+        self.log_tabs.setExpanding(False)
+        self.log_tabs.addTab('Alarms')
+        self.log_tabs.addTab('Events')
+        logs = QtWidgets.QStackedWidget()
+        logs.addWidget(self.alarm_table)
+        logs.addWidget(self.log_view)
+        logs.setFixedHeight(104)
+        self.log_tabs.currentChanged.connect(logs.setCurrentIndex)
+        events_box.addWidget(self.log_tabs, 0, QtCore.Qt.AlignLeft)
+        events_box.addWidget(logs)
         events.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         layout.addWidget(events)
         for slot, st in enumerate(tb.slots):
@@ -7473,6 +7757,12 @@ class MainWindow(QtWidgets.QWidget):
         st.set_audio(key, on)
 
     def _alarm_event(self, panel, desc, raised, detail=''):
+        key = (panel.slot, panel.station.freq_hz)
+        if raised:
+            self.alarm_table.raised(key, panel.title, desc, detail)
+        else:
+            self.alarm_table.cleared(key, desc)
+        self._alarm_tab()
         text = f'{panel.title}: {"ALARM" if raised else "cleared"} - {desc}' + (f': {detail}' if detail else '')
         self.log(text)
         if not self._recovery:
@@ -7486,7 +7776,15 @@ class MainWindow(QtWidgets.QWidget):
                 self._alarm_event(panel, desc, False, why)
         panel.alarms.active.clear()
 
+    def _alarm_tab(self):
+        n = self.alarm_table.raised_now()
+        self.log_tabs.setTabText(0, f'Alarms \u00b7 {n} raised' if n else 'Alarms')
+        self.log_tabs.setTabTextColor(0, QtGui.QColor(RED if n else '#9aa0a6'))
+
     def _refresh(self):
+        self._ticks = getattr(self, '_ticks', 0) + 1
+        if self._ticks % UPDATE_HZ == 0 and self.alarm_table.raised_now():
+            self.alarm_table.redraw()   # the running durations
         for p in self.panels:
             if p.feed and p.feed.clients != self._feed_clients.get(p.slot, 0):
                 n, was = p.feed.clients, self._feed_clients.get(p.slot, 0)
