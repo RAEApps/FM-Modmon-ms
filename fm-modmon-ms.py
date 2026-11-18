@@ -163,8 +163,13 @@ Measurements (refreshed 10x per second):
                     are proprietary, so data is identified, not decoded
     IBOC signal     IBOC sidebands found by the start-up scan, in dBc
   Modulation (100% = 75 kHz deviation)
-    Peak + / -      1 s peak of positive and negative excursions
-    Peak deviation  1 s peak of the 99.9th percentile of |MPX|
+    Peak + / -      1 s peak of positive and negative excursions: the level
+                    the MPX exceeds for 17 us of each 100 ms (a single noise
+                    sample doesn't count), read through a filter that undoes
+                    the demodulator's sinc roll-off (L-R, RDS and SCA peaks
+                    read up to 3% low without it) and stops the noise above
+                    100 kHz
+    Peak deviation  the same, of |MPX|, in kHz
     Over 100/110%   excursions above 100% / 110% in the last minute
     L, R, L+R, L-R  1 s peak modulation of each, as transmitted
     MPX power       ITU-R BS.412, 60 s, dBr (0 dBr = +/-19 kHz sine)
@@ -313,7 +318,11 @@ SCA_MIN_DB = 10.0          # SCA must be this far above the 77-82 kHz gap
 DYNAMIC_PS_S = 30          # a PS that changes 3+ times in this long is dynamic
 PS_NAME_STABLE_S = 10      # a PS names the station once it has held this long
 OVERMOD_WINDOW_S = 0.001   # over-modulation is counted per 1 ms window
-OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes)
+OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes); a peak
+                           # reading is likewise the level the MPX exceeds for this long per update
+PEAK_PASS_HZ = 100e3       # peak path: the MPX to here (programme, RDS and SCA end by 99 kHz), the
+PEAK_STOP_HZ = 120e3       # ...demodulator's sinc roll-off undone; stopped from here (only noise above)
+PEAK_TAPS_N = 63           # ...in this many taps: flat to +/-0.1% (ripple reads as false peak)
 MPX_POWER_S = 60           # ITU-R BS.412 MPX power integration time
 PEAK_AM_PCT = 5.0          # over-modulation is judged only while AM / multipath has stayed
 PEAK_AM_S = 10             # ...under this for this long (ITU-R SM.1268: echoes 26 dB down,
@@ -718,8 +727,23 @@ def _percentiles(x, qs):
     return [float(part[i] + (p - i) * (part[i + 1] - part[i])) for p, i in zip(pos, lo)]
 
 
+def peak_taps(n=PEAK_TAPS_N, fpass=PEAK_PASS_HZ, fstop=PEAK_STOP_HZ, fs=QUAD_RATE):
+    """Linear-phase FIR for the peak path: 1/sinc(f/fs) to fpass, undoing the
+    quadrature demodulator's roll-off (-1.6% at 38 kHz, -3.2% at 57 kHz), which
+    reads peaks of L-R, RDS and SCA low; zero from fstop, where the MPX holds only
+    FM noise (rising as f^2), which reads as peak. Least squares on a dense grid."""
+    k = np.arange(n // 2 + 1)
+    fp = np.linspace(0, fpass, 600) / fs
+    fz = np.linspace(fstop, fs / 2, 600) / fs
+    basis = lambda f: np.cos(2 * np.pi * np.outer(f, k)) * np.where(k > 0, 2, 1)  # noqa: E731
+    h = np.linalg.lstsq(np.concatenate([basis(fp), 10 * basis(fz)]),
+                        np.concatenate([1 / np.sinc(fp), np.zeros_like(fz)]), rcond=None)[0]
+    return np.concatenate([h[:0:-1], h])
+
+
 class FmMeter(gr.sync_block):
-    """Measures a station from its channel IQ and MPX (both at QUAD_RATE).
+    """Measures a station from its channel IQ, MPX and peak-path MPX (the MPX
+    through peak_taps()), all at QUAD_RATE.
 
     Results land in self.stats (a dict, replaced atomically) UPDATE_HZ times
     a second; on_stats(stats) is called with each result.
@@ -730,12 +754,14 @@ class FmMeter(gr.sync_block):
 
     def __init__(self, on_stats=None):
         gr.sync_block.__init__(self, name='fm_meter',
-                               in_sig=[(np.complex64, FM_BATCH), (np.float32, FM_BATCH)], out_sig=None)
+                               in_sig=[(np.complex64, FM_BATCH), (np.float32, FM_BATCH), (np.float32, FM_BATCH)],
+                               out_sig=None)
         self.stats = None
         self.last_update = None   # time.monotonic() of the last measurement: samples are flowing
         self._on_stats = on_stats
         self._period = int(QUAD_RATE / UPDATE_HZ)
         self._chunks = []
+        self._peak_chunks = []
         self._count = 0
         self._iq_energy = 0.0
         self._win = np.hanning(self.NFFT).astype(np.float32)
@@ -774,10 +800,10 @@ class FmMeter(gr.sync_block):
         self.stats = None
 
     def work(self, input_items, output_items):
-        iq, mpx = (a.reshape(-1) for a in input_items)  # batches -> samples
+        iq, mpx, peak = (a.reshape(-1) for a in input_items)  # batches -> samples
         if self._reset:
             self._reset = False
-            self._chunks, self._count, self._iq_energy = [], 0, 0.0
+            self._chunks, self._peak_chunks, self._count, self._iq_energy = [], [], 0, 0.0
             self._psd = self._rf = self._offset = self._am = self._rds = None
             self._rds_fft = None
             self._env_sum, self._env, self._sync = 0.0, [], None
@@ -792,13 +818,15 @@ class FmMeter(gr.sync_block):
         self._env.append(env)
         self._env_sum += float(np.sum(env))
         self._chunks.append(mpx.copy())
+        self._peak_chunks.append(peak.copy())
         self._count += len(mpx)
         if self._count >= self._period:
             self.last_update = time.monotonic()
             self.stats = self._measure(np.concatenate(self._chunks),
                                        self._iq_energy / self._count, self._env_sum / self._count,
-                                       np.concatenate(self._env))
-            self._chunks, self._count, self._iq_energy, self._env_sum, self._env = [], 0, 0.0, 0.0, []
+                                       np.concatenate(self._env), np.concatenate(self._peak_chunks))
+            self._chunks, self._peak_chunks, self._count, self._iq_energy, self._env_sum, self._env = \
+                [], [], 0, 0.0, 0.0, []
             if self._on_stats:
                 self._on_stats(self.stats)
         return len(input_items[0])
@@ -937,7 +965,7 @@ class FmMeter(gr.sync_block):
         fit = a * t + b * t * t
         return float(np.max(fit) - np.min(fit)) / 2
 
-    def _measure(self, x, iq_power, env_mean, env=None):
+    def _measure(self, x, iq_power, env_mean, env=None, xp=None):
         # Carrier offset = DC of the MPX; Hann-weighted so bass leaks less,
         # then smoothed over a few seconds.
         if len(x) != len(self._dc_win):
@@ -947,16 +975,23 @@ class FmMeter(gr.sync_block):
         self._offset = self._smooth(self._offset, mean, 0.03)
         self._rf = self._smooth(self._rf, iq_power, 0.3)
         x = x - mean
+        # Peaks come from the peak path (demodulator roll-off undone, noise above
+        # 100 kHz removed); its filter passes DC unchanged.
+        xp = x if xp is None else xp - mean
         frames = x[:len(x) // self.NFFT * self.NFFT].reshape(-1, self.NFFT) * self._win
         # One-sided power per bin, so summing a band gives that band's variance.
         psd = np.mean(np.abs(np.fft.rfft(frames, axis=1)) ** 2, axis=0)
         psd *= 2.0 / (self.NFFT * np.sum(self._win ** 2)) * self._demod_comp
         self._psd = self._smooth(self._psd, psd, 0.25)
-        ax = np.abs(x)
-        self._peaks.append(_percentiles(ax, (99.9,))[0])
+        ax = np.abs(xp)
+        # A peak is the level the MPX exceeds for OVERMOD_MIN_S in this update, as the
+        # over-modulation counter's minimum: not a single sample (noise), but no
+        # shorter a trim than that, or a real peak's tip is cut and reads low.
+        trim = 100 * OVERMOD_MIN_S * QUAD_RATE / len(xp)
+        self._peaks.append(_percentiles(ax, (100 - trim,))[0])
         # Modulation-monitor style: +/- peaks (relative to the carrier's rest
         # frequency), 1 ms windows over 100%/110%, and BS.412 MPX power.
-        neg, pos = _percentiles(x, (0.05, 99.95))
+        neg, pos = _percentiles(xp, (trim, 100 - trim))
         self._pos.append(float(pos))
         self._neg.append(float(-neg))
         # Count excursions (runs of 1 ms windows over the limit), like a
@@ -2593,6 +2628,8 @@ class FmStation(gr.hier_block2):
         self.connect(self, chan, demod)
         self.connect(chan, _batch(gr.sizeof_gr_complex, FM_BATCH), (self.meter, 0))
         self.connect(demod, _batch(gr.sizeof_float, FM_BATCH), (self.meter, 1))
+        peak_fir = filter.fir_filter_fff(1, peak_taps().astype(np.float32).tolist())
+        self.connect(demod, peak_fir, _batch(gr.sizeof_float, FM_BATCH), (self.meter, 2))
         # stereo
         self.connect(demod, pilot_bpf, pll)
         self.connect(pll, (square, 0))

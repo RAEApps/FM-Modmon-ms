@@ -55,12 +55,15 @@ def lufs(tones_l, tones_r):
     return -0.691 + 10 * math.log10(p)
 
 
+TRIM = 100 * rm.OVERMOD_MIN_S * rm.UPDATE_HZ   # a peak: the level exceeded for 17 us per 100 ms
+
+
 def mpx_truth(x):
     """The meter's own definitions, applied to the transmitted MPX."""
     tail = x[-int(fmtx.FS * 1.0):]  # the meter holds peaks for 1 s
     return {
-        'pos': np.percentile(tail, 99.95) * 100, 'neg': -np.percentile(tail, 0.05) * 100,
-        'dev': np.percentile(np.abs(tail), 99.9) * 75,
+        'pos': np.percentile(tail, 100 - TRIM) * 100, 'neg': -np.percentile(tail, TRIM) * 100,
+        'dev': np.percentile(np.abs(tail), 100 - TRIM) * 75,
         'dbr': 10 * math.log10(np.mean(x * x) * 75e3 ** 2 / (19e3 ** 2 / 2)),
     }
 
@@ -263,6 +266,31 @@ for rds_inj, unlocked, noise in ((0.05, 0.0, 0.0005), (0.02, 5.0, 0.0005), (0.0,
     check(S, f'RDS injection % ({what})', rds_inj * 100, st.meter.stats['rds_pct'], 0.15, '%')
     if noise > 0.001 and rds_inj:
         rows.append((S, '  groups decoded there', '', st.rds.groups, '', 'info'))
+
+# ================================================================ S9: peaks of treble and of short peaks
+S = 'S9 peaks'
+
+
+def block_peaks(xa):
+    """The meter's peak rule per 100 ms block, held for the last 1 s."""
+    n = int(fmtx.FS / rm.UPDATE_HZ)
+    b = xa[-fmtx.FS:].reshape(-1, n)
+    return (np.max(np.percentile(b, 100 - TRIM, axis=1)) * 100, -np.min(np.percentile(b, TRIM, axis=1)) * 100)
+
+
+# L-R only (34 and 42 kHz), where the demodulator's output is down by sinc(f/fs): 1.6%
+x, info = fmtx.mpx(rm, 6.0, left=[(4000, 0.3)], right=[(4000, -0.3)], pilot=0.09, rds=0.04)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+pos, neg = block_peaks(info['mpx_ac'])
+check(S, 'Peak +% (L-R only)', pos, st.meter.stats['pos_pct'], 0.4, '%')
+check(S, 'Peak -% (L-R only)', neg, st.meter.stats['neg_pct'], 0.4, '%')
+# a 20 us flat-topped peak to 104% every 100 ms: over 17 us, so a real peak, read in full
+t = np.arange(int(6.0 * fmtx.FS)) / fmtx.FS
+d = np.abs((t - 0.05025 + 0.05) % 0.1 - 0.05)   # from each pulse's centre (on the tone's crest)
+edge = np.clip((d - 10e-6) / 15e-6, 0, 1)
+x = (0.8 * np.sin(2 * np.pi * 1000 * t) + 0.24 * np.where(d < 25e-6, 0.5 + 0.5 * np.cos(np.pi * edge), 0)).astype(np.float32)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+check(S, 'Peak +% (20 us peaks to 104%)', block_peaks(x)[0], st.meter.stats['pos_pct'], 0.6, '%')
 
 # ================================================================ report
 w = max(len(r[1]) for r in rows)
