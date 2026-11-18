@@ -38,7 +38,7 @@ def judge(st, rules, country='CA', keep=(), **settings):
         rm.time = real_time
     s = st.meter.stats
     plain = QtGui.QTextDocumentFragment.fromHtml(p.values['Limit'].text()).toPlainText()
-    return sorted(p.alarms.active - ({'RDS', 'PILOT', 'SILENCE'} - set(keep))), s, None, plain
+    return sorted(p.alarms.active - ({'RDS', 'PILOT', 'SILENCE'} - set(keep))), s, p, plain
 
 
 def station(seconds=6.0, rf_amp=0.1, echo=None, **kw):
@@ -105,6 +105,23 @@ check('echo: ...but over-modulation is not judged at ~10% AM', judge(st, 'fcc')[
 check('echo: pilot rules still judged under 15% AM', judge(st, 'custom', pilot_min_pct=9.5)[0], ['PILOT_SPEC'])
 st = station(**bright(0.52), echo=(2e-6, 0.1, 0.0))
 check('weak echo (~1% AM): real over-modulation still raised', judge(st, 'fcc')[0], ['OVERMOD'])
+# ITU-R SM.1268: over 1e-6 of 15 min of valid samples above the limit + 2 kHz. Judged once 15 min is held.
+def held(st):
+    """The station as if it had held EXCEED_MIN_S of valid time with the same statistics."""
+    st.meter.stats = {**st.meter.stats, 'exceed_valid_s': float(rm.EXCEED_MIN_S)}
+    return st
+
+
+st = station(left=[(997, 0.86)], right=[(997, 0.86)], pilot=0.09, rds=0.04)
+got, _, p, _ = judge(st, 'fcc')
+check('SM.1268: 6 s held, not judged yet (waiting)', (got, p.readings['alarms']['EXCEEDANCE']),
+      (['OVERMOD'], 'waiting'))
+check('SM.1268: ~107% with RDS 4% (limit 102% + 2 kHz = 78.5 kHz), 15 min held',
+      judge(held(st), 'fcc')[0], ['EXCEEDANCE', 'OVERMOD'])
+st = held(station(left=[(997, 0.826)], right=[(997, 0.826)], pilot=0.09, rds=0.04))
+check(f'SM.1268: ~{max(st.meter.stats["pos_pct"], st.meter.stats["neg_pct"]):.1f}%: over the limit, '
+      'not over it + 2 kHz', judge(st, 'fcc')[0], ['OVERMOD'])
+check('SM.1268: compliant programme, 15 min held', judge(held(station(**music)), 'fcc')[0], [])
 check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
 
 rm.time = fake

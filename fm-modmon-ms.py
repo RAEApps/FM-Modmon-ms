@@ -170,8 +170,15 @@ Measurements (refreshed 10x per second):
                     read up to 3% low without it) and stops the noise above
                     100 kHz
     Peak deviation  the same, of |MPX|, in kHz
-    Over 100/110%   excursions above 100% / 110% in the last minute, counted
-                    only in valid time
+    Over 100/110%   bursts above 100% / 110% in the last minute, counted only
+                    in valid time; repeats within 5 ms are one burst (the
+                    FCC-era convention of FCC 93-370, at most 10 a minute:
+                    industry practice, not a rule)
+    SM.1268         the fraction of samples whose deviation exceeds the
+                    station's limit + 2 kHz over the last 15 min of valid
+                    time (ITU-R SM.1268, ERC/REC 54-01: a violation above
+                    1e-6, 1 ppm, ~346 samples; the limit is 75 kHz + 2 there).
+                    Its alarm is judged once 15 min of valid time is held
     Valid time      the share of the last 15 min whose reception was fit for
                     peak readings, and why it isn't now. Each 100 ms is valid
                     or not as a whole (never single samples): not while AM /
@@ -190,7 +197,8 @@ Measurements (refreshed 10x per second):
     L/R RMS level, balance, correlation (+1 mono, 0 wide, <0 out of phase),
     width (side/mid energy ratio), goniometer
   Alarms (raise/clear after holding 3-30 s)
-    carrier low/lost, audio silence, over-modulation, pilot lost, RDS
+    carrier low/lost, audio silence, over-modulation, over-deviation over
+    15 min (ITU-R SM.1268, against the limit below + 2 kHz), pilot lost, RDS
     lost, wrong PI, emergency alert (IBOC while it plays, or an RT+
     Alarm tag), data service lost (a service on air 5+ min unbroken,
     then gone; 60 s hold), and the
@@ -329,6 +337,16 @@ PS_NAME_STABLE_S = 10      # a PS names the station once it has held this long
 OVERMOD_WINDOW_S = 0.001   # over-modulation is counted per 1 ms window
 OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes); a peak
                            # reading is likewise the level the MPX exceeds for this long per update
+OVERMOD_GROUP_S = 0.005    # ...and repeats within this of the last are the same burst (the FCC-era
+                           # convention, FCC 93-370: at most 10 bursts a minute; practice, not a rule)
+# ITU-R SM.1268 (and ERC/REC 54-01): a transmitter over-deviates when more than 1e-6 of the samples
+# over 15 min exceed the limit + 2 kHz (the instrument accuracy); single samples never count.
+EXCEED_FRACTION = 1e-6
+EXCEED_MARGIN_KHZ = 2.0
+EXCEED_MIN_S = 900         # ...judged once this much valid time is held
+EXCEED_LO_KHZ = 60.0       # samples' deviation kept as a histogram from here
+EXCEED_BIN_KHZ = 0.5       # ...in bins this wide
+EXCEED_BINS = 120          # ...to 120 kHz (the last bin holds everything above)
 PEAK_PASS_HZ = 100e3       # peak path: the MPX to here (programme, RDS and SCA end by 99 kHz), the
 PEAK_STOP_HZ = 120e3       # ...demodulator's sinc roll-off undone; stopped from here (only noise above)
 PEAK_TAPS_N = 63           # ...in this many taps: flat to +/-0.1% (ripple reads as false peak)
@@ -744,6 +762,15 @@ def _percentiles(x, qs):
     return [float(part[i] + (p - i) * (part[i + 1] - part[i])) for p, i in zip(pos, lo)]
 
 
+def exceed_fraction(stats, khz):
+    """The fraction of valid samples whose deviation exceeds `khz` (to the
+    nearest EXCEED_BIN_KHZ), from FmMeter's SM.1268 histogram; None without samples."""
+    if not stats.get('exceed_n'):
+        return None
+    k = min(max(round((khz - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ), 0), EXCEED_BINS - 1)
+    return float(np.sum(stats['exceed_hist'][k:])) / stats['exceed_n']
+
+
 def peak_taps(n=PEAK_TAPS_N, fpass=PEAK_PASS_HZ, fstop=PEAK_STOP_HZ, fs=QUAD_RATE):
     """Linear-phase FIR for the peak path: 1/sinc(f/fs) to fpass, undoing the
     quadrature demodulator's roll-off (-1.6% at 38 kHz, -3.2% at 57 kHz), which
@@ -793,8 +820,11 @@ class FmMeter(gr.sync_block):
         self._peaks = deque(maxlen=UPDATE_HZ)  # 1 s peak hold
         self._pos = deque(maxlen=UPDATE_HZ)    # +/- peaks, 1 s hold
         self._neg = deque(maxlen=UPDATE_HZ)
-        self._over = deque(maxlen=60 * UPDATE_HZ)          # over-mod excursions per update, 60 s
-        self._over_prev = np.zeros(2, bool)                # was the last 1 ms window over 100/110%?
+        self._over = deque(maxlen=60 * UPDATE_HZ)          # over-mod bursts per update, 60 s
+        self._over_last = [-10 ** 9] * 2                   # last 1 ms window over 100/110%, from this update's start
+        self._exceed = deque()                             # per valid update: (histogram, samples), EXCEED_MIN_S
+        self._exceed_hist = np.zeros(EXCEED_BINS, np.int64)  # ...their sum
+        self._exceed_n = 0
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
         self._am_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # AM per update, for the peak gate
@@ -830,10 +860,12 @@ class FmMeter(gr.sync_block):
             self._rds_fft = None
             self._env_sum, self._env, self._sync = 0.0, [], None
             for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._am_hist,
-                      self._rds_z, self._valid_hist, self._vpeaks):
+                      self._rds_z, self._valid_hist, self._vpeaks, self._exceed):
                 d.clear()
             self._rf_slow, self._hold = None, 0
-            self._over_prev = np.zeros(2, bool)
+            self._over_last = [-10 ** 9] * 2
+            self._exceed_hist[:] = 0
+            self._exceed_n = 0
             self._settle = SETTLE_UPDATES
             self.stats = None
         self._iq_energy += float(np.vdot(iq, iq).real)
@@ -988,6 +1020,20 @@ class FmMeter(gr.sync_block):
         fit = a * t + b * t * t
         return float(np.max(fit) - np.min(fit)) / 2
 
+    def _add_exceed(self, ax):
+        """Add a valid update's |MPX| (peak path) to the SM.1268 histogram of the
+        last EXCEED_MIN_S of valid time."""
+        hi = ax[ax >= EXCEED_LO_KHZ * 1e3 / MAX_DEV]
+        k = np.minimum(((hi * (MAX_DEV / 1e3) - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ).astype(np.int64), EXCEED_BINS - 1)
+        h = np.bincount(k, minlength=EXCEED_BINS).astype(np.uint16)  # (an update is < 65536 samples)
+        if len(self._exceed) >= EXCEED_MIN_S * UPDATE_HZ:
+            old, n = self._exceed.popleft()
+            self._exceed_hist -= old
+            self._exceed_n -= n
+        self._exceed.append((h, len(ax)))
+        self._exceed_hist += h
+        self._exceed_n += len(ax)
+
     def _invalid(self, settling, iq_power):
         """Why this update's peaks can't be trusted, or None (valid).
 
@@ -1042,8 +1088,8 @@ class FmMeter(gr.sync_block):
         neg, pos = _percentiles(xp, (trim, 100 - trim))
         self._pos.append(float(pos))
         self._neg.append(float(-neg))
-        # Count excursions (runs of 1 ms windows over the limit), like a
-        # monitor's peak counter, so one long burst counts once.
+        # Count bursts (1 ms windows over the limit, repeats within OVERMOD_GROUP_S
+        # as one), like a monitor's peak counter, so one long burst counts once.
         win = int(QUAD_RATE * OVERMOD_WINDOW_S)
         sustained = ax.copy()
         for k in range(1, max(1, round(QUAD_RATE * OVERMOD_MIN_S))):  # min with ax shifted by k (wrapping)
@@ -1051,11 +1097,11 @@ class FmMeter(gr.sync_block):
             np.minimum(sustained[:k], ax[-k:], out=sustained[:k])
         wmax = sustained[:len(x) // win * win].reshape(-1, win).max(axis=1)
         counts = []
+        group = round(OVERMOD_GROUP_S / OVERMOD_WINDOW_S)
         for i, limit in enumerate((1.0, 1.1)):
-            over = wmax > limit
-            starts = np.count_nonzero(over[1:] & ~over[:-1]) + int(bool(over[0]) and not self._over_prev[i])
-            self._over_prev[i] = bool(over[-1])
-            counts.append(starts)
+            idx = np.flatnonzero(wmax > limit)
+            counts.append(int(np.count_nonzero(np.diff(idx, prepend=self._over_last[i]) > group)))
+            self._over_last[i] = (int(idx[-1]) if len(idx) else self._over_last[i]) - len(wmax)
         settling = self._settle > 0  # filters still settling after a (re)start: their transients aren't programme
         if settling:
             self._settle -= 1
@@ -1072,6 +1118,8 @@ class FmMeter(gr.sync_block):
         if not settling:
             self._valid_hist.append(why is None)
             self._over.append(counts if why is None else [0, 0])
+        if why is None:
+            self._add_exceed(ax)
         self._vpeaks.append(None if why else (float(pos), float(-neg)))
         vpeaks = [p for p in self._vpeaks if p]
         over = np.sum(self._over, axis=0) if self._over else np.zeros(2)
@@ -1113,6 +1161,10 @@ class FmMeter(gr.sync_block):
             'valid_window_s': len(self._valid_hist) / UPDATE_HZ,
             'valid_pos_pct': max(p for p, _ in vpeaks) * 100 if vpeaks else None,
             'valid_neg_pct': max(n for _, n in vpeaks) * 100 if vpeaks else None,
+            # SM.1268: histogram of |deviation| over the last EXCEED_MIN_S of valid time (exceed_fraction())
+            'exceed_hist': self._exceed_hist.copy(),
+            'exceed_n': self._exceed_n,
+            'exceed_valid_s': len(self._exceed) / UPDATE_HZ,
             # BS.412: 0 dBr = power of a sine at +/-19 kHz deviation.
             'mpx_dbr': _db(np.mean(self._mpx_ms) * MAX_DEV ** 2 / (19e3 ** 2 / 2)) if self._mpx_ms else -math.inf,
             'mpx_window_s': len(self._mpx_ms) / UPDATE_HZ,
@@ -3489,6 +3541,7 @@ ALARM_DEFS = (
     ('CARRIER', 'carrier low or lost', 5),
     ('SILENCE', 'audio silence', 10),
     ('OVERMOD', 'over-modulation', 3),
+    ('EXCEEDANCE', 'over-deviation over 15 min (ITU-R SM.1268: over 1e-6 of samples above the limit + 2 kHz)', 10),
     ('PILOT', 'stereo pilot lost', 5),
     ('PILOT_SPEC', 'stereo pilot out of tolerance', 10),
     ('SUBCARRIERS', 'subcarrier injection over the limit', 10),
@@ -3753,6 +3806,16 @@ def _valid_html(pct, window_s, why, level):
     return _coloured(f'{pct:.0f}% of {span}', level) + now
 
 
+def _exceed_html(frac, khz, valid_s, level):
+    """'0.20 ppm of samples over 78.5 kHz (limit 1 ppm), 12 of 15 min valid'."""
+    if frac is None:
+        return '-'
+    held = (f'{valid_s / 60:.0f} of {EXCEED_MIN_S / 60:.0f} min valid' if valid_s < EXCEED_MIN_S
+            else f'last {EXCEED_MIN_S / 60:.0f} min valid')
+    return (_coloured(f'{frac * 1e6:.2f} ppm of samples over {khz:.1f} kHz', level)
+            + f'  <span style="color:{DIM}">(limit {EXCEED_FRACTION * 1e6:g} ppm; {held})</span>')
+
+
 def _sync_am_db(pct):
     return 20 * math.log10(pct / 100) if pct else -math.inf
 
@@ -3849,7 +3912,7 @@ class StationPanel(QtWidgets.QGroupBox):
                        'Pilot (19 kHz)', 'Pilot freq', 'RDS injection', 'IBOC signal',
                        'RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz'), ('SCA 67 kHz', 'SCA 92 kHz')),
         ('Modulation', 2, ('Peak + / −', 'Peak deviation', 'Over 100%', 'Over 110%', 'Valid time',
-                           'L / R', 'L+R / L−R', 'MPX power', 'Limit'), ('Limit',)),
+                           'L / R', 'L+R / L−R', 'MPX power', 'Limit', 'SM.1268'), ('Limit', 'SM.1268')),
         ('MPX spectrum 0–100 kHz', 0, (), ()),
         ('Loudness', 2, ('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), ()),
         ('Stereo image', 1, ('Level L/R', 'Balance', 'Correlation', 'Width (S/M)'), ()),
@@ -4431,6 +4494,12 @@ class StationPanel(QtWidgets.QGroupBox):
                      valid_window_s=s['valid_window_s'])
             if s['valid_pct'] is not None and s['valid_pct'] < VALID_WARN_PCT:
                 lv['valid_pct'] = 'warn'
+            # SM.1268 against this station's own limit (FCC / ISED: with its subcarrier allowance)
+            r['exceed_khz'] = limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ
+            r['exceed_frac'] = exceed_fraction(s, r['exceed_khz'])
+            r['exceed_valid_s'] = s['exceed_valid_s']
+            if r['exceed_frac'] is not None and r['exceed_frac'] > EXCEED_FRACTION:
+                lv['exceed_frac'] = 'alarm' if s['exceed_valid_s'] >= EXCEED_MIN_S else 'warn'
             # RDS phase only for a station with RDS: an SCA's skirt or noise in the 57 kHz band has a phase too.
             r['rds_phase_deg'] = s['rds_phase_deg'] if total else None
             r['rds_phase_mode'], level = rds_phase(r['rds_phase_deg'], s['rds_lock'])
@@ -4566,6 +4635,8 @@ class StationPanel(QtWidgets.QGroupBox):
             v['Over 110%'].setText(f"{r['over110_min']} /min")
             v['Valid time'].setText(_valid_html(r['valid_pct'], r['valid_window_s'], r['invalid_why'],
                                                 lv.get('valid_pct')))
+            v['SM.1268'].setText(_exceed_html(r['exceed_frac'], r['exceed_khz'], r['exceed_valid_s'],
+                                              lv.get('exceed_frac')))
             window = '' if r['mpx_window_s'] >= MPX_POWER_S else f"  ({r['mpx_window_s']:.0f} s)"
             v['MPX power'].setText(_num(r['mpx_dbr'], 'dBr', '+.1f') + window)
             self.mpx.set_data(r['mpx_db'])
@@ -4606,10 +4677,10 @@ class StationPanel(QtWidgets.QGroupBox):
         if self._stereo and self._stereo.isVisible():
             self._stereo.follow(self)
 
-    def _alarm_states(self, conditions, suppressed=()):
+    def _alarm_states(self, conditions, suppressed=(), waiting=()):
         """{alarm: state} for an annunciator: 'off' (switched off for this receiver),
-        'raised', 'waiting' (not judged yet: grace period after tuning, or no
-        readings), 'suppressed' (in `suppressed`, not judged now: reception not clean
+        'raised', 'waiting' (not judged yet: grace period after tuning, no readings,
+        or in `waiting`: not enough held yet), 'suppressed' (in `suppressed`, not judged now: reception not clean
         or not valid enough), 'pending' (its condition holds, its delay is running) or 'clear'."""
         out = {}
         pending = self.alarms.pending()
@@ -4618,7 +4689,7 @@ class StationPanel(QtWidgets.QGroupBox):
                 out[name] = 'off'
             elif name in self.alarms.active:
                 out[name] = 'raised'
-            elif conditions is None or not self.alarms.ready():
+            elif conditions is None or not self.alarms.ready() or name in waiting:
                 out[name] = 'waiting'
             elif name in suppressed:
                 out[name] = 'suppressed'
@@ -4639,7 +4710,7 @@ class StationPanel(QtWidgets.QGroupBox):
         rate = r['rds_rate']
 
         changes = []
-        conditions, suppressed = None, set()
+        conditions, suppressed, waiting = None, set(), set()
         if s and a:
             cfg = self.settings
             carrier = s['rf_dbfs'] < -75 or s['snr_db'] < cfg.min_snr_db
@@ -4656,6 +4727,9 @@ class StationPanel(QtWidgets.QGroupBox):
             suppressed = set(JUDGED_CLEAN) if not clean else set()
             if valid_peak is None:
                 suppressed.add('OVERMOD')
+            exceed = r.get('exceed_frac')
+            if s['exceed_valid_s'] < EXCEED_MIN_S:
+                waiting.add('EXCEEDANCE')
             rules = self.rules()
             lim = cfg.limits(self.country)
             limit, _ = mod_limit(rules, lim, s)
@@ -4665,6 +4739,7 @@ class StationPanel(QtWidgets.QGroupBox):
                 'CARRIER': carrier,
                 'SILENCE': not carrier and a['momentary'] < cfg.silence_lufs,
                 'OVERMOD': valid_peak is not None and valid_peak > limit,
+                'EXCEEDANCE': ('EXCEEDANCE' not in waiting and exceed is not None and exceed > EXCEED_FRACTION),
                 'PILOT_SPEC': (clean and st.pilot and (not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']
                                                        or (st.pilot_hz is not None
                                                            and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']))),
@@ -4685,7 +4760,7 @@ class StationPanel(QtWidgets.QGroupBox):
                     self.history.log_alarm(time.time(), name, raised)
                 details = self._alarm_details(s, a, lim, limit, subcarriers, rate, pi)
                 changes = [(desc, raised, details.get(name, '')) for name, desc, raised in changes]
-        r['alarms'] = self._alarm_states(conditions, suppressed)
+        r['alarms'] = self._alarm_states(conditions, suppressed, waiting)
         self.history.add(time.time(), r)
         feed = ''
         if self.feed:
@@ -4724,6 +4799,9 @@ class StationPanel(QtWidgets.QGroupBox):
                        f'(alarm below {cfg.silence_lufs:g} LUFS for {cfg.silence_s} s)',
             'OVERMOD': f'peak +{num(s["valid_pos_pct"])}% / -{num(s["valid_neg_pct"])}% (valid reception), '
                        f'limit {num(limit)}%',
+            'EXCEEDANCE': (f'{num((exceed_fraction(s, limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ) or 0) * 1e6, ".2f")} '
+                           f'ppm of samples over {num(limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ)} kHz in the last '
+                           f'{EXCEED_MIN_S / 60:.0f} min of valid reception (limit {EXCEED_FRACTION * 1e6:g} ppm)'),
             'PILOT_SPEC': f'pilot {num(s["pilot_pct"])}%{pilot_hz} (allowed {lim["pilot_min_pct"]:g}-'
                           f'{lim["pilot_max_pct"]:g}%, 19000 +/- {lim["pilot_tol_hz"]:g} Hz)',
             'SUBCARRIERS': f'subcarriers {num(subcarriers)}% total (RDS {num(s["rds_pct"])}%'

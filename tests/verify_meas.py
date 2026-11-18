@@ -319,6 +319,27 @@ back = next(i for i in range(41, 120) if whys[i] is None)
 check(S, 'valid again within 5 s', True, back < 90, 0)
 rows[-1] = rows[-1][:3] + (f'{(back - 40) / rm.UPDATE_HZ:.1f} s',) + rows[-1][4:]
 
+# ================================================================ S11: SM.1268 exceedance, FCC-era burst grouping
+S = 'S11 SM.1268'
+# 1 ms bursts to 115%: three 2 ms apart (within 5 ms: one burst), then two 11 ms apart (two)
+grouped = [(2.0, 1, 1.3), (2.003, 1, 1.3), (2.006, 1, 1.3), (4.0, 1, 1.3), (4.012, 1, 1.3)]
+x, info = fmtx.mpx(rm, SECS, left=L2, right=L2, pilot=0.0, stereo=False, bursts=grouped)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+check(S, 'Over 100% /min (repeats in 5 ms grouped)', 3, st.meter.stats['over100_min'], 0)
+check(S, 'Over 110% /min (repeats in 5 ms grouped)', 3, st.meter.stats['over110_min'], 0)
+# a steady tone to 110% (82.5 kHz): the share of its samples over each level is known
+t = np.arange(int(SECS * fmtx.FS)) / fmtx.FS
+x = (1.10 * np.sin(2 * np.pi * 997 * t)).astype(np.float32)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+s = st.meter.stats
+for khz in (77.0, 80.0, 85.0):
+    want = float(np.mean(np.abs(x) * 75 > khz))
+    check(S, f'share of samples over {khz:g} kHz', want, rm.exceed_fraction(s, khz), want * 0.05 + 1e-7)
+check(S, 'valid time held = all of the run, s', s['valid_window_s'] * s['valid_pct'] / 100, s['exceed_valid_s'], 0.01, 's')
+frac = rm.exceed_fraction(s, 77.0)
+check(S, 'SM.1268 (text; ISED limit 100% + 2 kHz)', f'{frac * 1e6:.2f} ppm of samples over 77.0 kHz (limit 1 ppm; '
+      f'0 of 15 min valid)', plain(panel_for(st).values['SM.1268']))
+
 # ================================================================ report
 w = max(len(r[1]) for r in rows)
 for scn, name, exp, got, unit, verdict in rows:
