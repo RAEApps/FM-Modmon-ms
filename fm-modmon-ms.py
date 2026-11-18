@@ -3329,6 +3329,89 @@ class StationRow(QtWidgets.QFrame):
             self.on_double()
 
 
+class Annunciator(QtWidgets.QWidget):
+    """Every alarm as a lamp in a fixed grid, in the same place on every row, like
+    a transmitter remote control's annunciator panel. The lamp's look says the
+    alarm's state (StationPanel._alarm_states); hover one for what it means."""
+    COLS = 4
+    SHORT = {'CARRIER': 'CARR', 'SILENCE': 'SIL', 'OVERMOD': 'OVMD', 'PILOT': 'PILOT', 'PILOT_SPEC': 'P.SPEC',
+             'SUBCARRIERS': 'SUBS', 'FREQUENCY': 'FREQ', 'RDS': 'RDS', 'PI': 'PI', 'ALERT': 'ALERT', 'DATA': 'DATA'}
+    # state: (fill, text, outline or None, hatched)
+    LOOK = {'clear': ('#26282d', '#7d838a', None, False),
+            'waiting': ('#26282d', '#4f545a', None, False),
+            'raised': ('#7a1f26', '#ffe0e0', '#c24a52', False),
+            'pending': ('#4a3a1c', '#f0a35e', None, False),
+            'suppressed': ('#26282d', '#f0a35e', None, True),
+            'off': (None, '#4f545a', '#3a3d44', False)}
+    MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, or no readings)',
+             'raised': 'RAISED', 'pending': 'its condition holds; raises once its delay has run',
+             'suppressed': 'not judged now: reception not clean enough for the technical rules',
+             'off': 'switched off for this receiver (Settings)'}
+
+    def __init__(self):
+        super().__init__()
+        self.states = {}
+        self.notes = {}
+        self.setMinimumHeight(50)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self.setMouseTracking(True)
+
+    def sizeHint(self):
+        return QtCore.QSize(150, 50)
+
+    def set_states(self, states, notes=None):
+        """states: {alarm: state}; notes: {alarm: extra text for its tooltip}."""
+        notes = notes or {}
+        if states != self.states or notes != self.notes:
+            self.states, self.notes = dict(states), dict(notes)
+            self.update()
+
+    def _cells(self):
+        rows = (len(ALARM_DEFS) + self.COLS - 1) // self.COLS
+        w, h, gap = self.width(), self.height(), 2
+        cw, ch = (w - gap * (self.COLS - 1)) / self.COLS, (h - gap * (rows - 1)) / rows
+        for i, (name, desc, _) in enumerate(ALARM_DEFS):
+            r, c = divmod(i, self.COLS)
+            yield name, desc, QtCore.QRectF(c * (cw + gap), r * (ch + gap), cw, ch)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        font = QtGui.QFont('Consolas')
+        font.setPointSizeF(7)
+        font.setBold(True)
+        p.setFont(font)
+        for name, _, rect in self._cells():
+            fill, text, outline, hatched = self.LOOK[self.states.get(name, 'waiting')]
+            p.setPen(QtCore.Qt.NoPen)
+            if fill:
+                p.setBrush(QtGui.QColor(fill))
+                p.drawRoundedRect(rect, 2, 2)
+            if hatched:
+                p.setBrush(QtGui.QBrush(QtGui.QColor('#5a4424'), QtCore.Qt.BDiagPattern))
+                p.drawRoundedRect(rect, 2, 2)
+            if outline:
+                p.setPen(QtGui.QPen(QtGui.QColor(outline), 1, QtCore.Qt.SolidLine if fill else QtCore.Qt.DashLine))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2)
+            p.setPen(QtGui.QColor(text))
+            p.drawText(rect, QtCore.Qt.AlignCenter, self.SHORT[name])
+
+    def event(self, event):
+        if event.type() == QtCore.QEvent.ToolTip:
+            for name, desc, rect in self._cells():
+                if rect.contains(QtCore.QPointF(event.pos())):
+                    state = self.states.get(name, 'waiting')
+                    tip = f'<b>{self.SHORT[name]}</b>: {desc}<br>{self.MEANS[state]}'
+                    if self.notes.get(name):
+                        tip += f'<br>{_html(self.notes[name])}'
+                    QtWidgets.QToolTip.showText(event.globalPos(), tip, self, rect.toRect())
+                    return True
+            QtWidgets.QToolTip.hideText()
+            return True
+        return super().event(event)
+
+
 def column_heads():
     """The headings over the station rows, at the rows' column widths."""
     head = QtWidgets.QWidget()
@@ -4039,12 +4122,10 @@ class StationPanel(QtCore.QObject):
             tb.addWidget(t)
         row.addWidget(tapes)
 
-        self.alarm_label = QtWidgets.QLabel('')
-        self.alarm_label.setTextFormat(QtCore.Qt.PlainText)
-        self.alarm_label.setWordWrap(True)
-        self.alarm_label.setFixedWidth(widths['alarms'])
-        self._alarm_state = None
-        row.addWidget(self.alarm_label)
+        # every alarm, always in the same place: raised, holding off, not judged, off
+        self.annunciator = Annunciator()
+        self.annunciator.setFixedWidth(widths['alarms'])
+        row.addWidget(self.annunciator)
 
         self.settings_btn = QtWidgets.QToolButton()
         self.settings_btn.setObjectName('rowBtn')
@@ -4426,6 +4507,7 @@ class StationPanel(QtCore.QObject):
         for t in self.tapes.values():
             t.clear()
         self.meta.setText('')
+        self.annunciator.set_states({})
         self.gonio.set_data(None)
         self.mpx.set_data(None)
 
@@ -4855,16 +4937,19 @@ class StationPanel(QtCore.QObject):
         self.detail_title.setText(self.title)
         if self.rt.toolTip() != r['rt']:
             self.rt.setToolTip(r['rt'])
-        active = [desc for name, desc, _ in ALARM_DEFS if name in self.alarms.active]
-        state = tuple(active)
-        if state != self._alarm_state:  # a pill: green when clear, red with the alarms
-            self._alarm_state = state
-            self.alarm_label.setText(f'\u26a0  {", ".join(active)}' if active else '\u25cf  No alarms')
-            self.alarm_label.setStyleSheet(
-                'border-radius: 10px; padding: 2px 10px; font-weight: 600; ' +
-                ('background: #3a1d1f; color: #ff8a8a; border: 1px solid #6b2a2e;' if active else
-                 'background: #1b2f21; color: #69db7c; border: 1px solid #2c5236;'))
+        self.annunciator.set_states(r['alarms'], self._alarm_notes(r))
         return changes
+
+    def _alarm_notes(self, r):
+        """Why an alarm isn't judged now, for the annunciator's tooltips."""
+        if not r.get('has_signal'):
+            return {}
+        why = (f"AM / multipath {r['am_pct']:.1f}%, S/N {_num(r['snr_db'], 'dB', '.0f')}"
+               f" (judged under {CLEAN_AM_PCT:g}% AM and over 25 dB S/N; over-modulation under {PEAK_AM_PCT:g}%)")
+        notes = {name: why for name, state in r['alarms'].items() if state == 'suppressed'}
+        if r['alarms'].get('OVERMOD') in ('raised', 'pending', 'clear'):
+            notes['OVERMOD'] = f"peak +{r['pos_pct']:.0f}% / \u2212{r['neg_pct']:.0f}%, limit {r['limit_pct']:.1f}%"
+        return notes
 
     def _service_label(self, key, html=False):
         """A data service as shown: the name this receiver gives it, with what it is."""
