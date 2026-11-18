@@ -340,6 +340,44 @@ frac = rm.exceed_fraction(s, 77.0)
 check(S, 'SM.1268 (text; ISED limit 100% + 2 kHz)', f'{frac * 1e6:.2f} ppm of samples over 77.0 kHz (limit 1 ppm; '
       f'0 of 15 min valid)', plain(panel_for(st).values['SM.1268']))
 
+# ================================================================ S12: secondary quality checks (noise >100 kHz, pilot AM)
+S = 'S12 quality'
+# noise only: the noise on the peak path, estimated from 105-145 kHz (f^2), against the peak path itself
+peak_path = []
+orig = rm.FmMeter._measure
+
+
+def spy(self, x, *a, **k):
+    out = orig(self, x, *a, **k)
+    if len(a) >= 4 and a[3] is not None:
+        peak_path.append(a[3] - np.mean(a[3]))
+    return out
+
+
+rm.FmMeter._measure = spy
+x0, _ = fmtx.mpx(rm, 4.0, pilot=0.0)
+st = fmtx.run(rm, x0, rf_amp=0.1, noise=0.01, seed=5)
+rm.FmMeter._measure = orig
+rms = float(np.sqrt(np.mean(np.concatenate(peak_path[-10:]) ** 2))) * 100
+check(S, 'noise on the peak path % (est. from >100 kHz)', rms, st.meter.stats['peak_noise_pct'], rms * 0.15, '%')
+# heavy noise (MPX S/N ~57 dB): about 1 kHz on the peaks, so not valid
+x, info = fmtx.mpx(rm, 6.0, left=L5, right=R5, pilot=0.09, rds=0.045)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.022)
+check(S, 'Invalid because (heavy noise)', 'noise', st.meter.stats['invalid_why'])
+rows[-1] = rows[-1][:3] + (f"{st.meter.stats['invalid_why']} (S/N {st.meter.stats['snr_db']:.0f} dB, "
+                           f"{st.meter.stats['peak_noise_pct'] * 0.75:.2f} kHz RMS)",) + rows[-1][4:]
+check(S, 'Noise >100 kHz shown amber', True, '#' in panel_for(st).values['Noise >100 kHz'].text(), 0)
+# pilot AM: an echo ripples the demodulated pilot's level; plain AM doesn't
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+check(S, 'Pilot AM % (clean, under 1%)', True, st.meter.stats['pilot_am_pct'] < rm.PILOT_AM_WARN_PCT, 0)
+rows[-1] = rows[-1][:3] + (round(st.meter.stats['pilot_am_pct'], 2),) + rows[-1][4:]
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, echo=(10e-6, 0.1, 1.6))
+check(S, 'Pilot AM % (10 us echo 20 dB down, amber)', True, st.meter.stats['pilot_am_pct'] >= rm.PILOT_AM_WARN_PCT, 0)
+rows[-1] = rows[-1][:3] + (plain(panel_for(st).values['Pilot AM']),) + rows[-1][4:]
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, am=0.10)
+check(S, 'Pilot AM % (10% plain AM: not an echo)', True, st.meter.stats['pilot_am_pct'] < rm.PILOT_AM_WARN_PCT, 0)
+rows[-1] = rows[-1][:3] + (round(st.meter.stats['pilot_am_pct'], 2),) + rows[-1][4:]
+
 # ================================================================ report
 w = max(len(r[1]) for r in rows)
 for scn, name, exp, got, unit, verdict in rows:
