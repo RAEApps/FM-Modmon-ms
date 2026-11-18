@@ -674,6 +674,15 @@ def _db(power):
     return 10 * math.log10(power) if power > 1e-20 else -math.inf
 
 
+def _percentiles(x, qs):
+    """np.percentile(x, qs) (linear interpolation) from one np.partition,
+    without np.percentile's general-purpose overhead."""
+    pos = [q / 100 * (len(x) - 1) for q in qs]
+    lo = [min(int(p), len(x) - 2) for p in pos]
+    part = np.partition(x, sorted({k for i in lo for k in (i, i + 1)}))
+    return [float(part[i] + (p - i) * (part[i + 1] - part[i])) for p, i in zip(pos, lo)]
+
+
 class FmMeter(gr.sync_block):
     """Measures a station from its channel IQ and MPX (both at QUAD_RATE).
 
@@ -778,18 +787,19 @@ class FmMeter(gr.sync_block):
         psd *= 2.0 / (self.NFFT * np.sum(self._win ** 2)) * self._demod_comp
         self._psd = self._smooth(self._psd, psd, 0.25)
         ax = np.abs(x)
-        self._peaks.append(float(np.percentile(ax, 99.9)))
+        self._peaks.append(_percentiles(ax, (99.9,))[0])
         # Modulation-monitor style: +/- peaks (relative to the carrier's rest
         # frequency), 1 ms windows over 100%/110%, and BS.412 MPX power.
-        neg, pos = np.percentile(x, (0.05, 99.95))
+        neg, pos = _percentiles(x, (0.05, 99.95))
         self._pos.append(float(pos))
         self._neg.append(float(-neg))
         # Count excursions (runs of 1 ms windows over the limit), like a
         # monitor's peak counter, so one long burst counts once.
         win = int(QUAD_RATE * OVERMOD_WINDOW_S)
-        sustained = ax
-        for k in range(1, max(1, round(QUAD_RATE * OVERMOD_MIN_S))):
-            sustained = np.minimum(sustained, np.roll(ax, k))
+        sustained = ax.copy()
+        for k in range(1, max(1, round(QUAD_RATE * OVERMOD_MIN_S))):  # min with ax shifted by k (wrapping)
+            np.minimum(sustained[k:], ax[:-k], out=sustained[k:])
+            np.minimum(sustained[:k], ax[-k:], out=sustained[:k])
         wmax = sustained[:len(x) // win * win].reshape(-1, win).max(axis=1)
         counts = []
         for i, limit in enumerate((1.0, 1.1)):
@@ -910,8 +920,9 @@ class ScaMeter(gr.sync_block):
         edges = np.geomspace(300, 15000, 17)
         bands = np.stack([spec[:, (f >= lo) & (f < hi)].sum(axis=1) for lo, hi in zip(edges, edges[1:])], axis=1)
         flux = float(np.mean(np.abs(np.diff(10 * np.log10(bands + 1e-12), axis=0))))
-        # symbol-rate line in |d/dt| (the transitions of NRZ data)
-        d = np.abs(np.diff(x))
+        # symbol-rate line in |d/dt| (the transitions of NRZ data); prepend keeps
+        # the length 96000, which FFTs 8x faster than 95999 (= 17 x 5647)
+        d = np.abs(np.diff(x, prepend=x[0]))
         line = np.abs(np.fft.rfft((d - d.mean()) * np.hanning(len(d)))) ** 2
         fd = np.fft.rfftfreq(len(d), 1 / AUDIO_RATE)
         band = (fd > 150) & (fd < 16000)
@@ -995,12 +1006,15 @@ class AudioMeter(gr.sync_block):
         return x
 
     TP_TAIL = 32  # input samples carried between hops for true-peak oversampling
+    # resample_poly's own 4x filter (Kaiser, beta 5, 81 taps), designed once: it
+    # would otherwise redesign it on every call
+    TP_TAPS = sps.firwin(81, 1 / 4, window=('kaiser', 5.0))
 
     def _true_peak(self, ch, x):
         """4x-oversampled peak. Each hop is overlapped with the previous hop's
         tail and the filter's edge ringing is discarded, so block boundaries
         don't inflate the reading."""
-        y = sps.resample_poly(np.concatenate((self._tp_tail[ch], x)), 4, 1)
+        y = sps.resample_poly(np.concatenate((self._tp_tail[ch], x)), 4, 1, window=self.TP_TAPS)
         self._tp_tail[ch] = x[-self.TP_TAIL:]
         half = 4 * self.TP_TAIL // 2
         return float(np.max(np.abs(y[half:-half])))
