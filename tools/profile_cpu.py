@@ -30,6 +30,8 @@ import sys
 import threading
 import time
 
+for _var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS'):  # as the monitor sets them: before numpy loads
+    os.environ.setdefault(_var, '1')
 os.environ['GR_CONF_PERFCOUNTERS_ON'] = 'True'
 os.environ['GR_CONF_PERFCOUNTERS_EXPORT'] = 'False'
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py')
