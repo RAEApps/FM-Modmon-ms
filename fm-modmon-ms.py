@@ -2900,6 +2900,10 @@ class FmMonitor(gr.top_block):
 # --------------------------------------------------------------------------- GUI
 
 RED, GREEN, DIM, ACCENT = '#ff6b6b', '#69db7c', '#8c9197', '#8ab4f8'
+# High-performance HMI (ISA-101): normal readings are drawn in greys, so that
+# amber (abnormal, or not judged) and red (out of limits, alarm) stand out.
+NORMAL = '#7b8794'      # a bar or trace in its normal range
+TEXT_LIT = '#e3e4e6'    # a flag that is set, a value
 # Contrast (WCAG 2.1) on the dark backgrounds #16171a-#222328: text 4.5:1 or more
 # (DIM 4.9, muted #9aa0a6 5.9, the rest higher); control outlines 3:1 or more
 # (BORDER 3.3); disabled controls (exempt) stay readable at DISABLED 3.3.
@@ -2922,7 +2926,7 @@ QTabBar#detailTabs::tab { background: transparent; color: #9aa0a6; padding: 2px 
 QTabBar#detailTabs::tab:selected { background: #2b2d31; color: #e3e4e6; }
 QTabBar#detailTabs::tab:hover { color: #e3e4e6; }
 QFrame#card { background: #222328; border: 1px solid #2a2c31; border-radius: 8px; }
-QLabel#cardTitle { color: #8ab4f8; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }
+QLabel#cardTitle { color: #9aa0a6; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }
 QLabel#chip { background: #24262b; border: 1px solid #30333a; border-radius: 10px; padding: 3px 10px; color: #c4c7cc; }
 QLabel#appTitle { font-size: 15pt; font-weight: 600; color: #e8eaed; padding-right: 8px; }
 QPushButton, QToolButton { background: #2b2d31; border: 1px solid %BORDER%; border-radius: 6px; padding: 5px 12px; }
@@ -3189,7 +3193,7 @@ class Meter(QtWidgets.QWidget):
 # column headings above the rows use the same widths.
 ROW_COLS = (('station', 'Station', 250), ('text', 'Text · RT+ · flags', 0),
             ('tapes', 'Now · peak hold · limit ▼', 300), ('alarms', 'Alarms', 150))
-TAPE_COLOURS = {None: GREEN, 'warn': '#f0a35e', 'alarm': RED, 'off': '#5d6167'}
+TAPE_COLOURS = {None: NORMAL, 'warn': '#f0a35e', 'alarm': RED, 'off': '#5d6167'}
 
 
 class Tape(QtWidgets.QWidget):
@@ -3451,7 +3455,7 @@ def _flags_html(flags):
         return '-'
 
     def lit(name, on):
-        return f'<b style="color:{RED}">{name}</b>' if on else f'<span style="color:{DIM}">{name}</span>'
+        return f'<b style="color:{TEXT_LIT}">{name}</b>' if on else f'<span style="color:{DIM}">{name}</span>'
 
     return ' '.join([
         lit('TP', flags['TP']), lit('TA', flags['TA']),
@@ -3478,8 +3482,8 @@ class MpxSpectrum(QtWidgets.QWidget):
     19 kHz pilot, the 38 kHz stereo subcarrier and 57 kHz RDS."""
 
     TOP, BOTTOM, MAX_KHZ = 0.0, -70.0, 100.0
-    MARKERS = ((19, 'pilot', GREEN), (38, '38k', '#9aa0a6'), (57, 'RDS', ACCENT),
-               (67, 'SCA', '#f0a35e'), (92, 'SCA', '#f0a35e'))
+    MARKERS = ((19, 'pilot', '#9aa0a6'), (38, '38k', '#6d737a'), (57, 'RDS', '#9aa0a6'),
+               (67, 'SCA', '#6d737a'), (92, 'SCA', '#6d737a'))
 
     def __init__(self):
         super().__init__()
@@ -3525,9 +3529,9 @@ class MpxSpectrum(QtWidgets.QWidget):
             fill.append(QtCore.QPointF(x(khz[-1]), bottom))
             fill.append(QtCore.QPointF(x(0), bottom))
             p.setPen(QtCore.Qt.NoPen)
-            p.setBrush(QtGui.QColor(79, 179, 191, 60))
+            p.setBrush(QtGui.QColor(159, 176, 191, 50))
             p.drawPolygon(fill)
-            p.setPen(QtGui.QPen(QtGui.QColor('#4fb3bf'), 1.2))
+            p.setPen(QtGui.QPen(QtGui.QColor('#9fb0bf'), 1.1))
             p.setBrush(QtCore.Qt.NoBrush)
             p.drawPolyline(trace)
 
@@ -3622,7 +3626,7 @@ class StereoWindow(QtWidgets.QDialog):
         self.scope = Goniometer(size=None, history=8, points=None)
         self.scope.setMinimumSize(300, 300)
         layout.addWidget(self.scope, 1)
-        self.phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,))
+        self.phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))
         layout.addWidget(self.phase)
         self.readouts = QtWidgets.QLabel('')
         self.readouts.setAlignment(QtCore.Qt.AlignCenter)
@@ -4063,7 +4067,7 @@ class StationPanel(QtCore.QObject):
         # DYNAMIC PS: an amber chip beside the PS, shown only while it applies
         self.ps_mode = QtWidgets.QLabel('DYN')
         self.ps_mode.setStyleSheet('border-radius: 3px; padding: 1px 4px; font-weight: 600; font-size: 7pt;'
-                                   'background: #3a2e1b; color: #f0a35e; border: 1px solid #6b5228;')
+                                   'background: #33363c; color: #e3e4e6; border: 1px solid #44474e;')
         self.ps_mode.setToolTip('Dynamic PS: the PS has changed 3 or more times in the last '
                                 f'{DYNAMIC_PS_S} s (scrolling or block text)')
         self.ps_mode.hide()
@@ -4097,7 +4101,7 @@ class StationPanel(QtCore.QObject):
         self.rt.setMinimumHeight(QtGui.QFontMetrics(self.rt.font()).height() + 8)
         self.rtplus = QtWidgets.QLabel('')
         self.rtplus.setTextFormat(QtCore.Qt.RichText)
-        self.rtplus.setStyleSheet(f'color: {ACCENT};')
+        self.rtplus.setStyleSheet('color: #c4c7cc;')
         self.rtplus.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         text_box = QtWidgets.QVBoxLayout()
         text_box.setSpacing(3)
@@ -4212,7 +4216,7 @@ class StationPanel(QtCore.QObject):
         text_grid.addWidget(self.art_img, 0, 3, 4, 1)
         for w in (self.iboc_line, self.psd_line, self.sis_line, self.rdns_line):
             w.setTextFormat(QtCore.Qt.RichText)
-            w.setStyleSheet(f'color: {ACCENT};')
+            w.setStyleSheet('color: #c4c7cc;')
             # long text is cut at the edge (full text in the tooltip), never widening the view
             w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.psd_line.setToolTip('IBOC programme service data (PSD) of the programme playing')
@@ -4220,7 +4224,7 @@ class StationPanel(QtCore.QObject):
         for i, (title, widget) in enumerate((('IBOC', self.iboc_line), ('PSD', self.psd_line),
                                              ('SIS', self.sis_line), ('RadioDNS', self.rdns_line))):
             label = QtWidgets.QLabel(title)
-            label.setStyleSheet(f'font-weight: bold; color: {ACCENT};')
+            label.setStyleSheet('font-weight: bold; color: #9aa0a6;')
             label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             text_grid.addWidget(label, i, 0)
             text_grid.addWidget(widget, i, 1)
@@ -4310,7 +4314,7 @@ class StationPanel(QtCore.QObject):
         self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
         self.gonio.setToolTip('Click for a larger view')
         self.gonio.on_click = self._open_stereo
-        self.meters = {'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, GREEN)], origin=0, ticks=(0,))}
+        self.meters = {'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))}
         self.meters['corr'].setMinimumWidth(120)
         self.meters['corr'].name_w = 44
         stereo = QtWidgets.QHBoxLayout()
@@ -4331,9 +4335,9 @@ class StationPanel(QtCore.QObject):
         self.play = QtWidgets.QPushButton('▶  Play')
         self.play.setCheckable(True)
         self.play.setStyleSheet('QPushButton { font-weight: 600; padding: 3px 10px; }'
-                                'QPushButton:checked { background: #2e7d32; color: white;'
-                                ' border: 1px solid #69db7c; border-radius: 6px; }'
-                                'QPushButton:checked:hover { background: #37913c; }')
+                                'QPushButton:checked { background: #2f6db5; color: white;'
+                                ' border: 1px solid #8ab4f8; border-radius: 6px; }'
+                                'QPushButton:checked:hover { background: #3a7cc6; }')
         self.play.toggled.connect(lambda on: on_play(self, on))
         box.addStretch(1)
         audio_row = QtWidgets.QHBoxLayout()
@@ -4595,13 +4599,12 @@ class StationPanel(QtCore.QObject):
     @staticmethod
     def _sca_kind_html(kind, baud):
         return {
-            'audio': f'<span style="color:{AMBER}">AUDIO</span>',
-            'data': f'<span style="color:{ACCENT}">DATA</span>' + (f' ~{baud:.0f} Bd' if baud else '')
-                    + f' <span style="color:{DIM}">(not audio)</span>',
-            'tone': f'<span style="color:{AMBER}">TONE</span>',
+            'audio': 'AUDIO',
+            'data': 'DATA' + (f' ~{baud:.0f} Bd' if baud else '') + f' <span style="color:{DIM}">(not audio)</span>',
+            'tone': 'TONE',
             'idle': f'<span style="color:{DIM}">IDLE (no modulation)</span>',
-            'weak': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(too weak to tell)</span>',
-            'checking': f'<span style="color:{AMBER}">PRESENT</span> <span style="color:{DIM}">(checking…)</span>',
+            'weak': f'PRESENT <span style="color:{DIM}">(too weak to tell)</span>',
+            'checking': f'PRESENT <span style="color:{DIM}">(checking…)</span>',
         }[kind]
 
     def _sca_sources(self, sca):
@@ -4653,7 +4656,7 @@ class StationPanel(QtCore.QObject):
     @staticmethod
     def _iboc_text(found, dbc):
         if found == 'detected':
-            return f'<span style="color:{AMBER}">detected</span>, {dbc:.0f} dBc'
+            return f'detected, {dbc:.0f} dBc'
         return f'<span style="color:{DIM}">' + {'unscanned': 'unknown (not scanned)',
                                                 'adjacent': 'unknown (adjacent station)',
                                                 'absent': 'not detected'}[found] + '</span>'
@@ -4791,7 +4794,8 @@ class StationPanel(QtCore.QObject):
             label.setText(text)
             label.setToolTip(QtGui.QTextDocumentFragment.fromHtml(text).toPlainText() if text != '-' else '')
         self._update_media(r['pi'], r['ecc'])
-        tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>') + _html(f'{name}: {text}') + '</span>'
+        tags = [(f'<span style="color:{RED}">' if t == RTPLUS_ALARM else '<span>')
+                + f'<span style="color:{DIM}">{_html(name)}</span> {_html(text)}</span>'
                 for t, name, text in r['rtplus']]
         self.rtplus.setText('   ·   '.join(tags) if tags else _flags_html(r['flags']) if r['flags'] else
                             f'<span style="color:{DIM}">no RDS</span>' if r['pi'] is None else '')
@@ -4821,7 +4825,7 @@ class StationPanel(QtCore.QObject):
             v['AM / multipath'].setText(_coloured(am_text + am_note, lv.get('am_pct')))
             v['Pilot (19 kHz)'].setText(
                 _coloured(f"{r['pilot_pct']:.1f}%", lv.get('pilot_pct')) + '  ' +
-                {'stereo': f'<span style="color:{RED}">STEREO</span>',
+                {'stereo': 'stereo',
                  'forced mono': f'<span style="color:{AMBER}">mono (forced)</span>',
                  'mono': f'<span style="color:{DIM}">mono</span>'}[r['stereo_mode']])
             if r['pilot_hz'] is not None:
@@ -4879,7 +4883,7 @@ class StationPanel(QtCore.QObject):
             v['Balance'].setText('centre' if abs(bal) < 0.5 else
                                  f"{abs(bal):.1f} dB {'L' if bal > 0 else 'R'}")
             corr = r['correlation']
-            v['Correlation'].setText(f'<span style="color:{RED if lv.get("correlation") else GREEN}">{corr:+.2f}</span>')
+            v['Correlation'].setText(_coloured(f'{corr:+.2f}', lv.get('correlation')))
             v['Width (S/M)'].setText('mono' if not math.isfinite(r['width_db']) or r['width_db'] < -40
                                      else _num(r['width_db'], 'dB'))
             self.meters['corr'].set_value(corr, f'{corr:+.2f}')
@@ -6796,7 +6800,7 @@ class MainWindow(QtWidgets.QWidget):
             return
         self.details.removeWidget(panel.detail)
         panel.window = DetailWindow(self, panel, self._pop_in)
-        panel.pop_btn.setText('\u29c8  Dock')
+        panel.pop_btn.setText('\u21a9  Dock')
         panel.pop_btn.setToolTip('Put this receiver back under the station rows')
         panel.window.show()
         docked = [p for p in self.panels if not p.window]
