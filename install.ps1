@@ -16,6 +16,11 @@ $App = 'FM-Modmon-ms'
 $Repo = 'RAEApps/FM-Modmon-ms'
 $ScriptUrl = "https://raw.githubusercontent.com/$Repo/main/install.ps1"
 $Conda = Join-Path $env:ProgramData 'radioconda'
+# A radioconda already installed just for this user is used rather than adding a second copy.
+$UserConda = Join-Path $env:USERPROFILE 'radioconda'
+if (-not (Test-Path (Join-Path $Conda 'python.exe')) -and (Test-Path (Join-Path $UserConda 'python.exe'))) {
+    $Conda = $UserConda
+}
 $Cache = Join-Path $env:TEMP 'fm-modmon-ms-setup'
 $SdrplayMin = [version]'3.15'
 $SdrplayPage = 'https://www.sdrplay.com/api/'
@@ -139,8 +144,13 @@ function Install-Sdrplay {
         if (-not (Get-SdrplayVersion)) { throw "The SDRplay API didn't install (exit $($p.ExitCode))." }
     }
     # The monitor reaches the RSP1A through this service: run it now and at boot.
-    & sc.exe config SDRplayAPIService start= auto | Out-Null
-    & sc.exe start SDRplayAPIService | Out-Null   # fails harmlessly if it's already running
+    $out = & sc.exe config SDRplayAPIService start= auto
+    if ($LASTEXITCODE) { Write-Warning "Couldn't set the SDRplay API service to start at boot (sc.exe $LASTEXITCODE): $out" }
+    $out = & sc.exe start SDRplayAPIService
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 1056) {   # 1056: already running
+        Write-Warning "The SDRplay API service didn't start (sc.exe $LASTEXITCODE): $out"
+        Write-Warning 'The monitor won''t see the RSP1A until it runs: try Services > SDRplay API Service > Start, or reboot.'
+    }
 }
 
 function Install-Monitor {
