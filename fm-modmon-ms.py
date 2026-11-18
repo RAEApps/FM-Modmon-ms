@@ -216,6 +216,14 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# radioconda's numpy and scipy use MKL with Intel OpenMP, whose threads spin for
+# 200 ms after each parallel FFT or filter. The meters call those all the time, so
+# on a 4-thread laptop the spinning took 2 of its 4 cores. The meters already run
+# in parallel (a GNU Radio thread each): keep the maths single-threaded. Must be
+# set before numpy loads.
+for _var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
+    os.environ.setdefault(_var, '1')
+
 import numpy as np
 import pmt
 from PyQt5 import QtCore, QtGui, QtWidgets
