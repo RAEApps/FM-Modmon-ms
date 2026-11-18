@@ -41,8 +41,9 @@ Under it, the Alarms tab lists each alarm once, with how long it lasted.
 
 ## Alarms
 
-Carrier low/lost, audio silence, over-modulation, pilot lost, RDS lost, wrong PI, emergency
-alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
+Carrier low/lost, audio silence, over-modulation, pilot lost, RDS lost ("possibly on N+1"
+instead when the carrier, pilot and audio stay fine, as an N+1 backup transmitter without an
+RDS encoder would cause), wrong PI, emergency alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
 then gone for 60 s; paging that only bursts during an alert never alarms), and the FM
 technical rules of a preset, each limit adjustable per receiver:
 
@@ -54,7 +55,8 @@ technical rules of a preset, each limit adjustable per receiver:
 | Carrier frequency | ± 2000 Hz | ± 1000 Hz |
 
 Alarms go to the event log and optionally to email (SMTP) and webhooks (JSON, Slack,
-Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout.
+Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout, and warns of ADC
+overload (wideband peaks at full scale, which make every receiver's readings false).
 
 > The monitor is a measurement aid, not a type-approved modulation monitor. Carrier
 > offset includes the SDR's own tuning error, and levels depend on gain calibration.
