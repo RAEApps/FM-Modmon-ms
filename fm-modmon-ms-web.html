@@ -10,19 +10,23 @@
 <link rel="apple-touch-icon" href="icon.png">
 <style>
 /* Contrast (WCAG 2.1) on the dark backgrounds: text 4.5:1 or more (dim 4.9, muted 5.9),
-   control outlines 3:1 or more (--btn-b 3.3); disabled controls (exempt) stay readable. */
+   control outlines 3:1 or more (--btn-b 3.3); disabled controls (exempt) stay readable.
+   As in the app (ISA-101 high-performance HMI): normal readings in greys, amber and
+   red only for what is abnormal. */
 :root {
   color-scheme: dark;                 /* native controls, lists and scrollbars drawn dark */
   accent-color: #8ab4f8;              /* checkboxes and sliders in the app's blue */
-  --bg: #1e1f22; --panel: #1c1d21; --panel-b: #2c2e33; --card: #222328; --card-b: #2a2c31;
-  --text: #e0e0e0; --bright: #e8eaed; --muted: #9aa0a6; --dim: #8c9197; --disabled: #6f747c;
-  --accent: #8ab4f8; --green: #69db7c; --red: #ff6b6b; --amber: #f0a35e;
+  --bg: #17181b; --row: #1e1f22; --row-b: #2e3035; --sel: #1f232a; --sel-b: #3d5f8f; --detail: #1b1c20;
+  --card: #222328; --card-b: #2a2c31; --track: #2a2c31; --band: #30353c; --plot: #1a1b1f;
+  --text: #e0e0e0; --bright: #e3e4e6; --muted: #9aa0a6; --dim: #8c9197; --disabled: #6f747c;
+  --normal: #7b8794; --accent: #8ab4f8; --red: #ff6b6b; --amber: #f0a35e;
   --btn: #2b2d31; --btn-b: #6f747c; --btn-bh: #9aa0a6; --btn-h: #33363c; --field: #16171a;
   --lcd: #0b1a0b; --lcd-b: #1f3a1f;
+  --cols: 250px minmax(0, 1fr) 300px 176px 150px 28px;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
-body { font: 13px "Segoe UI", system-ui, sans-serif; padding: 12px 14px; }
+body { font: 13px "Segoe UI", system-ui, sans-serif; padding: 10px 14px; }
 button, select, input { font: inherit; color: var(--text); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }   /* keyboard focus */
 button { background: var(--btn); border: 1px solid var(--btn-b); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
@@ -31,23 +35,22 @@ button:disabled, select:disabled, input:disabled { color: var(--disabled); backg
 button.primary { background: #2f6db5; border-color: #3d7fd0; color: #fff; font-weight: 600; }
 button.primary:hover:not(:disabled) { background: #3a7cc6; }
 button.primary:disabled { background: #25272b; border-color: #3a3d44; color: var(--disabled); font-weight: normal; }
-button.on { background: #2e7d32; border-color: #69db7c; color: #fff; }
 select { background: var(--btn); border: 1px solid var(--btn-b); border-radius: 6px; padding: 4px 8px; }
 select:hover:not(:disabled), input:hover:not(:disabled) { border-color: var(--btn-bh); }
 input { background: var(--field); border: 1px solid var(--btn-b); border-radius: 5px; padding: 4px 6px; }
 input[type=checkbox] { width: 16px; height: 16px; margin: 0 4px 0 0; vertical-align: -3px; cursor: pointer; }
 input:focus, select:focus { border-color: var(--accent); }
 
-header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
 header img { width: 30px; height: 30px; }
 header h1 { font-size: 20px; font-weight: 600; color: var(--bright); margin: 0 8px 0 2px; }
 .chip { background: #24262b; border: 1px solid #30333a; border-radius: 10px; padding: 3px 10px; color: #c4c7cc; white-space: nowrap; }
 header .grow { flex: 1; }
 #access { position: relative; color: var(--muted); }
 #lock { white-space: nowrap; }
-#lock.on { background: #2e7d32; border-color: #69db7c; color: #fff; font-weight: 600; }
-#lock.on:hover:not(:disabled) { background: #37913c; }
-#lock:disabled.on { color: #fff; background: #2e7d32; border-color: #2c5236; }
+#lock.on { background: #2f6db5; border-color: #8ab4f8; color: #fff; font-weight: 600; }
+#lock.on:hover:not(:disabled) { background: #3a7cc6; }
+#lock:disabled.on { color: #fff; background: #2f6db5; border-color: #3d5f8f; }
 #signin { position: absolute; right: 0; top: calc(100% + 6px); z-index: 10; display: none; gap: 6px; align-items: center;
           background: var(--card); border: 1px solid var(--btn-b); border-radius: 8px; padding: 8px;
           box-shadow: 0 6px 18px rgba(0,0,0,.45); flex-wrap: wrap; width: 260px; }
@@ -57,66 +60,99 @@ header .grow { flex: 1; }
 #conn { color: var(--amber); }
 #conn:empty { display: none; }
 
-#panels { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; padding-bottom: 4px; }
-.panel { background: var(--panel); border: 1px solid var(--panel-b); border-radius: 12px; padding: 12px;
-         display: flex; flex-direction: column; gap: 8px; flex: 1 1 0; min-width: 600px; }
-.card { background: var(--card); border: 1px solid var(--card-b); border-radius: 8px; padding: 6px 10px 8px; }
-.card-head { display: flex; align-items: center; margin-bottom: 3px; }
-.card-title { flex: 1; color: var(--accent); font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
-.card-head button { padding: 1px 8px; }
+/* station rows: one line per receiver, the same columns as the app */
+.colhead, .row { display: grid; grid-template-columns: var(--cols); gap: 12px; align-items: center; }
+.colhead { padding: 0 10px 3px; color: var(--dim); font: 600 9.5px/1 Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; }
+.row { background: var(--row); border: 1px solid var(--row-b); border-radius: 6px; padding: 5px 6px 5px 10px; margin-bottom: 4px; cursor: pointer; }
+.row.sel { background: var(--sel); border-color: var(--sel-b); }
+.stn { display: grid; grid-template-columns: auto auto 1fr; column-gap: 6px; row-gap: 2px; align-items: center; min-width: 0; }
+.freq { position: relative; font-size: 19px; font-weight: 600; padding: 0 16px 0 3px; border: 1px solid transparent; border-radius: 6px; white-space: nowrap; }
+.freq::after { content: '▾'; position: absolute; right: 3px; top: 50%; transform: translateY(-50%); font-size: 12px; color: var(--muted); }
+.freq:hover:not(.off) { border-color: var(--btn-b); }
+.freq.off::after { display: none; }
+.freq select { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }   /* the list, over the frequency */
+.freq select:disabled { cursor: default; }
+.ps { font: bold 16px Consolas, monospace; color: #7cfc7c; background: var(--lcd); border: 1px solid var(--lcd-b);
+      border-radius: 4px; padding: 1px 5px; white-space: pre; justify-self: start; }
+.dyn { font: 600 9px/1 Consolas, monospace; padding: 3px 4px; border-radius: 3px; background: #33363c; color: var(--bright); border: 1px solid #44474e; justify-self: start; }
+.meta { grid-column: 1 / -1; color: var(--dim); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meta b { color: var(--bright); }
+.txt { min-width: 0; display: grid; gap: 3px; }
+.rt { font: 13px Consolas, monospace; color: #cfe8cf; background: var(--lcd); border: 1px solid var(--lcd-b); border-radius: 4px;
+      padding: 2px 6px; white-space: pre; overflow: hidden; text-overflow: ellipsis; min-height: 22px; }
+.sub { color: #c4c7cc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 17px; }
+.sub .k, .dimt { color: var(--dim); }
+.lit { color: var(--bright); font-weight: 700; }
+.warn { color: var(--amber); } .alarm { color: var(--red); }
+.tapes { display: grid; gap: 1px; min-width: 0; }
+.tape { display: grid; grid-template-columns: var(--tn, 34px) 1fr var(--tv, 92px); align-items: center; gap: 6px; height: 16px; }
+.tape .n { color: var(--muted); white-space: nowrap; }
+.tape .tr { position: relative; height: 7px; background: var(--track); border-radius: 2px; }
+.tape .band { position: absolute; top: 0; bottom: 0; background: var(--band); }
+.tape .fill { position: absolute; top: 0; bottom: 0; border-radius: 1.5px; background: var(--normal); }
+.tape .fill.warn { background: var(--amber); } .tape .fill.alarm { background: var(--red); }
+.tape .hold { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: var(--bright); }
+.tape .lim { position: absolute; top: -4px; bottom: -1px; width: 1px; background: var(--red); }
+.tape .lim::before { content: ''; position: absolute; left: -3.5px; top: -1px; border: 3.5px solid transparent; border-top: 4px solid var(--red); }
+.tape .zero { position: absolute; top: -3px; bottom: -3px; width: 1px; background: #5d6167; }
+.tape .v { text-align: right; font-weight: 700; white-space: nowrap; color: var(--bright); }
+.trend { display: grid; gap: 1px; min-width: 0; }
+.trend .note { font-size: 10px; color: var(--dim); white-space: nowrap; overflow: hidden; }
+canvas.spark { width: 100%; height: 26px; display: block; }
+.ann { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; }
+.lamp { font: 600 9px/1 Consolas, monospace; text-align: center; padding: 4px 0; border-radius: 2px; background: #26282d; color: #7d838a; cursor: default; }
+.lamp[data-s=waiting] { color: #4f545a; }
+.lamp[data-s=raised] { background: #7a1f26; color: #ffe0e0; box-shadow: inset 0 0 0 1px #c24a52; }
+.lamp[data-s=pending] { background: #4a3a1c; color: var(--amber); }
+.lamp[data-s=suppressed] { background: repeating-linear-gradient(135deg, #26282d 0 3px, #3a2e1b 3px 6px); color: var(--amber); }
+.lamp[data-s=off] { background: transparent; color: #4f545a; box-shadow: inset 0 0 0 1px #3a3d44; }
+.rbtn { display: grid; gap: 2px; }
+.rbtn button { padding: 0 4px; border-color: transparent; background: transparent; color: var(--muted); line-height: 20px; }
+.rbtn button:hover:not(:disabled) { border-color: var(--btn-b); color: var(--text); }
+.rbtn button:disabled { background: transparent; border-color: transparent; }
 
-.top { display: flex; gap: 6px; }
-.top select.station { flex: 1; font-size: 26px; font-weight: bold; padding: 2px 8px; min-width: 0; }
-.top button { font-size: 17px; padding: 4px 10px; }
-
-.text-grid { display: grid; grid-template-columns: auto 1fr auto auto; column-gap: 8px; row-gap: 3px; align-items: center; }
-.text-grid .lbl { font-weight: bold; color: var(--accent); text-align: right; }
-.text-grid .wide { grid-column: 2 / span 3; }
-.text-grid .line { color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.ps { background: var(--lcd); border: 1px solid var(--lcd-b); border-radius: 6px; text-align: center; padding: 2px;
-      font: bold 24px Consolas, monospace; color: #7cfc7c; white-space: pre; }
-.rt { background: var(--lcd); border: 1px solid var(--lcd-b); border-radius: 6px; padding: 4px 6px;
-      font: 13px Consolas, monospace; color: #cfe8cf; white-space: pre; overflow: hidden; min-height: 26px; }
-.media { grid-row: 4 / span 4; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
+/* the selected receiver's detail */
+.detail { background: var(--detail); border: 1px solid var(--sel-b); border-radius: 6px; padding: 6px 8px 8px; margin-top: 2px; }
+.dhead { display: flex; align-items: baseline; gap: 10px; padding: 0 2px 6px; flex-wrap: wrap; }
+.dhead .t { font-weight: 700; font-size: 14px; }
+.dhead .s { flex: 1; color: var(--dim); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dhead .f { color: var(--dim); }
+.lines { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; column-gap: 8px; row-gap: 3px; align-items: center; margin-bottom: 6px; }
+.lines .lbl { font-weight: bold; color: var(--muted); text-align: right; }
+.lines .line { color: #c4c7cc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.media { grid-row: 1 / span 4; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; position: relative; }
 .media img { max-width: 88px; max-height: 88px; border-radius: 4px; cursor: zoom-in; }
-.media { position: relative; }
 .media a { position: absolute; right: 2px; bottom: 2px; padding: 0 4px; border-radius: 4px; background: rgba(0,0,0,.65); color: var(--accent); text-decoration: none; font-size: 12px; }
-
-.status-row { display: flex; align-items: center; gap: 6px; }
-.pill { border-radius: 10px; padding: 2px 10px; font-weight: 600; white-space: nowrap; }
-.pill.ok { background: #1b2f21; color: #69db7c; border: 1px solid #2c5236; }
-.pill.alarm { background: #3a1d1f; color: #ff8a8a; border: 1px solid #6b2a2e; }
-.pill.dyn { background: #3a2e1b; color: #f0a35e; border: 1px solid #6b5228; }
-.status-row .grow { flex: 1; }
-.status-row .feed { color: var(--muted); text-align: right; }
-
-.meters { display: grid; grid-template-columns: 1fr 1fr; column-gap: 18px; row-gap: 6px; }
-.meter { display: flex; align-items: center; height: 20px; gap: 6px; }
-.meter .name { color: var(--muted); white-space: nowrap; width: var(--mw, auto); flex: none; }
-.meter .track { position: relative; flex: 1; height: 8px; background: #2c2e33; border-radius: 4px; }
-.meter .fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
-.meter .tick { position: absolute; top: -3px; bottom: -3px; width: 1px; background: #80868b; }
-.meter .val { width: 78px; text-align: right; font-weight: bold; color: var(--bright); white-space: nowrap; }
-
-.values { display: grid; column-gap: 10px; row-gap: 3px; }
-.values .k { color: var(--muted); white-space: nowrap; }
-.values .v { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.stereo { display: flex; gap: 10px; align-items: flex-start; }
-.stereo .values { flex: 1; }
+.cards { display: grid; grid-template-columns: 24fr 26fr 24fr 22fr; gap: 8px; align-items: stretch; }
+.card { background: var(--card); border: 1px solid var(--card-b); border-radius: 8px; padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.card-head { display: flex; align-items: center; gap: 6px; }
+.card-title { flex: 1; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
+.card-head .x { color: var(--dim); font-size: 11px; }
+.card-head button { padding: 0 8px; }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); column-gap: 8px; row-gap: 2px; }
+.kv.one { grid-template-columns: auto minmax(0, 1fr); }
+.kv .k { color: var(--muted); white-space: nowrap; }
+.kv .v { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.kv .v.wide { grid-column: 2 / -1; }
+.absent { color: var(--dim); font-size: 11px; }
+.absent:empty { display: none; }
+.cap { color: var(--dim); font-size: 11px; }
 canvas { display: block; }
-canvas.mpx { width: 100%; height: 240px; }
-canvas.gonio { width: 130px; height: 130px; flex: none; }
-
-.audio-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.audio-row select { min-height: 34px; max-width: 150px; text-overflow: ellipsis; }
-.audio-row > button { min-height: 34px; font-weight: 600; min-width: 84px; padding: 5px 10px; }
-.audio-row > button.on { background: #2e7d32; border-color: #69db7c; color: #fff; }
-.audio-row > button.on:hover { background: #37913c; }
-.player { display: none; align-items: center; gap: 6px; flex: 1; min-width: 200px; height: 34px; padding: 0 8px;
+canvas.mpx { width: 100%; height: 140px; }
+canvas.hist { width: 100%; height: 64px; }
+.stereo { display: flex; gap: 8px; align-items: flex-start; }
+.stereo > div { flex: 1; min-width: 0; display: grid; gap: 2px; }
+canvas.gonio { width: 104px; height: 104px; flex: none; cursor: pointer; }
+.audio-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: auto; padding-top: 4px; }
+.audio-row select { min-height: 30px; max-width: 150px; text-overflow: ellipsis; }
+.audio-row > button { min-height: 30px; font-weight: 600; min-width: 84px; padding: 4px 10px; }
+.audio-row > button.on { background: #2f6db5; border-color: #8ab4f8; color: #fff; }
+.audio-row > button.on:hover { background: #3a7cc6; }
+.player { display: none; align-items: center; gap: 6px; flex: 1; min-width: 180px; height: 30px; padding: 0 8px;
           background: var(--field); border: 1px solid var(--btn-b); border-radius: 6px; }
 .player.on { display: flex; }
 .player .live { font: 600 12px Consolas, monospace; color: var(--muted); white-space: nowrap; min-width: 84px; }
-.player .live.on { color: var(--green); }
+.player .live.on { color: var(--bright); }
 .player .live.wait { color: var(--amber); }
 .player .mute { background: none; border: none; padding: 2px 4px; font-size: 15px; line-height: 1; }
 .player .mute:hover { background: var(--btn-h); }
@@ -127,9 +163,19 @@ canvas.gonio { width: 130px; height: 130px; flex: none; }
 .vol::-moz-range-track { background: transparent; }
 .audio-row .note { color: var(--muted); }
 
-#events { margin-top: 12px; }
-#log { background: var(--field); border-radius: 6px; padding: 6px 8px; height: 110px; overflow: auto;
-       font: 12px Consolas, monospace; color: #c4c7cc; white-space: pre; }
+/* alarms (one row each, with its duration) and the event log */
+#logs { margin-top: 8px; background: var(--card); border: 1px solid var(--card-b); border-radius: 8px; padding: 6px 10px 8px; }
+.tabs { display: flex; gap: 2px; margin-bottom: 4px; }
+.tabs button { background: transparent; border: none; color: var(--muted); padding: 2px 10px; border-radius: 4px; }
+.tabs button.on { background: var(--btn); color: var(--bright); }
+.tabs button.red { color: var(--red); }
+#alarms, #log { background: var(--field); border-radius: 6px; height: 110px; overflow: auto; }
+#log { padding: 6px 8px; font: 12px Consolas, monospace; color: #c4c7cc; white-space: pre; }
+#alarms table { border-collapse: collapse; width: 100%; font-size: 12px; }
+#alarms th { text-align: left; color: var(--muted); font-weight: 600; padding: 3px 8px; position: sticky; top: 0; background: var(--field); }
+#alarms td { padding: 2px 8px; white-space: nowrap; color: #c4c7cc; }
+#alarms tr.on td { color: var(--red); }
+#alarms td:last-child { white-space: normal; }
 
 dialog { background: var(--card); color: var(--text); border: 1px solid var(--btn-b); border-radius: 10px; padding: 16px; max-width: 640px; width: 95vw; }
 #settings { max-width: 780px; }
@@ -152,10 +198,9 @@ legend { color: var(--accent); }
 #stereo .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 8px; }
 #stereo .help-head h2 { margin: 0; }
 #stereo-scope { display: block; width: calc(100% - 32px); aspect-ratio: 1; margin: 0 16px; border-radius: 6px; }
-#stereo-phase { margin: 10px 16px 0; } #stereo-phase .name { width: auto; }
+#stereo-phase { margin: 10px 16px 0; --tn: 50px; --tv: 60px; }
 #stereo-readouts { margin: 6px 16px 0; color: var(--muted); text-align: center; }
 #stereo-readouts b { color: var(--text); }
-canvas.gonio { cursor: pointer; }
 #helpdlg .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; }
 #helpdlg .help-head h2 { margin: 0; }
 #help-toc { padding: 6px 16px; color: var(--muted); }
@@ -169,22 +214,28 @@ canvas.gonio { cursor: pointer; }
 #zoom { position: fixed; inset: 0; background: rgba(0,0,0,.75); display: none; align-items: center; justify-content: center; }
 #zoom img { max-width: 90vw; max-height: 90vh; }
 
+/* narrower screens: cards two by two, then the row's columns wrap */
+@media (max-width: 1250px) { .cards { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 1100px) {
+  :root { --cols: 230px minmax(0, 1fr) 260px 28px; }
+  .colhead span:nth-child(4), .colhead span:nth-child(5) { display: none; }
+  .row .trend, .row .ann { grid-row: 2; }
+  .row .trend { grid-column: 1 / 3; } .row .ann { grid-column: 3 / 5; }
+}
 @media (max-width: 700px) {
-  body { padding: 10px; }
-  #panels { flex-direction: column; overflow-x: visible; }
-  .panel { min-width: 0; width: 100%; }
-  .top select.station { font-size: 20px; }
-  .rt { white-space: pre-wrap; }
-  .meters { grid-template-columns: 1fr; }
-  .values { grid-template-columns: var(--kw) minmax(0, 1fr) !important; }
-  .values .v { white-space: normal; }
-  .text-grid .line { white-space: normal; overflow: visible; }
-  .status-row { flex-wrap: wrap; }
-  .status-row .grow { display: none; }
-  .status-row .feed { flex-basis: 100%; text-align: left; }
+  body { padding: 8px; }
+  :root { --cols: minmax(0, 1fr) 28px; }
+  .colhead { display: none; }
+  .row .stn { grid-column: 1; grid-row: 1; } .row .rbtn { grid-column: 2; grid-row: 1; }
+  .row .txt, .row .tapes, .row .trend, .row .ann { grid-column: 1 / -1; grid-row: auto; }
+  .cards { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: auto minmax(0, 1fr); }
+  .kv .v { white-space: normal; }
+  .lines { grid-template-columns: auto minmax(0, 1fr); }
+  .lines .line { white-space: normal; }
+  .media { display: none !important; }
   /* header: title with sign-in and help on one row, the chips as one sideways-scrolling
      strip, then the two action buttons side by side */
-  header { gap: 6px; }
   header img { order: 0; } header h1 { order: 1; margin-right: auto; }
   #access { order: 2; } #help-btn { order: 3; }
   #chips { display: flex !important; order: 4; flex: 0 0 100%; gap: 6px; overflow-x: auto; scrollbar-width: none; }
@@ -192,9 +243,6 @@ canvas.gonio { cursor: pointer; }
   header .grow { display: none; }
   #conn { order: 5; flex-basis: 100%; }
   #cal, #add { order: 6; flex: 1 1 0; white-space: nowrap; }
-  .text-grid { grid-template-columns: auto 1fr; }
-  .text-grid .wide { grid-column: 2; }
-  .media { display: none !important; }
 }
 </style>
 </head>
@@ -213,8 +261,14 @@ canvas.gonio { cursor: pointer; }
   <button id="cal" disabled title="Set the RSP1A gain for the stations being received now (takes a few seconds; the meters restart afterwards)">&#x27F2;&nbsp; Recalibrate gain</button>
   <button id="add" class="primary" disabled>+&nbsp; Add receiver</button>
 </header>
-<div id="panels"></div>
-<div id="events" class="card"><div class="card-head"><span class="card-title">Events</span></div><div id="log"></div></div>
+<div class="colhead"><span>Station</span><span>Text · RT+ · flags</span><span>Now · peak hold · limit ▼</span><span>Trend · 5 min</span><span>Alarms</span><span></span></div>
+<div id="rows"></div>
+<div id="details"></div>
+<div id="logs">
+  <div class="tabs"><button id="tab-alarms" class="on">Alarms</button><button id="tab-events">Events</button></div>
+  <div id="alarms"><table><thead><tr><th>Raised</th><th>Station</th><th>Alarm</th><th>Duration</th><th>Cleared</th><th>Measured</th></tr></thead><tbody></tbody></table></div>
+  <div id="log" style="display:none"></div>
+</div>
 
 <dialog id="settings">
   <h2 id="settings-title">Receiver settings</h2>
@@ -246,7 +300,7 @@ canvas.gonio { cursor: pointer; }
 <dialog id="stereo">
   <div class="help-head"><h2 id="stereo-title">Stereo image</h2><button id="stereo-close">Close</button></div>
   <canvas id="stereo-scope"></canvas>
-  <div class="meter" id="stereo-phase"><span class="name">Phase</span><span class="track"><span class="fill"></span><span class="tick" style="left:50%"></span></span><span class="val">-</span></div>
+  <div id="stereo-phase"></div>
   <div id="stereo-readouts"></div>
 </dialog>
 <dialog id="helpdlg">
@@ -262,35 +316,22 @@ canvas.gonio { cursor: pointer; }
 const $ = (sel, el = document) => el.querySelector(sel);
 const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 let state = null, control = false, eventsSeq = -1, failures = 0;
-const panels = new Map();   // receiver number -> {el, parts...}
+const recv = new Map();     // receiver number -> {row, detail and their parts}
+let selected = (() => { try { return +sessionStorage.getItem('fm-modmon-ms-selected') || null; } catch (e) { return null; } })();
 
 // ---------------------------------------------------------------- helpers
-// Readouts arrive as the app's own rich text. Station-supplied text is in
-// it, so only text, <span>/<b>/<i> and a colour are let through.
-function setRich(el, html) {
-  if (el._html === html) return;
-  el._html = html;
-  const doc = new DOMParser().parseFromString('<body>' + (html || '') + '</body>', 'text/html');
-  const clean = (src, dst) => {
-    for (const n of src.childNodes) {
-      if (n.nodeType === Node.TEXT_NODE) dst.append(n.textContent);
-      else if (n.nodeType === Node.ELEMENT_NODE) {
-        const tag = n.tagName.toLowerCase();
-        const keep = ['span', 'b', 'i'].includes(tag);
-        const out = keep ? h(tag) : document.createDocumentFragment();
-        const m = keep && /color\s*:\s*(#[0-9a-f]{3,8}|[a-z]+)/i.exec(n.getAttribute('style') || '');
-        if (m) out.style.color = m[1];
-        clean(n, out);
-        dst.append(out);
-      }
-    }
-  };
-  const frag = document.createDocumentFragment();
-  clean(doc.body, frag);
-  el.replaceChildren(frag);
+function setText(el, text) { if (el.textContent !== text) el.textContent = text; }
+// A readout: plain text, or a list of pieces, each text or [text, class] (classes
+// only from this page: 'warn', 'alarm', 'dimt', 'lit'). Station-supplied text only
+// ever goes in as text.
+function setParts(el, parts) {
+  const sig = JSON.stringify(parts);
+  if (el._sig === sig) return;
+  el._sig = sig;
+  if (!Array.isArray(parts)) { el.textContent = parts == null ? '-' : String(parts); }
+  else el.replaceChildren(...parts.map(p => Array.isArray(p) ? h('span', p[1] || null, p[0]) : document.createTextNode(p)));
   el.title = el.textContent;
 }
-function setText(el, text) { if (el.textContent !== text) el.textContent = text; }
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
   clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = 'none', 6000);
@@ -329,7 +370,136 @@ function fillSelect(sel, items, value) {
   if (document.activeElement !== sel) sel.value = JSON.stringify(value);
 }
 
-// ---------------------------------------------------------------- drawing
+// ---------------------------------------------------------------- readouts, as the app formats them
+const fin = v => v != null && isFinite(v);
+const fx = (v, d = 1) => fin(v) ? v.toFixed(d) : '-';
+const num = (v, unit, d = 1) => (fin(v) ? v.toFixed(d) : '-∞') + ' ' + unit;
+const sgn = (v, d = 1) => fin(v) ? (v >= 0 ? '+' : '') + v.toFixed(d) : '-';
+const RTPLUS_ALARM = 27;
+
+function flagParts(f) {
+  if (!f) return '-';
+  const lit = (name, on) => [name, on ? 'lit' : 'dimt'];
+  return [lit('TP', f.TP), ' ', lit('TA', f.TA), ' ', [f.music ? 'Music' : 'Speech', 'lit'], ' ',
+          lit('DI-Stereo', f.stereo), ' ', lit('AH', f.AH), ' ', lit('CMP', f.CMP)];
+}
+function scaParts(kind, baud) {
+  return {audio: ['AUDIO'], data: ['DATA' + (baud ? ` ~${baud.toFixed(0)} Bd` : ''), [' (not audio)', 'dimt']],
+          tone: ['TONE'], idle: [['IDLE (no modulation)', 'dimt']], weak: ['PRESENT ', ['(too weak to tell)', 'dimt']],
+          checking: ['PRESENT ', ['(checking…)', 'dimt']]}[kind] || [];
+}
+function readouts(r) {
+  const o = {}, L = k => (r.levels || {})[k] || null;
+  o['PI'] = r.pi ?? '-'; o['PTY'] = r.pty ?? '-'; o['PTYN'] = r.ptyn || '-';
+  o['ECC'] = r.ecc == null ? '-' : r.ecc ? r.ecc.toString(16).toUpperCase().padStart(2, '0') : '00 (not set)';
+  o['Groups/s'] = fx(r.rds_rate);
+  o['Group loss'] = r.rds_loss_pct == null ? '-' : fx(r.rds_loss_pct, 0) + '%';
+  o['Flags'] = flagParts(r.flags);
+  o['ODA'] = (r.oda || []).join(', ') || '-';
+  o['Alt. freqs'] = r.af || '-';
+  if (r.clock) {
+    const off = Math.abs(r.clock[1]);
+    o['Clock'] = `${r.clock[0]} local (UTC${r.clock[1] < 0 ? '-' : '+'}${Math.floor(off / 60)}:${String(off % 60).padStart(2, '0')})`;
+  } else o['Clock'] = '-';
+  o['Group types'] = (r.group_types || []).slice(0, 5).map(([k, p]) => `${k} ${p.toFixed(0)}%`).join('  ') || '-';
+  const ds = [];
+  for (const d of r.data_services || []) {
+    if (ds.length) ds.push('  ·  ');
+    ds.push(d.label);
+    if (d.paging && d.paging.length) ds.push([` (${d.paging.join(', ')})`, 'dimt']);
+    if (d.share_pct != null) ds.push(` ${d.share_pct.toFixed(0)}%`);
+  }
+  for (const k of r.data_lost || []) { if (ds.length) ds.push('  ·  '); ds.push([k + ' lost', 'alarm']); }
+  o['Data services'] = ds.length ? ds : '-';
+  if (r.has_signal) {
+    o['RF level'] = num(r.rf_dbfs, 'dBFS');
+    o['MPX S/N'] = num(r.snr_db, 'dB');
+    o['Carrier offset'] = [[`${sgn(r.offset_hz, 0)} Hz`, L('offset_hz')]];
+    o['AM / multipath'] = [[fx(r.am_pct) + '%' + ({warn: '  peaks unreliable', alarm: '  readings unreliable'}[L('am_pct')] || ''), L('am_pct')]];
+    o['Pilot freq'] = r.pilot_hz == null ? '-' : [[`${fx(r.pilot_hz)} Hz (${sgn(r.pilot_hz - 19000)})`, L('pilot_hz')]];
+    o['RDS injection'] = fx(r.rds_pct) + '%';
+    const mode = r.rds_phase_mode;
+    o['RDS phase'] = mode == null ? '-' : mode === 'drifting' ? [['drifting: not locked to the pilot', L('rds_phase_deg')]]
+                   : [[`${sgn(Math.round(r.rds_phase_deg), 0)}° (${mode}, locked)`, L('rds_phase_deg')]];
+    if (r.sync_am_pct == null) o['Sync AM'] = '-';
+    else {
+      const db = r.sync_am_pct ? 20 * Math.log10(r.sync_am_pct / 100) : -Infinity;
+      const t = `${r.sync_am_pct.toFixed(2)}%  (${fin(db) ? db.toFixed(0) : '-∞'} dB)`;
+      o['Sync AM'] = r.sync_am_multipath ? [[t + '  multipath', 'dimt']] : [[t, L('sync_am_pct')]];
+    }
+    o['IBOC signal'] = r.iboc_found === 'detected' ? `detected, ${fx(r.iboc_dbc, 0)} dBc`
+      : [[{unscanned: 'unknown (not scanned)', adjacent: 'unknown (adjacent station)', absent: 'not detected'}[r.iboc_found], 'dimt']];
+    for (const k of [67, 92]) {
+      const pct = r[`sca${k}_pct`];
+      o[`SCA ${k} kHz`] = pct == null ? [['none', 'dimt']] : [`${pct.toFixed(1)}%  `, ...scaParts(r[`sca${k}_kind`], r[`sca${k}_baud`])];
+    }
+    o['Peak deviation'] = `${fx(r.dev_khz)} kHz (${fx(r.dev_khz / 0.75, 0)}%)`;
+    o['Over 100%'] = `${r.over100_min} /min`; o['Over 110%'] = `${r.over110_min} /min`;
+    o['MPX power'] = `${sgn(r.mpx_dbr)} dBr` + (r.mpx_window_s >= 60 ? '' : `  (${fx(r.mpx_window_s, 0)} s)`);
+    o['Limit'] = [`${fx(r.limit_pct)}%  `, [`(${r.limit_why})`, 'dimt']];
+    const span = r.valid_window_s >= 60 ? `${(r.valid_window_s / 60).toFixed(0)} min` : `${fx(r.valid_window_s, 0)} s`;
+    o['Valid time'] = r.valid_pct == null ? '-' : [[`${fx(r.valid_pct, 0)}% of ${span}`, L('valid_pct')],
+                                                    ...(r.invalid_why ? [[`  now: ${r.invalid_why}`, 'dimt']] : [])];
+    const held = r.exceed_valid_s < 900 ? `${(r.exceed_valid_s / 60).toFixed(0)} of 15 min valid` : 'last 15 min valid';
+    o['SM.1268'] = r.exceed_frac == null ? '-' : [[`${(r.exceed_frac * 1e6).toFixed(2)} ppm of samples over ${fx(r.exceed_khz)} kHz`,
+                                                   L('exceed_frac')], [`  (limit 1 ppm; ${held})`, 'dimt']];
+    o['Peak balance'] = r.asym_pct == null ? '-' : L('asym_pct')
+      ? [[`${r.asym_pct > 0 ? '+' : '−'} ${Math.abs(r.asym_pct).toFixed(0)}% higher: a station ${r.asym_pct > 0 ? 'above' : 'below'}?`, 'warn']]
+      : `even (${sgn(r.asym_pct)}%)`;
+    o['Noise >100 kHz'] = [[num(r.hf_noise_db, 'dB', 0), L('hf_noise_db')],
+                           [`  (±${fx(r.peak_noise_pct * 0.75, 2)} kHz RMS on peaks)`, 'dimt']];
+    o['Pilot AM'] = r.pilot_am_pct == null ? '-' : [[fx(r.pilot_am_pct) + '%', L('pilot_am_pct')]];
+  }
+  if (r.has_audio) {
+    const pct = k => [fx(r[k], 0) + '%', L(k)];
+    o['L / R'] = [pct('mod_l'), ' / ', pct('mod_r')];
+    o['L+R / L−R'] = [pct('mod_m'), ' / ', pct('mod_s')];
+    o['Momentary'] = num(r.momentary, 'LUFS'); o['Short-term'] = num(r.short_term, 'LUFS');
+    o['Integrated'] = num(r.integrated, 'LUFS');
+    o['True peak L/R'] = `${fx(r.tp_l)} / ${fx(r.tp_r)} dBTP`;
+    o['Level L/R'] = `${num(r.rms_l, '')}/ ${num(r.rms_r, 'dB')}`;
+    const bal = r.balance_db || 0;
+    o['Balance'] = Math.abs(bal) < 0.5 ? 'centre' : `${Math.abs(bal).toFixed(1)} dB ${bal > 0 ? 'L' : 'R'}`;
+    o['Correlation'] = [[sgn(r.correlation, 2), L('correlation')]];
+    o['Width (S/M)'] = !fin(r.width_db) || r.width_db < -40 ? 'mono' : num(r.width_db, 'dB');
+  }
+  return o;
+}
+// The readouts a station doesn't carry, hidden and listed once (as the app's _collapse).
+function collapse(r) {
+  let rds = [], mpx = [];
+  if (r.pi == null) rds = ['PI', 'PTY', 'PTYN', 'ECC', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'];
+  else rds = [['PTYN', !r.ptyn], ['ECC', r.ecc == null], ['ODA', !(r.oda || []).length], ['Alt. freqs', !r.af],
+              ['Clock', !r.clock], ['Data services', !(r.data_services || []).length && !(r.data_lost || []).length]]
+             .filter(x => x[1]).map(x => x[0]);
+  if (r.has_signal) mpx = [['Pilot freq', r.pilot_hz == null], ['Pilot AM', r.pilot_am_pct == null], ['RDS injection', r.pi == null], ['RDS phase', r.rds_phase_mode == null],
+                           ['Sync AM', r.sync_am_pct == null], ['SCA 67 kHz', r.sca67_pct == null], ['SCA 92 kHz', r.sca92_pct == null],
+                           ['IBOC signal', r.iboc_found !== 'detected']].filter(x => x[1]).map(x => x[0]);
+  const short = {'SCA 67 kHz': 'SCA 67', 'SCA 92 kHz': 'SCA 92', 'IBOC signal': 'IBOC', 'RDS injection': 'RDS'};
+  const onAir = mpx.filter(n => n in short).map(n => short[n]);
+  return {hidden: new Set([...rds, ...mpx]),
+          rds: r.pi == null ? 'No RDS decoded' : rds.length ? 'Not sent: ' + rds.join(' · ') : '',
+          mpx: onAir.length ? 'Not on air: ' + onAir.join(' · ') : ''};
+}
+function ibocParts(ib) {
+  if (!ib) return '-';
+  const name = {0: 'HD1', 1: 'HD2', 2: 'HD3', 3: 'HD4'}[ib.program] || `HD${ib.program + 1}`;
+  const parts = [name + (ib.service != null ? ` (${ib.service})` : ''), '  ·  ', ib.synced ? 'synchronized' : ['searching…', 'warn']];
+  if (ib.kbps) parts.push(`  ·  ${ib.kbps.toFixed(0)} kbps`);
+  if (ib.mer_db != null) parts.push(`  ·  MER ${ib.mer_db.toFixed(1)} dB`);
+  if (ib.ber != null) parts.push(`  ·  BER ${ib.ber.toExponential(1)}`);
+  if (ib.dropped) parts.push('  ·  ', [`${ib.dropped} blocks dropped`, 'alarm']);
+  if (ib.alert) parts.push('  ·  ', [`ALERT: ${ib.alert}`, 'alarm']);
+  return parts;
+}
+function psdSis(ib) {
+  if (!ib) return ['-', '-'];
+  const song = [ib.artist, ib.title].filter(Boolean).join(' – ');
+  return [[song, ib.album, ib.genre, ib.comment].filter(Boolean).join('  ·  ') || '-',
+          [ib.name, ib.slogan, ib.message].filter(Boolean).join('  ·  ') || '-'];
+}
+
+// ---------------------------------------------------------------- painted parts
 function canvasCtx(cv) {
   const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * dpr)), hgt = Math.max(1, Math.round(r.height * dpr));
@@ -337,27 +507,103 @@ function canvasCtx(cv) {
   const c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
   return [c, r.width, r.height];
 }
-const MARKERS = [[19, 'pilot', '#69db7c'], [38, '38k', '#9aa0a6'], [57, 'RDS', '#8ab4f8'], [67, 'SCA', '#f0a35e'], [92, 'SCA', '#f0a35e']];
+const C = {normal: '#7b8794', red: '#ff6b6b', amber: '#f0a35e', plot: '#1a1b1f', grid: '#3c4043', axis: '#9aa0a6', faint: '#5d6167', bright: '#e3e4e6'};
+// A tape: the value from its origin, the normal range as a band, a limit notch, a 2 s peak hold.
+function makeTape(name, lo, hi, opts = {}) {
+  const el = h('div', 'tape'), tr = h('div', 'tr'), band = h('div', 'band'), fill = h('div', 'fill'), v = h('span', 'v', '-');
+  tr.append(band, fill);
+  const t = {el, lo, hi, origin: opts.origin ?? lo, band: opts.band || null, hold: opts.hold ? [] : null};
+  if (opts.origin != null) { const z = h('div', 'zero'); tr.append(z); t.zero = z; }
+  if (opts.hold) { t.holdEl = h('div', 'hold'); tr.append(t.holdEl); }
+  t.limEl = h('div', 'lim'); t.limEl.style.display = 'none'; tr.append(t.limEl);
+  el.append(h('span', 'n', name), tr, v);
+  if (opts.nameW) el.style.setProperty('--tn', opts.nameW + 'px');
+  if (opts.valW) el.style.setProperty('--tv', opts.valW + 'px');
+  const pos = x => 100 * (Math.min(Math.max(x, t.lo), t.hi) - t.lo) / (t.hi - t.lo);
+  t.set = (value, text, st, limit, bandNow) => {
+    setText(v, text); v.className = 'v ' + (st && st !== 'off' ? st : '');
+    if (bandNow) t.band = bandNow;
+    if (t.band) Object.assign(band.style, {display: '', left: pos(t.band[0]) + '%', width: (pos(t.band[1]) - pos(t.band[0])) + '%'});
+    else band.style.display = 'none';
+    if (t.zero) t.zero.style.left = pos(t.origin) + '%';
+    if (!fin(value)) { fill.style.display = 'none'; if (t.holdEl) t.holdEl.style.display = 'none'; t.limEl.style.display = 'none'; return; }
+    const a = pos(t.origin), b = pos(value);
+    Object.assign(fill.style, {display: '', left: Math.min(a, b) + '%', width: Math.max(Math.abs(b - a), 0.8) + '%'});
+    fill.className = 'fill ' + (st || '');
+    if (t.hold) {
+      const now = Date.now(); t.hold.push([now, value]);
+      while (t.hold.length && now - t.hold[0][0] > 2000) t.hold.shift();
+      Object.assign(t.holdEl.style, {display: '', left: pos(Math.max(...t.hold.map(x => x[1]))) + '%'});
+    }
+    if (fin(limit)) Object.assign(t.limEl.style, {display: '', left: pos(limit) + '%'}); else t.limEl.style.display = 'none';
+  };
+  return t;
+}
+// Sparkline: the trend as a filled line, the limit dashed with excursions over it filled.
+function drawSpark(cv, data, lo, hi, limit, excess, ref) {
+  const [c, w, hgt] = canvasCtx(cv);
+  c.fillStyle = C.plot; c.fillRect(0, 0, w, hgt);
+  const n = (data || []).length, ok = v => v != null && v > -998;
+  const y = v => hgt - 2 - (hgt - 4) * (Math.min(Math.max(v, lo), hi) - lo) / (hi - lo), x = i => 1 + i * (w - 2) / Math.max(n - 1, 1);
+  if (ref != null) { c.strokeStyle = C.faint; c.setLineDash([1, 2]); c.beginPath(); c.moveTo(0, y(ref)); c.lineTo(w, y(ref)); c.stroke(); c.setLineDash([]); }
+  let run = [];
+  const flush = () => {
+    if (run.length > 1) {
+      c.beginPath(); c.moveTo(x(run[0]), hgt - 2); for (const i of run) c.lineTo(x(i), y(data[i])); c.lineTo(x(run[run.length - 1]), hgt - 2);
+      c.fillStyle = 'rgba(123,135,148,0.18)'; c.fill();
+      c.beginPath(); run.forEach((i, k) => k ? c.lineTo(x(i), y(data[i])) : c.moveTo(x(i), y(data[i])));
+      c.strokeStyle = C.normal; c.lineWidth = 1.1; c.stroke();
+    }
+    run = [];
+  };
+  for (let i = 0; i < n; i++) { if (ok(data[i])) run.push(i); else flush(); }
+  flush();
+  if (limit != null) {
+    c.fillStyle = excess;
+    for (let i = 0; i < n; i++) if (ok(data[i]) && data[i] > limit) c.fillRect(x(i) - 0.8, y(data[i]), 1.8, y(limit) - y(data[i]));
+    c.strokeStyle = C.red; c.setLineDash([2, 2]); c.lineWidth = 1; c.beginPath(); c.moveTo(0, y(limit)); c.lineTo(w, y(limit)); c.stroke(); c.setLineDash([]);
+  }
+  for (let i = n - 1; i >= 0; i--) if (ok(data[i])) { c.fillStyle = C.bright; c.beginPath(); c.arc(x(i), y(data[i]), 2, 0, 7); c.fill(); break; }
+}
+// Peak distribution: share of updates at each peak level, log height.
+function drawHist(cv, counts, [LO, HI, STEP], limit) {
+  const [c, w, hgt] = canvasCtx(cv);
+  c.font = '11px "Segoe UI", system-ui, sans-serif';
+  const bottom = hgt - 14, x = p => w * (p - LO) / (HI - LO);
+  c.clearRect(0, 0, w, hgt); c.fillStyle = C.plot; c.fillRect(0, 2, w, bottom - 2);
+  c.fillStyle = C.axis; c.textBaseline = 'top';
+  for (let p = LO; p < HI; p += 10) { c.textAlign = p === LO ? 'left' : 'center'; c.fillText(p % 20 ? String(p) : p + '%', x(p), bottom + 1); }
+  const mx = Math.max(0, ...(counts || []));
+  if (mx > 0) {
+    const bw = w / counts.length;
+    counts.forEach((n, i) => {
+      if (!n) return;
+      const lo = LO + i * STEP, bh = (bottom - 2) * Math.log1p(n) / Math.log1p(mx);
+      c.fillStyle = limit != null && lo >= limit ? C.red : lo >= 100 ? C.amber : C.normal;
+      c.fillRect(i * bw + 0.5, bottom - bh, bw - 1, bh);
+    });
+  }
+  if (limit != null) { c.strokeStyle = C.red; c.setLineDash([2, 2]); c.beginPath(); c.moveTo(x(limit), 2); c.lineTo(x(limit), bottom); c.stroke(); c.setLineDash([]); }
+}
+const MARKERS = [[19, 'pilot', '#9aa0a6'], [38, '38k', '#6d737a'], [57, 'RDS', '#9aa0a6'], [67, 'SCA', '#6d737a'], [92, 'SCA', '#6d737a']];
 function drawMpx(cv, db) {
   const [c, w, hgt] = canvasCtx(cv);
-  c.font = '12px "Segoe UI", system-ui, sans-serif';
-  const left = c.measureText('-70 dB').width + 8, right = w - c.measureText('100').width / 2 - 6, top = 6, bottom = hgt - 20;
+  c.font = '11px "Segoe UI", system-ui, sans-serif';
+  const left = c.measureText('-70 dB').width + 8, right = w - c.measureText('100').width / 2 - 6, top = 6, bottom = hgt - 18;
   const x = k => left + (right - left) * k / 100;
   const y = d => top + (bottom - top) * (0 - Math.min(Math.max(d, -70), 0)) / 70;
   c.fillStyle = '#16171a'; c.fillRect(0, 0, w, hgt);
-  c.strokeStyle = '#3c4043'; c.lineWidth = 1;
+  c.strokeStyle = C.grid; c.lineWidth = 1;
   for (let d = 0; d >= -70; d -= 10) { c.beginPath(); c.moveTo(left, y(d)); c.lineTo(right, y(d)); c.stroke(); }
-  c.fillStyle = '#9aa0a6'; c.textBaseline = 'middle'; c.textAlign = 'right';
+  c.fillStyle = C.axis; c.textBaseline = 'middle'; c.textAlign = 'right';
   for (let d = 0; d >= -70; d -= 10) c.fillText(d + ' dB', left - 6, y(d));
   c.textAlign = 'center'; c.textBaseline = 'top';
   for (let k = 0; k <= 100; k += 10) c.fillText(String(k), x(k), bottom + 3);
   if (db) {
-    c.beginPath(); c.moveTo(x(0), y(db[0]));
-    db.forEach((d, i) => c.lineTo(x((i + 1) * 0.5), y(d)));
     const trace = new Path2D(); trace.moveTo(x(0), y(db[0])); db.forEach((d, i) => trace.lineTo(x((i + 1) * 0.5), y(d)));
-    c.lineTo(x(db.length * 0.5), bottom); c.lineTo(x(0), bottom); c.closePath();
-    c.fillStyle = 'rgba(79,179,191,0.24)'; c.fill();
-    c.strokeStyle = '#4fb3bf'; c.lineWidth = 1.2; c.stroke(trace);
+    const area = new Path2D(trace); area.lineTo(x(db.length * 0.5), bottom); area.lineTo(x(0), bottom); area.closePath();
+    c.fillStyle = 'rgba(159,176,191,0.2)'; c.fill(area);
+    c.strokeStyle = '#9fb0bf'; c.lineWidth = 1.1; c.stroke(trace);
   }
   c.textAlign = 'left'; c.textBaseline = 'top'; c.setLineDash([2, 3]); c.lineWidth = 1;
   for (const [k, label, col] of MARKERS) {
@@ -374,11 +620,11 @@ function drawGonio(cv, data, frames) {
   for (const [a, b, cc, d] of [[m, 0, m, w], [0, m, w, m], [0, 0, w, w], [w, 0, 0, w]]) { c.beginPath(); c.moveTo(x0 + a, y0 + b); c.lineTo(x0 + cc, y0 + d); c.stroke(); }
   if (big) { c.beginPath(); c.arc(x0 + m, y0 + m, 0.45 * w, 0, 2 * Math.PI); c.stroke(); }
   c.setLineDash([]);
-  c.fillStyle = '#6a8f6a'; c.font = (big ? '16px' : '12px') + ' "Segoe UI", system-ui, sans-serif'; c.textBaseline = 'top';
+  c.fillStyle = '#6a8f6a'; c.font = (big ? '16px' : '11px') + ' "Segoe UI", system-ui, sans-serif'; c.textBaseline = 'top';
   const pad = big ? 8 : 4;
-  c.fillText('L', x0 + pad, y0 + 2); c.textAlign = 'right'; c.fillText('R', x0 + w - pad, y0 + 2); c.textAlign = 'left';
+  c.textAlign = 'left'; c.fillText('L', x0 + pad, y0 + 2); c.textAlign = 'right'; c.fillText('R', x0 + w - pad, y0 + 2); c.textAlign = 'left';
   c.fillText('M', x0 + m + 3, y0 + 2);
-  if (big) { c.textBaseline = 'bottom'; c.fillText('\u2212S', x0 + pad, y0 + m - 4); c.textAlign = 'right'; c.fillText('+S', x0 + w - pad, y0 + m - 4); c.textAlign = 'left'; }
+  if (big) { c.textBaseline = 'bottom'; c.fillText('−S', x0 + pad, y0 + m - 4); c.textAlign = 'right'; c.fillText('+S', x0 + w - pad, y0 + m - 4); c.textAlign = 'left'; }
   const all = (frames || []).concat(data ? [data] : []);
   if (!all.length) return;
   const s2 = Math.SQRT2, ms = all.map(([l, r]) => [l.map((v, i) => (v + r[i]) / s2), l.map((v, i) => (r[i] - v) / s2)]);
@@ -394,147 +640,160 @@ function drawGonio(cv, data, frames) {
 }
 // The large stereo-image view: the goniometer with afterglow (the last 10 updates),
 // the phase bar and the stereo readouts, following one receiver until closed.
-const stereo = {panel: null, frames: []};
+const stereo = {p: null, frames: [], phase: makeTape('Phase', -1, 1, {origin: 0})};
+$('#stereo-phase').append(stereo.phase.el);
 function openStereo(p) {
-  stereo.panel = p; stereo.frames = [];
+  stereo.p = p; stereo.frames = [];
   $('#stereo').showModal();
-  if (p.r) followStereo(p, p.r);
+  if (p.r) followStereo(p.r);
 }
-function followStereo(p, r) {
+function followStereo(r) {
   setText($('#stereo-title'), `${r.title} – stereo image`);
   drawGonio($('#stereo-scope'), r.gonio, stereo.frames);
   if (r.gonio) { stereo.frames.push(r.gonio); if (stereo.frames.length > 9) stereo.frames.shift(); }
-  const phase = r.meters.find(m => m.name === 'Phase'), el = $('#stereo-phase');
-  if (phase) { el._fill = el.querySelector('.fill'); el._val = el.querySelector('.val'); updateMeter(el, phase); }
-  const pairs = (r.sections.find(([t]) => t === 'Stereo image') || [, , []])[2];
-  const box = $('#stereo-readouts');
-  if (!box._spans) {
-    box._spans = {};
-    for (const [k] of pairs) { const v = h('b'); box._spans[k] = v; box.append(h('span', null, k + ': '), v, h('span', null, '   ·   ')); }
-    if (box.lastChild) box.lastChild.remove();
+  const rd = r.readings, corr = rd.correlation;
+  stereo.phase.set(corr, fin(corr) ? sgn(corr, 2) : '-', fin(corr) && corr < 0 ? 'alarm' : null);
+  const o = readouts(rd), box = $('#stereo-readouts');
+  if (!box._v) {
+    box._v = {};
+    for (const k of ['Correlation', 'Balance', 'Width (S/M)', 'Level L/R']) {
+      const v = h('b'); box._v[k] = v; box.append(h('span', null, k + ': '), v, h('span', null, '   ·   '));
+    }
+    box.lastChild.remove();
   }
-  for (const [k, html] of pairs) if (box._spans[k]) setRich(box._spans[k], html);
+  for (const [k, v] of Object.entries(box._v)) setParts(v, o[k] ?? '-');
 }
 $('#stereo-close').onclick = () => $('#stereo').close();
-$('#stereo').addEventListener('close', () => { stereo.panel = null; stereo.frames = []; });
+$('#stereo').addEventListener('close', () => { stereo.p = null; stereo.frames = []; });
 
-// Label widths shared by all panels: readout labels (--kw) and meter names (--mw).
-function setLabelWidths(r) {
-  if (setLabelWidths.done) return;
-  const c = document.createElement('canvas').getContext('2d');
-  const font = getComputedStyle(document.body).font;
-  c.font = font;
-  const widest = names => Math.ceil(Math.max(...names.map(t => c.measureText(t).width)));
-  const root = document.documentElement.style;
-  root.setProperty('--kw', widest(r.sections.flatMap(([, , pairs]) => pairs.map(([k]) => k + ':'))) + 4 + 'px');
-  root.setProperty('--mw', widest(r.meters.map(m => m.name)) + 4 + 'px');
-  setLabelWidths.done = true;
+// ---------------------------------------------------------------- one receiver: its row and its detail
+function kv(names, cols, wide = []) {
+  const el = h('div', cols === 1 ? 'kv one' : 'kv'), vals = {};
+  for (const n of [...names.filter(n => !wide.includes(n)), ...names.filter(n => wide.includes(n))]) {
+    const k = h('span', 'k', n), v = h('span', 'v', '-');
+    if (wide.includes(n)) { k.style.gridColumn = '1'; v.classList.add('wide'); }
+    el.append(k, v); vals[n] = {k, v};
+  }
+  return {el, vals};
 }
-function updateMeter(el, m) {
-  setText(el._val, m.text);
-  const span = m.hi - m.lo, pos = v => 100 * (Math.min(Math.max(v, m.lo), m.hi) - m.lo) / span;
-  if (m.value == null) { el._fill.style.display = 'none'; return; }
-  const zone = m.zones.find(z => m.value <= z[0]) || m.zones[m.zones.length - 1];
-  const a = pos(m.origin), b = pos(m.value);
-  Object.assign(el._fill.style, {display: '', left: Math.min(a, b) + '%', width: Math.max(Math.abs(b - a), 1) + '%', background: zone[1]});
+function card(title, extra) {
+  const el = h('div', 'card'), head = h('div', 'card-head');
+  head.append(h('span', 'card-title', title));
+  if (extra) head.append(extra);
+  el.append(head);
+  return el;
 }
-
-// ---------------------------------------------------------------- one receiver panel
-function buildPanel(r) {
-  const n = r.receiver, p = {n};
-  const el = p.el = h('div', 'panel');
-  // station selector, settings, remove
-  const top = h('div', 'top');
-  p.station = h('select', 'station');
+function buildReceiver(r, alarmDefs) {
+  const n = r.receiver, p = {n, vals: {}};
+  // ---- the row
+  const row = p.row = h('div', 'row');
+  row.onclick = e => { if (!e.target.closest('select, button')) select(n); };
+  const stn = h('div', 'stn');
+  const freq = h('span', 'freq'); p.freqText = h('span', null, '-');
+  p.station = h('select'); p.station.title = 'Station: choose another to retune this receiver';
+  freq.append(p.freqText, p.station); p.freq = freq;
   p.station.onchange = () => api('select', {receiver: n, freq: JSON.parse(p.station.value)}).then(() => p.station.blur());
-  p.gear = h('button', null, '⚙'); p.gear.title = 'Settings for this receiver';
-  p.gear.onclick = () => openSettings(n);
+  p.ps = h('span', 'ps', '--------'); p.dyn = h('span', 'dyn', 'DYN');
+  p.dyn.title = 'Dynamic PS: the PS has changed 3 or more times in the last 30 s (scrolling or block text)';
+  p.meta = h('div', 'meta');
+  stn.append(freq, p.ps, p.dyn, p.meta);
+  const txt = h('div', 'txt');
+  p.rt = h('div', 'rt'); p.sub = h('div', 'sub');
+  txt.append(p.rt, p.sub);
+  const tapes = h('div', 'tapes');
+  p.tapes = {mod: makeTape('MOD', 0, 130, {band: [85, 100], hold: true}), rf: makeTape('RF', -90, -10, {band: [-60, -10]}),
+             am: makeTape('AM', 0, 40, {band: [0, state.clean[0]]})};
+  p.tapes.mod.el.title = 'Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force (red notch); the grey band is the normal range';
+  p.tapes.am.el.title = 'AM on the carrier: multipath or a transmitter fault';
+  for (const t of Object.values(p.tapes)) tapes.append(t.el);
+  const trend = h('div', 'trend');
+  p.trendNote = h('div', 'note'); p.spark = h('canvas', 'spark');
+  p.spark.title = 'Peak modulation, the last 5 minutes (each point: its highest); red: over the limit in force';
+  trend.append(p.trendNote, p.spark);
+  const ann = h('div', 'ann'); p.lamps = {};
+  for (const [name, desc, short] of alarmDefs) { const l = h('div', 'lamp', short); l.dataset.desc = desc; p.lamps[name] = l; ann.append(l); }
+  const btns = h('div', 'rbtn');
+  p.gear = h('button', null, '⚙'); p.gear.title = 'Settings for this receiver'; p.gear.onclick = () => openSettings(n);
   p.remove = h('button', null, '✕'); p.remove.title = 'Remove this receiver';
   p.remove.onclick = () => confirm(`Remove receiver ${n} (${p.title})?`) && api('remove', {receiver: n});
-  top.append(p.station, p.gear, p.remove);
-  el.append(top);
-  // display card: PS / RT / RT+ / IBOC / PSD / SIS / RadioDNS, logo and album art
-  const disp = h('div', 'card'), grid = h('div', 'text-grid');
-  p.ps = h('div', 'ps wide', '--------'); p.rt = h('div', 'rt wide');
-  const row = (n, title, v) => {   // explicit rows: the images span rows beside them
-    const l = h('div', 'lbl', title);
-    l.style.gridRow = v.style.gridRow = String(n); l.style.gridColumn = '1';
-    grid.append(l, v);
-    if (['IBOC', 'PSD', 'SIS'].includes(title)) p.ibocRows.push(l, v);   // shown only with IBOC
-    if (title === 'RadioDNS') p.rdnsRow = [l, v];                        // shown only while RadioDNS works
-  };
-  p.ibocRows = [];
-  row(1, 'PS', p.ps);
-  row(2, 'RT', p.rt);
-  p.lines = {};
-  r.lines.forEach(([title], i) => {
-    const v = h('div', i === 0 ? 'line wide' : 'line', '-');
-    row(3 + i, title, v);
-    p.lines[title] = v;
-    if (i === 1) {  // logo and album art beside IBOC..RadioDNS, as in the app
-      for (const kind of ['logo', 'art']) {
-        const box = h('div', 'media'); box.style.gridColumn = kind === 'logo' ? '3' : '4';
-        const img = h('img'); img.alt = kind === 'logo' ? 'Station logo' : 'Album art'; img.title = img.alt;
-        img.onclick = () => { $('#zoom img').src = img.src; $('#zoom').style.display = 'flex'; };
-        box.append(img); box.style.display = 'none'; grid.append(box);
-        p[kind] = {box, img, ver: null};
-        if (kind === 'art') {  // a RadioDNS slide's click-through link
-          const a = p.artLink = h('a', null, '↗'); a.target = '_blank'; a.rel = 'noopener noreferrer';
-          a.style.display = 'none'; box.append(a);
-        }
-      }
-    }
+  btns.append(p.gear, p.remove);
+  row.append(stn, txt, tapes, trend, ann, btns);
+
+  // ---- the detail
+  const d = p.detail = h('div', 'detail');
+  const head = h('div', 'dhead');
+  p.dTitle = h('span', 't'); p.dSub = h('span', 's'); p.status = h('span', 'f');
+  head.append(p.dTitle, p.dSub, p.status);
+  d.append(head);
+  const lines = h('div', 'lines');
+  p.lines = {}; p.ibocRows = [];
+  ['IBOC', 'PSD', 'SIS', 'RadioDNS'].forEach((t, i) => {
+    const l = h('div', 'lbl', t), v = h('div', 'line', '-');
+    l.style.gridRow = v.style.gridRow = String(i + 1); l.style.gridColumn = '1'; v.style.gridColumn = '2';
+    lines.append(l, v); p.lines[t] = v;
+    if (t === 'RadioDNS') p.rdnsRow = [l, v]; else p.ibocRows.push(l, v);
   });
-  disp.append(grid);
-  el.append(disp);
-  // status row
-  const status = h('div', 'status-row');
-  p.alarm = h('span', 'pill ok', '●  No alarms');
-  p.dyn = h('span', 'pill dyn', 'DYNAMIC PS'); p.dyn.title = 'The PS has changed 3 or more times in the last 30 s (scrolling or block text)';
-  p.status = h('span', 'feed');
-  status.append(p.alarm, p.dyn, h('span', 'grow'), p.status);
-  el.append(status);
-  // level meters
-  const lv = h('div', 'card'); lv.append(h('div', 'card-title', 'Levels'));
-  const mg = h('div', 'meters'); p.meters = [];
-  for (const m of r.meters) {
-    const row = h('div', 'meter'), track = h('div', 'track'), fill = h('div', 'fill');
-    track.append(fill);
-    for (const t of m.ticks) { const tk = h('div', 'tick'); tk.style.left = (100 * (t - m.lo) / (m.hi - m.lo)) + '%'; track.append(tk); }
-    row._fill = fill; row._val = h('span', 'val', '-');
-    row.append(h('span', 'name', m.name), track, row._val);
-    mg.append(row); p.meters.push(row);
-  }
-  lv.append(mg); el.append(lv);
-  // sections, in the app's order
-  p.values = {};
-  setLabelWidths(r);
-  for (const [title, cols, pairs] of r.sections) {
-    const card = h('div', 'card'), head = h('div', 'card-head');
-    head.append(h('span', 'card-title', title));
-    if (title === 'Loudness') {
-      const b = h('button', null, 'reset integrated'); b.onclick = () => api('reset_integrated', {receiver: n});
-      p.ctrl = (p.ctrl || []).concat(b); head.append(b);
+  for (const kind of ['logo', 'art']) {
+    const box = h('div', 'media'); box.style.gridColumn = kind === 'logo' ? '3' : '4';
+    const img = h('img'); img.alt = kind === 'logo' ? 'Station logo' : 'Album art'; img.title = img.alt;
+    img.onclick = () => { $('#zoom img').src = img.src; $('#zoom').style.display = 'flex'; };
+    box.append(img); box.style.display = 'none'; lines.append(box);
+    p[kind] = {box, img, ver: null};
+    if (kind === 'art') {  // a RadioDNS slide's click-through link
+      const a = p.artLink = h('a', null, '↗'); a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.style.display = 'none'; box.append(a);
     }
-    card.append(head);
-    if (!cols) { p.mpx = h('canvas', 'mpx'); card.append(p.mpx); el.append(card); continue; }
-    // one label width for every section (--kw), so values line up down the panel;
-    // long readouts ('wide') get a full-width row at the end of their section
-    const vg = h('div', 'values'); vg.style.gridTemplateColumns = Array(cols).fill('var(--kw) minmax(0, 1fr)').join(' ');
-    for (const [k, , wide] of pairs) {
-      const label = h('span', 'k', k + ':'), v = h('span', 'v', '-');
-      if (wide) { label.style.gridColumn = '1'; v.style.gridColumn = '2 / -1'; }
-      vg.append(label, v); p.values[k] = v;
-    }
-    if (title === 'Stereo image') {
-      const row = h('div', 'stereo'); p.gonio = h('canvas', 'gonio'); row.append(vg, p.gonio); card.append(row);
-      p.gonio.title = 'Click for a larger view';
-      p.gonio.onclick = () => openStereo(p);
-    } else card.append(vg);
-    el.append(card);
   }
-  // audio: source (shared with the app) and the browser's MP3 player
-  const ar = h('div', 'audio-row');
+  p.linesBox = lines;
+  d.append(lines);
+  const cards = h('div', 'cards');
+  const add = ({el, vals}) => { Object.assign(p.vals, vals); return el; };
+  // modulation
+  p.limitNote = h('span', 'x');
+  const mod = card('Modulation', p.limitNote);
+  p.peak = {pos: makeTape('+ peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110}),
+            neg: makeTape('− peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110})};
+  p.hist = h('canvas', 'hist');
+  p.hist.title = 'How peak modulation spreads: the share of updates at each peak level over the last 5 minutes (log height). Red: over the limit in force; amber: over 100%';
+  mod.append(p.peak.pos.el, p.peak.neg.el, h('div', 'cap', 'Peak distribution · last 5 min'), p.hist,
+             add(kv(['Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
+                       'Valid time', 'Limit', 'SM.1268'], 2, ['Valid time', 'Limit', 'SM.1268'])));
+  // multiplex
+  const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'));
+  p.mpx = h('canvas', 'mpx');
+  p.mpxT = {snr: makeTape('S/N', 0, 70, {band: [30, 70], nameW: 50, valW: 110}), pilot: makeTape('Pilot', 6, 12, {band: [8, 10], nameW: 50, valW: 110}),
+            offset: makeTape('Offset', -3000, 3000, {origin: 0, band: [-1000, 1000], nameW: 50, valW: 110})};
+  p.absMpx = h('div', 'absent');
+  mpx.append(p.mpx, p.mpxT.snr.el, p.mpxT.pilot.el, p.mpxT.offset.el,
+             add(kv(['RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase', 'Sync AM', 'Noise >100 kHz',
+                     'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'], 2,
+                    ['RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'])), p.absMpx);
+  // RDS
+  p.rdsNote = h('span', 'x');
+  const rds = card('RDS', p.rdsNote);
+  p.rdsSpark = h('canvas', 'spark'); p.rdsSpark.title = 'RDS groups per second, the last 5 minutes (11.4/s is every group)';
+  p.absRds = h('div', 'absent');
+  rds.append(p.rdsSpark, add(kv(['PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'], 2,
+                                ['Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'])), p.absRds);
+  // audio
+  const reset = h('button', null, 'reset I'); reset.title = 'Start the integrated loudness again';
+  reset.onclick = () => api('reset_integrated', {receiver: n});
+  const audio = card('Audio', reset);
+  p.lufsSpark = h('canvas', 'spark'); p.lufsSpark.title = 'Short-term loudness, the last 5 minutes (dotted: -23 LUFS)';
+  const st = h('div', 'stereo'), side = h('div');
+  p.gonio = h('canvas', 'gonio'); p.gonio.title = 'Click for a larger view'; p.gonio.onclick = () => openStereo(p);
+  p.phase = makeTape('Phase', -1, 1, {origin: 0, nameW: 40, valW: 44});
+  side.append(p.phase.el, add(kv(['Balance', 'Width (S/M)', 'Level L/R', 'Correlation'], 1)));
+  st.append(p.gonio, side);
+  audio.append(add(kv(['Momentary', 'Short-term', 'Integrated', 'True peak L/R'], 2)), p.lufsSpark, st, buildAudio(p));
+  cards.append(mod, mpx, rds, audio);
+  d.append(cards);
+  p.ctrl = [p.station, p.gear, p.remove, p.source, reset];
+  return p;
+}
+// Play: the source (shared with the app) and this browser's player.
+function buildAudio(p) {
+  const n = p.n, ar = h('div', 'audio-row');
   p.source = h('select'); p.source.title = 'Audio source (the app and this player)';
   p.source.onchange = () => api('source', {receiver: n, source: JSON.parse(p.source.value)}).then(() => p.source.blur());
   // The player gets its stream only once Listen is pressed (browsers probe
@@ -567,7 +826,7 @@ function buildPanel(r) {
   };
   p.listen.onclick = () => {
     if (p.listening) { p.stop(); return; }
-    for (const q of panels.values()) if (q !== p) q.stop();  // one at a time
+    for (const q of recv.values()) if (q !== p) q.stop();  // one at a time
     p.listening = true; p.since = null; p.playState = 'connecting…';
     p.listen.classList.add('on'); setText(p.listen, '■  Stop');
     playerUi.classList.add('on');
@@ -587,23 +846,81 @@ function buildPanel(r) {
   p.player.addEventListener('waiting', () => { if (p.listening) { p.playState = 'buffering…'; showLive(p); } });
   p.player.addEventListener('error', () => { if (p.listening) { p.stop(); toast(`receiver ${n}: the audio stream failed`); } });
   p.note = h('span', 'note');
-  ar.append(p.source, p.format, p.listen, playerUi, p.note);
+  ar.append(p.listen, p.source, p.format, playerUi, p.note);
   applyVolume(p);
-  el.append(ar);
-  p.ctrl = (p.ctrl || []).concat([p.station, p.gear, p.remove, p.source]);
-  return p;
+  return ar;
 }
 
-function updatePanel(p, r) {
+function updateReceiver(p, r) {
   p.r = r; p.title = r.title;
+  const rd = r.readings, lv = rd.levels || {}, o = readouts(rd);
   fillSelect(p.station, r.stations, r.freq);
+  setText(p.freqText, (r.freq / 1e6).toFixed(1));
+  p.freq.classList.toggle('off', !control);
   fillSelect(p.source, r.sources, r.source);
   for (const c of p.ctrl) c.disabled = !control;
   p.remove.disabled = !control || !r.removable;
-  setText(p.ps, r.ps);
-  setText(p.rt, r.rt);
-  p.dyn.style.display = r.ps_dynamic ? '' : 'none';
-  for (const [title, html] of r.lines) setRich(p.lines[title], html);
+  // row: station, text, tapes, trend, annunciator
+  if (rd.ps != null) setText(p.ps, rd.ps);
+  p.dyn.style.display = rd.ps_dynamic ? '' : 'none';
+  const meta = [rd.pi ? [rd.pi, 'lit'] : 'no RDS'];
+  if (rd.pi) { if (rd.pty) meta.push(' · ' + rd.pty); meta.push(` · RDS ${fx(rd.rds_rate)}/s`); }
+  if (rd.stereo_mode) meta.push(' · ' + rd.stereo_mode);
+  meta.push(` · Rx ${r.receiver}` + (r.name ? ' ' + r.name : ''));
+  setParts(p.meta, meta);
+  p.meta.title = r.status;
+  setText(p.rt, rd.rt || ''); p.rt.title = rd.rt || '';
+  const tags = [];
+  for (const [t, name, text] of rd.rtplus || []) {
+    if (tags.length) tags.push('   ·   ');
+    tags.push([name, t === RTPLUS_ALARM ? 'alarm' : 'k'], [' ' + text, t === RTPLUS_ALARM ? 'alarm' : null]);
+  }
+  setParts(p.sub, tags.length ? tags : rd.flags ? flagParts(rd.flags) : rd.pi == null ? [['no RDS', 'dimt']] : '');
+  const limit = rd.limit_pct;
+  if (rd.has_signal) {
+    const peak = Math.max(rd.pos_pct, rd.neg_pct);
+    let ms = rd.pos_pct >= rd.neg_pct ? lv.pos_pct : lv.neg_pct;
+    if (ms === 'alarm' && rd.valid === false) ms = 'warn';   // reception not valid: not judged
+    p.tapes.mod.set(peak, `+${fx(rd.pos_pct, 0)} / −${fx(rd.neg_pct, 0)}%`, ms, limit, [85, limit]);
+    p.tapes.rf.set(rd.rf_dbfs, num(rd.rf_dbfs, 'dBFS', 0), rd.rf_dbfs < -75 ? 'alarm' : null);
+    p.tapes.am.set(rd.am_pct, fx(rd.am_pct) + '%', lv.am_pct);
+    p.tapes.rf.el.title = `RF level ${num(rd.rf_dbfs, 'dBFS')}, MPX S/N ${num(rd.snr_db, 'dB')}`;
+    for (const k of ['pos', 'neg']) {
+      const v = rd[k + '_pct']; let s = lv[k + '_pct'];
+      if (s === 'alarm' && rd.valid === false) s = 'warn';
+      p.peak[k].set(v, `${fx(v, 0)}%  ${fx(v * 0.75)} kHz`, s, limit, [85, limit]);
+    }
+    setText(p.limitNote, `limit ${fx(limit)}% ⓘ`); p.limitNote.title = 'Over-modulation limit in force: ' + rd.limit_why;
+    p.mpxT.snr.set(rd.snr_db, num(rd.snr_db, 'dB'), rd.snr_db < r.settings.min_snr_db ? 'alarm' : null);
+    if (rd.stereo_mode === 'mono') p.mpxT.pilot.set(null, 'none (mono)');
+    else p.mpxT.pilot.set(rd.pilot_pct, `${fx(rd.pilot_pct)}%  ${rd.stereo_mode}`, lv.pilot_pct, null,
+                          [rd.limits.pilot_min_pct, rd.limits.pilot_max_pct]);
+    const tol = rd.limits.freq_tol_hz;
+    p.mpxT.offset.lo = -3 * tol; p.mpxT.offset.hi = 3 * tol;
+    p.mpxT.offset.set(rd.offset_hz, `${sgn(rd.offset_hz, 0)} Hz`, lv.offset_hz, null, [-tol, tol]);
+  }
+  const tr = r.trends || {}, alarms = rd.alarms || {}, notes = r.notes || {};
+  const over = rd.over100_min;
+  setParts(p.trendNote, over == null ? 'peak modulation' : over ? ['peak modulation · ', [`${over}/min over 100%`, 'warn']]
+                                                         : `peak modulation · ${over}/min over 100%`);
+  drawSpark(p.spark, tr.peak, 70, 125, limit, alarms.OVERMOD === 'suppressed' ? C.amber : C.red);
+  for (const [name, lamp] of Object.entries(p.lamps)) {
+    const s = alarms[name] || 'waiting';
+    if (lamp.dataset.s !== s) lamp.dataset.s = s;
+    const tip = `${lamp.textContent}: ${lamp.dataset.desc}\n${state.alarm_means[s]}` + (notes[name] ? '\n' + notes[name] : '');
+    if (lamp.title !== tip) lamp.title = tip;
+  }
+  // detail (drawn only while it is the one shown)
+  if (selected !== p.n) return;
+  setText(p.dTitle, r.title);
+  setText(p.dSub, [rd.pi ? 'PI ' + rd.pi : 'no RDS', rd.pi ? rd.pty || '' : '', rd.ecc ? 'ECC ' + rd.ecc.toString(16).toUpperCase().padStart(2, '0') : '',
+                   rd.rules_name + ' rules'].filter(Boolean).join(' · '));
+  setText(p.status, r.status + (r.listeners ? ` · ${r.listeners} web listener${r.listeners === 1 ? '' : 's'}` : ''));
+  const [psd, sis] = psdSis(rd.iboc);
+  setParts(p.lines.IBOC, ibocParts(rd.iboc)); setParts(p.lines.PSD, psd); setParts(p.lines.SIS, sis);
+  setParts(p.lines.RadioDNS, rd.radiodns || '-');
+  for (const w of p.ibocRows) w.style.display = rd.iboc_lines ? '' : 'none';
+  for (const w of p.rdnsRow) w.style.display = rd.radiodns ? '' : 'none';
   for (const kind of ['logo', 'art']) {
     const m = p[kind], ver = r.images[kind];
     if (ver !== m.ver) {
@@ -612,22 +929,28 @@ function updatePanel(p, r) {
       if (ver) m.img.src = `img/${p.n}/${kind}?v=${ver}`;
     }
   }
+  p.linesBox.style.display = rd.iboc_lines || rd.radiodns || r.images.logo || r.images.art ? '' : 'none';
   const link = /^https?:\/\//.test(r.art_link || '') ? r.art_link : '';
   if (p.artLink.getAttribute('href') !== link) {
     p.artLink.href = link; p.artLink.title = 'Open ' + link;
     p.artLink.style.display = link ? '' : 'none';
   }
-  const alarms = r.alarms;
-  setText(p.alarm, alarms.length ? '⚠  ' + alarms.join(', ') : '●  No alarms');
-  p.alarm.className = 'pill ' + (alarms.length ? 'alarm' : 'ok');
-  setText(p.status, r.status + (r.listeners ? ` · ${r.listeners} web listener${r.listeners === 1 ? '' : 's'}` : ''));
-  for (const w of p.ibocRows) w.style.display = r.iboc_lines ? '' : 'none';
-  for (const w of p.rdnsRow || []) w.style.display = r.rdns_line ? '' : 'none';
-  r.meters.forEach((m, i) => updateMeter(p.meters[i], m));
-  for (const [, , pairs] of r.sections) for (const [k, html] of pairs) setRich(p.values[k], html);
+  const col = collapse(rd);
+  for (const [name, {k, v}] of Object.entries(p.vals)) {
+    setParts(v, o[name] ?? '-');
+    const show = col.hidden.has(name) ? 'none' : '';
+    if (k.style.display !== show) k.style.display = v.style.display = show;
+  }
+  if (rd.has_signal) p.vals['Limit'].v.title = rd.limit_why;
+  setText(p.absMpx, col.mpx); setText(p.absRds, col.rds);
+  setText(p.rdsNote, rd.pi == null ? '' : `${fx(rd.rds_rate)}/s` + (rd.rds_loss_pct != null ? ` · loss ${fx(rd.rds_loss_pct, 0)}%` : ''));
+  drawHist(p.hist, tr.hist, state.peak_hist, limit);
+  drawSpark(p.rdsSpark, tr.rds_rate, 0, 12);
+  drawSpark(p.lufsSpark, tr.short_term, -40, 0, null, null, -23);
   drawMpx(p.mpx, r.mpx);
   drawGonio(p.gonio, r.gonio);
-  if (stereo.panel === p) followStereo(p, r);
+  const corr = rd.correlation;
+  p.phase.set(corr, fin(corr) ? sgn(corr, 2) : '-', lv.correlation);
   const iboc = r.source.startsWith('iboc');
   const fmts = playableFormats(p), can = fmts.length > 0 && !iboc;
   fillSelect(p.format, fmts.map(f => ({value: f.key, label: f.label, enabled: true})), p.audioFormat);
@@ -639,6 +962,13 @@ function updatePanel(p, r) {
                   : !fmts.length ? 'this browser can play none of the audio formats offered'
                   : iboc ? 'IBOC audio plays on the FM-Modmon-ms PC only' : '');
 }
+function select(n) {
+  selected = n;
+  try { sessionStorage.setItem('fm-modmon-ms-selected', String(n)); } catch (e) {}
+  for (const q of recv.values()) { q.row.classList.toggle('sel', q.n === n); q.detail.style.display = q.n === n ? '' : 'none'; }
+  const p = recv.get(n);
+  if (p && p.r) updateReceiver(p, p.r);
+}
 
 // Player volume: one setting for all receivers, remembered in this browser.
 const volume = (() => {
@@ -648,7 +978,7 @@ const volume = (() => {
 function setVolume(level, muted) {
   volume.level = Math.max(0, Math.min(100, level)); volume.muted = muted;
   try { localStorage.setItem('fm-modmon-ms-volume', JSON.stringify(volume)); } catch (e) {}
-  for (const q of panels.values()) applyVolume(q);
+  for (const q of recv.values()) applyVolume(q);
 }
 function applyVolume(p) {
   p.player.volume = volume.level / 100; p.player.muted = volume.muted;
@@ -680,10 +1010,9 @@ function playableFormats(p) {
   if (fmts.length && !fmts.some(f => f.key === p.audioFormat)) p.audioFormat = fmts[0].key;   // the server's first, or what's left
   return fmts;
 }
-
 // ---------------------------------------------------------------- settings dialog
 function openSettings(n) {
-  const p = panels.get(n); if (!p) return;
+  const p = recv.get(n); if (!p || !p.r) return;
   const r = p.r, s = r.settings, dlg = $('#settings');
   $('#settings-title').textContent = `Receiver ${n} settings`;
   $('#s-name').value = s.name; $('#s-deemph').value = String(s.deemphasis_us); $('#s-stereo').value = s.stereo;
@@ -789,6 +1118,47 @@ function renderAccess(a) {
   if (on) closeSignin();
 }
 
+// ---------------------------------------------------------------- alarms and events
+function duration(s) {
+  s = Math.max(0, Math.floor(s));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s`;
+  return `${Math.floor(s / 3600)} h ${String(Math.floor(s % 3600 / 60)).padStart(2, '0')} min`;
+}
+function clock(t, date) {
+  const d = new Date(t * 1000), two = x => String(x).padStart(2, '0');
+  const time = `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  return date ? `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${time}` : time;
+}
+function renderAlarms(s) {
+  const eps = s.alarm_episodes.slice().reverse(), body = $('#alarms tbody');
+  const sig = JSON.stringify(eps) + (eps.some(e => e.end == null) ? Math.floor(s.now) : '');
+  if (body._sig !== sig) {
+    body._sig = sig;
+    body.replaceChildren(...eps.map(e => {
+      const tr = h('tr', e.end == null ? 'on' : null);
+      for (const text of [clock(e.start, true), e.station, e.desc,
+                          duration((e.end ?? s.now) - e.start) + (e.end == null ? ' …' : ''),
+                          e.end == null ? 'raised' : clock(e.end), e.detail]) {
+        const td = h('td', null, text); td.title = text; tr.append(td);
+      }
+      return tr;
+    }));
+    if (!eps.length) { const tr = h('tr'); const td = h('td', null, 'no alarms this session'); td.colSpan = 6; tr.append(td); body.append(tr); }
+  }
+  const n = eps.filter(e => e.end == null).length, tab = $('#tab-alarms');
+  setText(tab, n ? `Alarms · ${n} raised` : 'Alarms');
+  tab.classList.toggle('red', n > 0);
+}
+function showLog(which) {
+  $('#alarms').style.display = which === 'alarms' ? '' : 'none';
+  $('#log').style.display = which === 'events' ? '' : 'none';
+  $('#tab-alarms').classList.toggle('on', which === 'alarms');
+  $('#tab-events').classList.toggle('on', which === 'events');
+}
+$('#tab-alarms').onclick = () => showLog('alarms');
+$('#tab-events').onclick = () => showLog('events');
+
 function render(s) {
   state = s; control = s.access.control;
   renderAccess(s.access);
@@ -800,16 +1170,24 @@ function render(s) {
   setText(cal, s.calibrating ? '⟲  Calibrating…' : '⟲  Recalibrate gain');
   const add = $('#add');
   add.disabled = !control || !s.add.enabled; add.title = s.add.tip || '';
-  // panels: add new ones in receiver order, drop removed ones
+  // receivers: add new ones in receiver order, drop removed ones
   const want = new Set(s.receivers.map(r => r.receiver));
-  for (const [n, p] of panels) if (!want.has(n)) { p.stop(); p.el.remove(); panels.delete(n); }
-  const host = $('#panels');
+  for (const [n, p] of recv) if (!want.has(n)) { p.stop(); p.row.remove(); p.detail.remove(); recv.delete(n); }
+  if (!want.has(selected)) selected = s.receivers.length ? s.receivers[0].receiver : null;
+  const rows = $('#rows'), details = $('#details');
   s.receivers.forEach((r, i) => {
-    let p = panels.get(r.receiver);
-    if (!p) { p = buildPanel(r); panels.set(r.receiver, p); }
-    if (host.children[i] !== p.el) host.insertBefore(p.el, host.children[i] || null);
-    updatePanel(p, r);
+    let p = recv.get(r.receiver);
+    if (!p) {
+      p = buildReceiver(r, s.alarm_defs); recv.set(r.receiver, p);
+      details.append(p.detail);
+      p.row.classList.toggle('sel', p.n === selected); p.detail.style.display = p.n === selected ? '' : 'none';
+    }
+    if (rows.children[i] !== p.row) rows.insertBefore(p.row, rows.children[i] || null);
+    updateReceiver(p, r);
   });
+  for (const q of recv.values()) { q.row.classList.toggle('sel', q.n === selected); q.detail.style.display = q.n === selected ? '' : 'none'; }
+  if (stereo.p && stereo.p.r) followStereo(stereo.p.r);
+  renderAlarms(s);
   if (s.events_seq !== eventsSeq) {
     eventsSeq = s.events_seq;
     fetch('events.json').then(r => r.json()).then(ev => {
@@ -864,7 +1242,7 @@ setInterval(() => {
   if (!document.hidden || Date.now() - lastPoll >= 1000) { lastPoll = Date.now(); poll(); }
 }, 100);
 poll();
-window.addEventListener('resize', () => { for (const p of panels.values()) if (p.r) { drawMpx(p.mpx, p.r.mpx); drawGonio(p.gonio, p.r.gonio); } });
+window.addEventListener('resize', () => { const p = recv.get(selected); if (p && p.r) updateReceiver(p, p.r); });
 </script>
 </body>
 </html>

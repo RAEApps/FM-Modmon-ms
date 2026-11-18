@@ -11,6 +11,7 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\radiovis_test.py` covers the RadioDNS slideshow against local fake servers.
   `tests\state_test.py` covers the panel's plain readings, alarm states and History.
   `tests\centre_test.py` covers where the SDR centres (off DC, off IQ images, inside the IF filter).
+  `tests\rds_feed_test.py` covers the RDS group TCP feed (a stalled client never blocks the decoder).
 - CPU: `tools\profile_cpu.py` profiles the monitor on the RSP1A (~70 s; needs the SDR free).
   Pass `--config` with a copy that has notifications off when testing here.
 - Install: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins

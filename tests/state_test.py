@@ -61,15 +61,20 @@ def panel(seconds=6.0, run=None, **mpx):
     return p, st
 
 
-def settle(p, n=40, **settings):
+def settle(p, n=40, rds_seen=False, changes=None, **settings):
+    """Alarm states over n refreshes 1 s apart. rds_seen: the station had RDS
+    before (the synthetic run is over, so there is none now)."""
     p.settings = rm.ReceiverSettings.from_dict(settings)
     rm.time = fake
     try:
         p.alarms.reset()
+        p.alarms.seen_rds = rds_seen
         states = []
         for _ in range(n):
             clock['t'] += 1.0
-            p.refresh()
+            got = p.refresh()
+            if changes is not None:
+                changes += got
             states.append(dict(p.readings['alarms']))
     finally:
         rm.time = real_time
@@ -104,6 +109,29 @@ check('heavy multipath: over-modulation not judged (suppressed)', states[-1]['OV
       and 'OVERMOD' not in p.alarms.active, states[-1]['OVERMOD'])
 check('heavy multipath: other alarms still judged', states[-1]['CARRIER'] == 'clear')
 check('no RDS: no PI, no flags, no loss figure', r['pi'] is None and r['flags'] is None and r['rds_loss_pct'] is None)
+
+# ---- RDS gone while the carrier, pilot and audio stay fine: possibly on the N+1 backup
+p, st = panel(left=[(997, 0.42)], right=[(1600, 0.42)], pilot=0.09, rds=0.04)
+changes = []
+states = settle(p, rds_seen=True, changes=changes)
+check('N+1: possibly-on-N+1 pending, then raised', 'pending' in [x['BACKUP'] for x in states]
+      and states[-1]['BACKUP'] == 'raised', [x['BACKUP'] for x in states][:16])
+check('N+1: not shown as an RDS fault', states[-1]['RDS'] == 'clear', states[-1]['RDS'])
+lamps = p.annunciator.states
+check('N+1: the annunciator lights N+1, not RDS', lamps.get('BACKUP') == 'raised' and lamps.get('RDS') == 'clear'
+      and rm.Annunciator.SHORT['BACKUP'] == 'N+1', lamps)
+check('N+1: the event names the backup and what is fine',
+      [(d, up) for d, up, _ in changes] == [('possibly on N+1 (backup transmitter has no RDS)', True)]
+      and 'no RDS encoder' in changes[0][2] and 'pilot' in changes[0][2], changes)
+check('N+1: logged in the history', [(n, up) for _, n, up in p.history.alarm_log] == [('BACKUP', True)],
+      list(p.history.alarm_log))
+states = settle(p, rds_seen=True, alarms={'BACKUP': False})
+check('N+1 alarm off: off, and RDS lost raised instead', states[-1]['BACKUP'] == 'off'
+      and states[-1]['RDS'] == 'raised', (states[-1]['BACKUP'], states[-1]['RDS']))
+p, st = panel(pilot=0.09, rds=0.04)
+states = settle(p, rds_seen=True)
+check('silent programme: RDS lost, not N+1', states[-1]['RDS'] == 'raised' and states[-1]['BACKUP'] == 'clear',
+      (states[-1]['RDS'], states[-1]['BACKUP']))
 
 # ---- IBOC lines from readings
 ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,
