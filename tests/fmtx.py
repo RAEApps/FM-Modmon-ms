@@ -152,7 +152,7 @@ def deemph_response(rm, f, tau=75e-6):
 
 
 def mpx(rm, seconds, left=(), right=(), pilot=0.09, pilot_hz=19000.0, rds=0.0, rds_content=None,
-        sca=(), dc_hz=0.0, stereo=True, bursts=()):
+        sca=(), dc_hz=0.0, stereo=True, bursts=(), rds_phase_deg=0.0, rds_hz=None):
     """MPX at FS. left/right: [(freq, amplitude)] tones as they should come out of
     the receiver's de-emphasis (pre-emphasis is applied here, matched to it).
     sca: [(khz, injection, tone_hz, deviation_hz)]. bursts: [(t, ms, factor)]
@@ -176,7 +176,10 @@ def mpx(rm, seconds, left=(), right=(), pilot=0.09, pilot_hz=19000.0, rds=0.0, r
     info['L_tx'], info['R_tx'] = L, R
     if rds:
         bb, kinds = rds_baseband(rds_content or RdsContent(), seconds)
-        x += rds * bb * np.sin(3 * theta)
+        # Locked to 3x the pilot at rds_phase_deg (0 = in phase, 90 = quadrature),
+        # or free-running at rds_hz.
+        carrier = 3 * theta if rds_hz is None else 2 * np.pi * rds_hz * t
+        x += rds * bb * np.sin(carrier + math.radians(rds_phase_deg))
         info['rds_kinds'] = kinds
     for khz, inj, tone, dev in sca:
         phase = 2 * np.pi * khz * 1e3 * t + dev / tone * np.sin(2 * np.pi * tone * t)
@@ -189,8 +192,11 @@ def mpx(rm, seconds, left=(), right=(), pilot=0.09, pilot_hz=19000.0, rds=0.0, r
     return x.astype(np.float32), info
 
 
-def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e6, seed=1, echo=None):
+def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e6, seed=1, echo=None,
+        sync_am=None):
     """Feed the MPX through a transmitter and a real FmStation; returns the station.
+    sync_am: (a, b) gives the carrier synchronous AM, envelope 1 + a*x + b*(x^2 - mean)
+    of the MPX x (as a mistuned RF chain would).
     echo: (delay_s, gain, phase_rad) adds one reflection (two-ray multipath)."""
     from gnuradio import analog, blocks, filter, gr
     from gnuradio.filter import firdes
@@ -205,6 +211,15 @@ def run(rm, mpx_signal, rf_amp=0.1, am=0.0, am_hz=100.0, noise=0.0, offset_hz=1e
         env = analog.sig_source_f(rm.SAMP_RATE, analog.GR_SIN_WAVE, am_hz, am, 1.0)
         mul = blocks.multiply_cc()
         tb.connect(env, blocks.float_to_complex(), (mul, 1))
+        chain.append(mul)
+    if sync_am:
+        a, b = sync_am
+        xa = mpx_signal - np.mean(mpx_signal)
+        q = xa * xa
+        env_src = blocks.vector_source_f((1 + a * xa + b * (q - np.mean(q))).astype(np.float32).tolist(), False)
+        env_interp = filter.interp_fir_filter_fff(rm.CHAN_DECIM, interp.taps())  # same delay as the MPX
+        mul = blocks.multiply_cc()
+        tb.connect(env_src, env_interp, blocks.float_to_complex(), (mul, 1))
         chain.append(mul)
     if echo:
         delay_s, g, phase = echo
