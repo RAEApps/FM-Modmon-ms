@@ -99,6 +99,8 @@ check(S, 'Peak deviation kHz', t['dev'], s['peak_dev_khz'], 0.8, 'kHz')
 check(S, 'MPX power dBr', t['dbr'], s['mpx_dbr'], 0.2, 'dBr')
 check(S, 'Over 100% /min', 0, s['over100_min'], 0)
 check(S, 'AM %', 0.0, s['am_pct'], 0.3, '%')
+check(S, 'Valid time % (clean)', 100.0, s['valid_pct'], 0, '%')
+check(S, 'Valid time (text)', f"100% of {s['valid_window_s']:.0f} s", plain(v['Valid time']))
 check(S, 'Sync AM % (none)', 0.0, s['sync_am_pct'], 0.05, '%')
 check(S, 'RDS phase deg (in phase)', 0.0, s['rds_phase_deg'], 2.0, 'deg')
 check(S, 'RDS lock (steady)', 1.0, s['rds_lock'], 0.02)
@@ -181,6 +183,8 @@ S = 'S3 SCA+AM+noise'
 check(S, 'SCA 67 %', 10.0, s['sca67_pct'], 0.3, '%')
 check(S, 'SCA 92 %', 7.0, s['sca92_pct'], 0.3, '%')
 check(S, 'AM % (10% sine AM)', 10.0, s['am_pct'], 0.5, '%')
+check(S, 'Valid time % (AM over 5%)', 0.0, s['valid_pct'], 0, '%')
+check(S, 'Invalid because', 'multipath', s['invalid_why'])
 check(S, 'Sync AM % (AM not tied to modulation)', 0.0, s['sync_am_pct'], 0.1, '%')
 check(S, 'RDS phase shown (no RDS; SCA skirt in the band)', '-', plain(panel_for(st).values['RDS phase']))
 snr_shown = s['snr_db']
@@ -291,6 +295,29 @@ edge = np.clip((d - 10e-6) / 15e-6, 0, 1)
 x = (0.8 * np.sin(2 * np.pi * 1000 * t) + 0.24 * np.where(d < 25e-6, 0.5 + 0.5 * np.cos(np.pi * edge), 0)).astype(np.float32)
 st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
 check(S, 'Peak +% (20 us peaks to 104%)', block_peaks(x)[0], st.meter.stats['pos_pct'], 0.6, '%')
+
+# ================================================================ S10: validity gates the counts, not the meter
+S = 'S10 validity'
+x, info = fmtx.mpx(rm, SECS, left=L2, right=L2, pilot=0.0, stereo=False, bursts=bursts)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, am=0.10)
+s = st.meter.stats
+check(S, 'Over 100% /min (bursts, but 10% AM: invalid)', 0, s['over100_min'], 0)
+check(S, 'Valid peak (none valid)', None, s['valid_pos_pct'], 0)
+check(S, 'Peak +% still shown live (programme)', mpx_truth(info['mpx_ac'])['pos'], s['pos_pct'], 0.5, '%')
+# an RF level step (gain step, aircraft, fade): invalid at once, and for VALID_HOLD_S after it settles
+m = rm.FmMeter()
+n = int(rm.QUAD_RATE / rm.UPDATE_HZ)
+tone = (0.5 * np.sin(2 * np.pi * 1000 * np.arange(n) / rm.QUAD_RATE)).astype(np.float32)
+whys = []
+for i in range(120):
+    power = 0.01 if i < 40 else 0.04       # +6 dB at 4 s
+    out = m._measure(tone, power, math.sqrt(power), np.full(n, math.sqrt(power), np.float32), tone)
+    whys.append(out['invalid_why'])
+check(S, 'valid before the step', None, whys[39])
+check(S, 'RF step of 6 dB: invalid at once', 'level step', whys[40])
+back = next(i for i in range(41, 120) if whys[i] is None)
+check(S, 'valid again within 5 s', True, back < 90, 0)
+rows[-1] = rows[-1][:3] + (f'{(back - 40) / rm.UPDATE_HZ:.1f} s',) + rows[-1][4:]
 
 # ================================================================ report
 w = max(len(r[1]) for r in rows)
