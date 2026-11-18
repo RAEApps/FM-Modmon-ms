@@ -1,0 +1,120 @@
+"""The panel's plain readings (StationPanel.readings), the alarm states an
+annunciator shows, and the per-receiver History, against synthetic stations."""
+import importlib.util
+import os
+import sys
+import types
+
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+sys.stdout.reconfigure(encoding='utf-8')
+spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
+rm = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rm)
+import numpy as np
+import fmtx
+from PyQt5 import QtWidgets
+
+app = QtWidgets.QApplication([])
+failed = []
+
+
+def check(name, ok, detail=''):
+    print(f'{"ok  " if ok else "FAIL"}  {name}' + (f'   ({detail})' if detail and not ok else ''))
+    if not ok:
+        failed.append(name)
+
+
+# ---- History: ring order, the 1 s summary (peaks: max, others: mean), series spans
+h = rm.History()
+t0 = 1_000_000.0
+for i in range(3500):                       # more than the fast ring holds (300 s at 10 Hz)
+    h.add(t0 + i / rm.UPDATE_HZ, {'pos_pct': float(i % 10), 'rf_dbfs': float(i % 10), 'snr_db': None})
+t, v = h.series('pos_pct')
+check('fast ring keeps the last 300 s in time order', len(t) == 3000 and np.all(np.diff(t) > 0), f'{len(t)}')
+check('fast ring ends at the newest sample', t[-1] == t0 + 3499 / rm.UPDATE_HZ and v[-1] == 9.0)
+ts, vs = h.series('pos_pct', 3600)
+_, rf = h.series('rf_dbfs', 3600)
+_, snr = h.series('snr_db', 3600)
+check('slow ring: one point per completed second', len(ts) == 349 and np.all(np.diff(ts) == 1.0), f'{len(ts)}')
+check('slow ring: a peak reading keeps the second\'s maximum', np.all(vs == 9.0), f'{vs[:3]}')
+check('slow ring: other readings keep the mean', np.allclose(rf, 4.5), f'{rf[:3]}')
+check('a reading never given is NaN', np.all(np.isnan(snr)))
+ts, _ = h.series('pos_pct', 60)
+check('series() limits to the span asked', len(ts) == 601 and ts[-1] - ts[0] <= 60, f'{len(ts)}')
+h.log_alarm(t0, 'RDS', True)
+h.log_alarm(t0 + 90_000, 'RDS', False)
+check('alarm log forgets changes older than 24 h', list(h.alarm_log) == [(t0 + 90_000, 'RDS', False)])
+h.reset()
+check('reset empties everything', len(h.series('pos_pct')[0]) == 0 and not h.alarm_log)
+
+# ---- readings and alarm states through a real receiver
+real_time = rm.time
+clock = {'t': 1000.0}
+fake = types.SimpleNamespace(monotonic=lambda: clock['t'], time=real_time.time, strftime=real_time.strftime,
+                             sleep=real_time.sleep)
+
+
+def panel(seconds=6.0, run=None, **mpx):
+    x, _ = fmtx.mpx(rm, seconds, **mpx)
+    st = fmtx.run(rm, x, **{'rf_amp': 0.1, 'noise': 0.0005, **(run or {})})
+    p = rm.StationPanel(st, [(st.freq_hz, None)], lambda *a: None, lambda *a: None, country='CA')
+    return p, st
+
+
+def settle(p, n=40, **settings):
+    p.settings = rm.ReceiverSettings.from_dict(settings)
+    rm.time = fake
+    try:
+        p.alarms.reset()
+        states = []
+        for _ in range(n):
+            clock['t'] += 1.0
+            p.refresh()
+            states.append(dict(p.readings['alarms']))
+    finally:
+        rm.time = real_time
+    return states
+
+
+p, st = panel(left=[(997, 1.15)], right=[(997, 1.15)], pilot=0.09, rds=0.05)
+states = settle(p, expected_pi='ABCD', alarms={'PI': False})
+r, s, a = p.readings, st.meter.stats, st.audio_meter.stats
+check('readings carry the meter values', r['rf_dbfs'] == s['rf_dbfs'] and r['pos_pct'] == s['pos_pct']
+      and r['short_term'] == a['short_term'] and r['rds_pct'] == s['rds_pct'])
+# (the synthetic run is over before these refreshes, so the RDS rate itself is 0 here)
+check('readings: stereo, RDS decoded and the limit', r['stereo_mode'] == 'stereo' and r['pi'] and r['group_types']
+      and abs(r['limit_pct'] - min(100 + 0.5 * s['rds_pct'], 110)) < 1e-9, f"{r['stereo_mode']} {r['pi']}")
+check('levels: peak over the limit is an alarm', r['levels'].get('pos_pct') == 'alarm', r['levels'])
+check('levels: L over 110% is an alarm', r['levels'].get('mod_l') == 'alarm', r['levels'])
+check('flags decoded to booleans', r['flags'] is not None and set(r['flags']) == set(rm.RDS_FLAGS))
+check('first refreshes: alarms waiting (grace period)', states[0]['OVERMOD'] == 'waiting', states[0]['OVERMOD'])
+check('over-modulation: pending, then raised', 'pending' in [x['OVERMOD'] for x in states]
+      and states[-1]['OVERMOD'] == 'raised', [x['OVERMOD'] for x in states][:12])
+check('an alarm switched off shows off (PI differs, but PI is off)', states[-1]['PI'] == 'off')
+check('alarms not met show clear', states[-1]['CARRIER'] == 'clear' and states[-1]['PILOT'] == 'clear')
+check('history logs the raise', [(n, up) for _, n, up in p.history.alarm_log] == [('OVERMOD', True)],
+      list(p.history.alarm_log))
+check('history holds every refresh', len(p.history.series('pos_pct')[0]) == 40)
+
+p, st = panel(left=[(997, 1.15)], right=[(997, 1.15)], pilot=0.09, run={'am': 0.25, 'seed': 3})
+states = settle(p)
+r = p.readings
+check('heavy multipath: AM level is an alarm', r['levels'].get('am_pct') == 'alarm', f"{r['am_pct']:.1f}%")
+check('heavy multipath: over-modulation not judged (suppressed)', states[-1]['OVERMOD'] == 'suppressed'
+      and 'OVERMOD' not in p.alarms.active, states[-1]['OVERMOD'])
+check('heavy multipath: other alarms still judged', states[-1]['CARRIER'] == 'clear')
+check('no RDS: no PI, no flags, no loss figure', r['pi'] is None and r['flags'] is None and r['rds_loss_pct'] is None)
+
+# ---- IBOC lines from readings
+ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,
+      'artist': 'A', 'title': 'B', 'album': '', 'genre': 'Rock', 'comment': '', 'name': 'CKNX', 'slogan': '',
+      'message': '', 'alert': ''}
+line = rm.StationPanel._iboc_line_text(ib)
+psd, sis = rm.StationPanel._psd_sis_text(ib)
+check('IBOC line from readings', '(MPS)' in line and 'synchronized' in line and '48 kbps' in line
+      and 'MER 7.5 dB' in line and 'BER 2.0e-05' in line, line)
+check('PSD and SIS lines from readings', psd == 'A – B  ·  Rock' and sis == 'CKNX', f'{psd!r} {sis!r}')
+check('no IBOC: dashes', rm.StationPanel._iboc_line_text(None) == '-' and rm.StationPanel._psd_sis_text(None) == ('-', '-'))
+
+print('\nall state checks passed' if not failed else f'\n{len(failed)} FAILED: {failed}')
+sys.exit(1 if failed else 0)

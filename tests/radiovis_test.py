@@ -266,14 +266,14 @@ p.rdns_line, p.logo_img, p.art_img = QtWidgets.QLabel(), QtWidgets.QLabel(), QtW
 p._rdns_row = ()
 for img in (p.logo_img, p.art_img):
     img.path = img.link = None
-p._update_media({0: 'C479'}, {'ecc': 0xE1})
+p._update_media('C479', 0xE1)
 line = QtGui.QTextDocumentFragment.fromHtml(p.rdns_line.text()).toPlainText()
 check('panel: transport and slideshow text on the RadioDNS line',
       'slideshow (Server-sent Events): “Now <b>playing</b>”' in line, line)
 check('panel: album art shows the slide, with its link', p.art_img.path == slide and p.art_img.link == show.link
       and 'Click to open https://example.org/now' in p.art_img.toolTip(), p.art_img.toolTip())
 show.link, show.text = None, ''
-p._update_media({0: 'C479'}, {'ecc': 0xE1})
+p._update_media('C479', 0xE1)
 check('panel: link and text cleared with the next slide', p.art_img.link is None and 'Click' not in p.art_img.toolTip()
       and '“' not in p.rdns_line.text())
 
