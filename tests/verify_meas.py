@@ -55,12 +55,15 @@ def lufs(tones_l, tones_r):
     return -0.691 + 10 * math.log10(p)
 
 
+TRIM = 100 * rm.OVERMOD_MIN_S * rm.UPDATE_HZ   # a peak: the level exceeded for 17 us per 100 ms
+
+
 def mpx_truth(x):
     """The meter's own definitions, applied to the transmitted MPX."""
     tail = x[-int(fmtx.FS * 1.0):]  # the meter holds peaks for 1 s
     return {
-        'pos': np.percentile(tail, 99.95) * 100, 'neg': -np.percentile(tail, 0.05) * 100,
-        'dev': np.percentile(np.abs(tail), 99.9) * 75,
+        'pos': np.percentile(tail, 100 - TRIM) * 100, 'neg': -np.percentile(tail, TRIM) * 100,
+        'dev': np.percentile(np.abs(tail), 100 - TRIM) * 75,
         'dbr': 10 * math.log10(np.mean(x * x) * 75e3 ** 2 / (19e3 ** 2 / 2)),
     }
 
@@ -96,6 +99,8 @@ check(S, 'Peak deviation kHz', t['dev'], s['peak_dev_khz'], 0.8, 'kHz')
 check(S, 'MPX power dBr', t['dbr'], s['mpx_dbr'], 0.2, 'dBr')
 check(S, 'Over 100% /min', 0, s['over100_min'], 0)
 check(S, 'AM %', 0.0, s['am_pct'], 0.3, '%')
+check(S, 'Valid time % (clean)', 100.0, s['valid_pct'], 0, '%')
+check(S, 'Valid time (text)', f"100% of {s['valid_window_s']:.0f} s", plain(v['Valid time']))
 check(S, 'Sync AM % (none)', 0.0, s['sync_am_pct'], 0.05, '%')
 check(S, 'RDS phase deg (in phase)', 0.0, s['rds_phase_deg'], 2.0, 'deg')
 check(S, 'RDS lock (steady)', 1.0, s['rds_lock'], 0.02)
@@ -180,6 +185,8 @@ S = 'S3 SCA+AM+noise'
 check(S, 'SCA 67 %', 10.0, s['sca67_pct'], 0.3, '%')
 check(S, 'SCA 92 %', 7.0, s['sca92_pct'], 0.3, '%')
 check(S, 'AM % (10% sine AM)', 10.0, s['am_pct'], 0.5, '%')
+check(S, 'Valid time % (AM over 5%)', 0.0, s['valid_pct'], 0, '%')
+check(S, 'Invalid because', 'multipath', s['invalid_why'])
 check(S, 'Sync AM % (AM not tied to modulation)', 0.0, s['sync_am_pct'], 0.1, '%')
 check(S, 'RDS injection % (no RDS; 67 kHz SCA skirt)', 0.0, s['rds_pct'], 0.1, '%')
 check(S, 'RDS phase shown (no RDS; SCA skirt in the band)','-', plain(panel_for(st).values['RDS phase']))
@@ -270,6 +277,138 @@ for rds_inj, unlocked, noise in ((0.05, 0.0, 0.0005), (0.02, 5.0, 0.0005), (0.0,
         x0, _ = fmtx.mpx(rm, SECS, left=[(997, 0.5)], right=[(1500, 0.3)], pilot=0.09)
         st0 = fmtx.run(rm, x0, rf_amp=0.1, noise=noise)
         check(S, 'MPX S/N dB (tones in the guard band)', st0.meter.stats['snr_db'], st.meter.stats['snr_db'], 1.0, 'dB')
+
+# ================================================================ S9: peaks of treble and of short peaks
+S = 'S9 peaks'
+
+
+def block_peaks(xa):
+    """The meter's peak rule per 100 ms block, held for the last 1 s."""
+    n = int(fmtx.FS / rm.UPDATE_HZ)
+    b = xa[-fmtx.FS:].reshape(-1, n)
+    return (np.max(np.percentile(b, 100 - TRIM, axis=1)) * 100, -np.min(np.percentile(b, TRIM, axis=1)) * 100)
+
+
+# L-R only (34 and 42 kHz), where the demodulator's output is down by sinc(f/fs): 1.6%
+x, info = fmtx.mpx(rm, 6.0, left=[(4000, 0.3)], right=[(4000, -0.3)], pilot=0.09, rds=0.04)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+pos, neg = block_peaks(info['mpx_ac'])
+check(S, 'Peak +% (L-R only)', pos, st.meter.stats['pos_pct'], 0.4, '%')
+check(S, 'Peak -% (L-R only)', neg, st.meter.stats['neg_pct'], 0.4, '%')
+# a 20 us flat-topped peak to 104% every 100 ms: over 17 us, so a real peak, read in full
+t = np.arange(int(6.0 * fmtx.FS)) / fmtx.FS
+d = np.abs((t - 0.05025 + 0.05) % 0.1 - 0.05)   # from each pulse's centre (on the tone's crest)
+edge = np.clip((d - 10e-6) / 15e-6, 0, 1)
+x = (0.8 * np.sin(2 * np.pi * 1000 * t) + 0.24 * np.where(d < 25e-6, 0.5 + 0.5 * np.cos(np.pi * edge), 0)).astype(np.float32)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+check(S, 'Peak +% (20 us peaks to 104%)', block_peaks(x)[0], st.meter.stats['pos_pct'], 0.6, '%')
+
+# ================================================================ S10: validity gates the counts, not the meter
+S = 'S10 validity'
+x, info = fmtx.mpx(rm, SECS, left=L2, right=L2, pilot=0.0, stereo=False, bursts=bursts)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, am=0.10)
+s = st.meter.stats
+check(S, 'Over 100% /min (bursts, but 10% AM: invalid)', 0, s['over100_min'], 0)
+check(S, 'Valid peak (none valid)', None, s['valid_pos_pct'], 0)
+check(S, 'Peak +% still shown live (programme)', mpx_truth(info['mpx_ac'])['pos'], s['pos_pct'], 0.5, '%')
+# an RF level step (gain step, aircraft, fade): invalid at once, and for VALID_HOLD_S after it settles
+m = rm.FmMeter()
+n = int(rm.QUAD_RATE / rm.UPDATE_HZ)
+tone = (0.5 * np.sin(2 * np.pi * 1000 * np.arange(n) / rm.QUAD_RATE)).astype(np.float32)
+whys = []
+for i in range(120):
+    power = 0.01 if i < 40 else 0.04       # +6 dB at 4 s
+    out = m._measure(tone, power, math.sqrt(power), np.full(n, math.sqrt(power), np.float32), tone)
+    whys.append(out['invalid_why'])
+check(S, 'valid before the step', None, whys[39])
+check(S, 'RF step of 6 dB: invalid at once', 'level step', whys[40])
+back = next(i for i in range(41, 120) if whys[i] is None)
+check(S, 'valid again within 5 s', True, back < 90, 0)
+rows[-1] = rows[-1][:3] + (f'{(back - 40) / rm.UPDATE_HZ:.1f} s',) + rows[-1][4:]
+
+# ================================================================ S11: SM.1268 exceedance, FCC-era burst grouping
+S = 'S11 SM.1268'
+# 1 ms bursts to 115%: three 2 ms apart (within 5 ms: one burst), then two 11 ms apart (two)
+grouped = [(2.0, 1, 1.3), (2.003, 1, 1.3), (2.006, 1, 1.3), (4.0, 1, 1.3), (4.012, 1, 1.3)]
+x, info = fmtx.mpx(rm, SECS, left=L2, right=L2, pilot=0.0, stereo=False, bursts=grouped)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+check(S, 'Over 100% /min (repeats in 5 ms grouped)', 3, st.meter.stats['over100_min'], 0)
+check(S, 'Over 110% /min (repeats in 5 ms grouped)', 3, st.meter.stats['over110_min'], 0)
+# a steady tone to 110% (82.5 kHz): the share of its samples over each level is known
+t = np.arange(int(SECS * fmtx.FS)) / fmtx.FS
+x = (1.10 * np.sin(2 * np.pi * 997 * t)).astype(np.float32)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+s = st.meter.stats
+for khz in (77.0, 80.0, 85.0):
+    want = float(np.mean(np.abs(x) * 75 > khz))
+    check(S, f'share of samples over {khz:g} kHz', want, rm.exceed_fraction(s, khz), want * 0.05 + 1e-7)
+check(S, 'valid time held = all of the run, s', s['valid_window_s'] * s['valid_pct'] / 100, s['exceed_valid_s'], 0.01, 's')
+frac = rm.exceed_fraction(s, 77.0)
+check(S, 'SM.1268 (text; ISED limit 100% + 2 kHz)', f'{frac * 1e6:.2f} ppm of samples over 77.0 kHz (limit 1 ppm; '
+      f'0 of 15 min valid)', plain(panel_for(st).values['SM.1268']))
+
+# ================================================================ S12: secondary quality checks (noise >100 kHz, pilot AM)
+S = 'S12 quality'
+# noise only: the noise on the peak path, estimated from 105-145 kHz (f^2), against the peak path itself
+peak_path = []
+orig = rm.FmMeter._measure
+
+
+def spy(self, x, *a, **k):
+    out = orig(self, x, *a, **k)
+    if len(a) >= 4 and a[3] is not None:
+        peak_path.append(a[3] - np.mean(a[3]))
+    return out
+
+
+rm.FmMeter._measure = spy
+x0, _ = fmtx.mpx(rm, 4.0, pilot=0.0)
+st = fmtx.run(rm, x0, rf_amp=0.1, noise=0.01, seed=5)
+rm.FmMeter._measure = orig
+rms = float(np.sqrt(np.mean(np.concatenate(peak_path[-10:]) ** 2))) * 100
+check(S, 'noise on the peak path % (est. from >100 kHz)', rms, st.meter.stats['peak_noise_pct'], rms * 0.15, '%')
+# heavy noise (MPX S/N ~57 dB): about 1 kHz on the peaks, so not valid
+x, info = fmtx.mpx(rm, 6.0, left=L5, right=R5, pilot=0.09, rds=0.045)
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.022)
+check(S, 'Invalid because (heavy noise)', 'noise', st.meter.stats['invalid_why'])
+rows[-1] = rows[-1][:3] + (f"{st.meter.stats['invalid_why']} (S/N {st.meter.stats['snr_db']:.0f} dB, "
+                           f"{st.meter.stats['peak_noise_pct'] * 0.75:.2f} kHz RMS)",) + rows[-1][4:]
+check(S, 'Noise >100 kHz shown amber', True, '#' in panel_for(st).values['Noise >100 kHz'].text(), 0)
+# pilot AM: an echo ripples the demodulated pilot's level; plain AM doesn't
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005)
+check(S, 'Pilot AM % (clean, under 1%)', True, st.meter.stats['pilot_am_pct'] < rm.PILOT_AM_WARN_PCT, 0)
+rows[-1] = rows[-1][:3] + (round(st.meter.stats['pilot_am_pct'], 2),) + rows[-1][4:]
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, echo=(10e-6, 0.1, 1.6))
+check(S, 'Pilot AM % (10 us echo 20 dB down, amber)', True, st.meter.stats['pilot_am_pct'] >= rm.PILOT_AM_WARN_PCT, 0)
+rows[-1] = rows[-1][:3] + (plain(panel_for(st).values['Pilot AM']),) + rows[-1][4:]
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, am=0.10)
+check(S, 'Pilot AM % (10% plain AM: not an echo)', True, st.meter.stats['pilot_am_pct'] < rm.PILOT_AM_WARN_PCT, 0)
+rows[-1] = rows[-1][:3] + (round(st.meter.stats['pilot_am_pct'], 2),) + rows[-1][4:]
+
+# ================================================================ S13: another station on the channel or beside it
+S = 'S13 interference'
+x2, _ = fmtx.mpx(rm, 6.0, left=[(440, 0.6), (3100, 0.2)], right=[(700, 0.5)], pilot=0.09, rds=0.04,
+                 rds_content=fmtx.RdsContent(pi=0x1234, ps='OTHER   '))
+want = block_peaks(info['mpx_ac'])[0]    # (x, info: S12's programme, 6 s)
+# co-channel (a different programme, 150 Hz off): 30 dB down adds no false peak and stays valid;
+# 20 dB down adds ~4% and reads 10% AM: not valid
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 10 ** (-30 / 20), 150))
+check(S, 'co-channel 30 dB down: Peak +%', want, st.meter.stats['pos_pct'], 0.6, '%')
+check(S, 'co-channel 30 dB down: valid', None, st.meter.stats['invalid_why'])
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 10 ** (-20 / 20), 150))
+check(S, 'co-channel 20 dB down: not valid', 'multipath', st.meter.stats['invalid_why'])
+rows[-1] = rows[-1][:3] + (f"{st.meter.stats['invalid_why']} (AM {st.meter.stats['am_pct']:.0f}%, "
+                           f"peak +{st.meter.stats['pos_pct'] - want:.1f}%)",) + rows[-1][4:]
+# a neighbour 200 kHz away: 20 dB down its energy above 100 kHz invalidates; 12 dB down it pulls one side's peaks
+st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 0.1, 200e3))
+check(S, 'neighbour +200 kHz 20 dB down: not valid', 'noise', st.meter.stats['invalid_why'])
+for df, side in ((200e3, 'above'), (-200e3, 'below')):
+    st = fmtx.run(rm, x, rf_amp=0.1, noise=0.0005, interferer=(x2, 10 ** (-12 / 20), df))
+    text = plain(panel_for(st).values['Peak + / −'])
+    check(S, f'neighbour {df / 1e3:+.0f} kHz 12 dB down: peaks flagged', True, text.endswith(f'a station {side}?'), 0)
+    rows[-1] = rows[-1][:3] + (text,) + rows[-1][4:]
+check(S, 'no neighbour: not flagged', True, plain(panel_for(fmtx.run(rm, x, rf_amp=0.1, noise=0.0005))
+                                                 .values['Peak + / −']).endswith('%'), 0)
 
 # ================================================================ report
 w = max(len(r[1]) for r in rows)

@@ -149,6 +149,17 @@ Measurements (refreshed 10x per second):
                     are the transmitter's. Amber above -35 dB only while
                     AM / multipath has stayed under 5%; marked 'multipath'
                     above that. '-' while the modulation is too light
+    Noise >100 kHz  MPX noise in 105-145 kHz, dB re a 100% sine (Pira's
+                    quality metric): nothing but noise and interference (an
+                    adjacent station, HD Radio) belongs there. From it, the
+                    noise left on the peak path (FM noise rises as f^2), in
+                    kHz RMS; at 1.05 kHz (MPX S/N ~58 dB) it adds ~1 kHz to
+                    the peaks, and reception isn't valid (amber)
+    Pilot AM        ripple of the pilot's level (RMS x sqrt(2), %): an echo
+                    modulates it as the carrier sweeps the channel's notches
+                    (Inovonics' multipath sign). Amber from 1%. A confirmation
+                    of AM / multipath, not a gate: noise and composite
+                    clipping raise it too, and plain AM doesn't
     Pilot           19 kHz injection, % of 75 kHz (>3% = stereo), and its
                     frequency from the stereo PLL (spec 19 kHz +/- 2 Hz)
     RDS injection   57 kHz subcarrier peak deviation, % of 75 kHz (as
@@ -167,9 +178,37 @@ Measurements (refreshed 10x per second):
                     are proprietary, so data is identified, not decoded
     IBOC signal     IBOC sidebands found by the start-up scan, in dBc
   Modulation (100% = 75 kHz deviation)
-    Peak + / -      1 s peak of positive and negative excursions
-    Peak deviation  1 s peak of the 99.9th percentile of |MPX|
-    Over 100/110%   excursions above 100% / 110% in the last minute
+    Peak + / -      1 s peak of positive and negative excursions: the level
+                    the MPX exceeds for 17 us of each 100 ms (a single noise
+                    sample doesn't count), read through a filter that undoes
+                    the demodulator's sinc roll-off (L-R, RDS and SCA peaks
+                    read up to 3% low without it) and stops the noise above
+                    100 kHz
+                    Flagged when one side reads 3% higher than the other
+                    over 10 s: programme is symmetric, but a station 200 kHz
+                    above pulls the positive peaks up (below: the negative)
+    Peak deviation  the same, of |MPX|, in kHz
+    Over 100/110%   bursts above 100% / 110% in the last minute, counted only
+                    in valid time; repeats within 5 ms are one burst (the
+                    FCC-era convention of FCC 93-370, at most 10 a minute:
+                    industry practice, not a rule)
+    SM.1268         the fraction of samples whose deviation exceeds the
+                    station's limit + 2 kHz over the last 15 min of valid
+                    time (ITU-R SM.1268, ERC/REC 54-01: a violation above
+                    1e-6, 1 ppm, ~346 samples; the limit is 75 kHz + 2 there).
+                    Its alarm is judged once 15 min of valid time is held
+    Valid time      the share of the last 15 min whose reception was fit for
+                    peak readings, and why it isn't now. Each 100 ms is valid
+                    or not as a whole (never single samples): not while AM /
+                    multipath has been 5% or more in the last 10 s, nor
+                    while Noise >100 kHz is amber, nor for
+                    1 s after an RF level step of 3 dB, nor for 60 s after
+                    another station's PI is decoded (co-channel by ducting
+                    or sporadic E, intermod; against the expected PI, else
+                    the one held 60 s since tuning). The over-modulation
+                    alarm judges the peaks of valid time only. A station
+                    seldom valid says more about the antenna than the
+                    transmitter
     L, R, L+R, L-R  1 s peak modulation of each, as transmitted
     MPX power       ITU-R BS.412, 60 s, dBr (0 dBr = +/-19 kHz sine)
     MPX spectrum    0-100 kHz, 500 Hz resolution, dB re 100% modulation
@@ -180,7 +219,8 @@ Measurements (refreshed 10x per second):
     L/R RMS level, balance, correlation (+1 mono, 0 wide, <0 out of phase),
     width (side/mid energy ratio), goniometer
   Alarms (raise/clear after holding 3-30 s)
-    carrier low/lost, audio silence, over-modulation, pilot lost, RDS
+    carrier low/lost, audio silence, over-modulation, over-deviation over
+    15 min (ITU-R SM.1268, against the limit below + 2 kHz), pilot lost, RDS
     lost (but "possibly on N+1" when the carrier, pilot and audio stay
     fine: the N+1 backup transmitter has no RDS encoder; switch that alarm
     off and it is plain RDS lost), wrong PI, emergency alert (IBOC while it plays, or an RT+
@@ -210,6 +250,7 @@ import base64
 import ctypes
 import gc
 import datetime
+import functools
 import hashlib
 import hmac
 import itertools
@@ -325,12 +366,43 @@ SCA_MIN_DB = 10.0          # SCA must be this far above the 77-82 kHz gap
 DYNAMIC_PS_S = 30          # a PS that changes 3+ times in this long is dynamic
 PS_NAME_STABLE_S = 10      # a PS names the station once it has held this long
 OVERMOD_WINDOW_S = 0.001   # over-modulation is counted per 1 ms window
-OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes)
+OVERMOD_MIN_S = 17e-6      # ...and only peaks lasting this long (ignores noise spikes); a peak
+                           # reading is likewise the level the MPX exceeds for this long per update
+OVERMOD_GROUP_S = 0.005    # ...and repeats within this of the last are the same burst (the FCC-era
+                           # convention, FCC 93-370: at most 10 bursts a minute; practice, not a rule)
+# ITU-R SM.1268 (and ERC/REC 54-01): a transmitter over-deviates when more than 1e-6 of the samples
+# over 15 min exceed the limit + 2 kHz (the instrument accuracy); single samples never count.
+EXCEED_FRACTION = 1e-6
+EXCEED_MARGIN_KHZ = 2.0
+EXCEED_MIN_S = 900         # ...judged once this much valid time is held
+EXCEED_LO_KHZ = 60.0       # samples' deviation kept as a histogram from here
+EXCEED_BIN_KHZ = 0.5       # ...in bins this wide
+EXCEED_BINS = 120          # ...to 120 kHz (the last bin holds everything above)
+PEAK_PASS_HZ = 100e3       # peak path: the MPX to here (programme, RDS and SCA end by 99 kHz), the
+PEAK_STOP_HZ = 120e3       # ...demodulator's sinc roll-off undone; stopped from here (only noise above)
+PEAK_TAPS_N = 63           # ...in this many taps: flat to +/-0.1% (ripple reads as false peak)
 MPX_POWER_S = 60           # ITU-R BS.412 MPX power integration time
 PEAK_AM_PCT = 5.0          # over-modulation is judged only while AM / multipath has stayed
 PEAK_AM_S = 10             # ...under this for this long (ITU-R SM.1268: echoes 26 dB down,
                            # AM averaged over 10 s); echoes or noise above it inflate peaks
 CLEAN_AM_PCT = 15.0        # the other technical rules are judged under this
+# Validity (research report item 2; Pira P275's practice, ITU-R SM.1268's site rules): each
+# update (100 ms) is valid for peak statistics, or not, as a whole. Not per sample: masking
+# faded samples removes the deviations that fade (the notches sit at fixed frequencies).
+VALID_WINDOW_S = 900       # "valid time" is the share of this long (15 min) that was valid
+VALID_STEP_DB = 3.0        # an RF level this far from its ~5 s average: an event (gain step,
+VALID_RF_ALPHA = 0.02      # ...aircraft, a fade), invalid while it lasts
+VALID_HOLD_S = 1.0         # ...and for this long after (time-off hysteresis)
+VALID_WARN_PCT = 90.0      # valid time under this is shown amber: the readings rest on less time
+HF_LO_HZ, HF_HI_HZ = 105e3, 145e3  # MPX noise measured here: above every subcarrier, inside the channel
+PEAK_NOISE_PCT = 1.4       # not valid while that noise (RMS, % of 75 kHz) has been this high in the last 10 s:
+                           # it adds ~1 kHz to the peaks, half SM.1268's +/-2 kHz (synthetic transmitter: MPX S/N ~58 dB)
+PI_LEARN_S = 60            # a PI decoded this long since tuning is the station's own (when none is expected)
+INTERFERENCE_HOLD_S = 60   # peaks withheld this long after the last sign of another station (tropo lasts hours)
+ASYM_S = 10                # +/- peak asymmetry averaged over this long...
+ASYM_WARN_PCT = 3.0        # ...flagged from here: programme is symmetric, a station on one side isn't
+PILOT_AM_WARN_PCT = 1.0    # pilot amplitude ripple shown amber from here (Inovonics' multipath sign; a confirmation,
+                           # not a gate: noise and composite clipping that hits the pilot raise it too)
 IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor
 WEB_PORT = 8765            # web view; 0 turns it off
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fm-modmon-ms-web.html')
@@ -788,8 +860,32 @@ def _percentiles(x, qs):
     return [float(part[i] + (p - i) * (part[i + 1] - part[i])) for p, i in zip(pos, lo)]
 
 
+def exceed_fraction(stats, khz):
+    """The fraction of valid samples whose deviation exceeds `khz` (to the
+    nearest EXCEED_BIN_KHZ), from FmMeter's SM.1268 histogram; None without samples."""
+    if not stats.get('exceed_n'):
+        return None
+    k = min(max(round((khz - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ), 0), EXCEED_BINS - 1)
+    return float(np.sum(stats['exceed_hist'][k:])) / stats['exceed_n']
+
+
+def peak_taps(n=PEAK_TAPS_N, fpass=PEAK_PASS_HZ, fstop=PEAK_STOP_HZ, fs=QUAD_RATE):
+    """Linear-phase FIR for the peak path: 1/sinc(f/fs) to fpass, undoing the
+    quadrature demodulator's roll-off (-1.6% at 38 kHz, -3.2% at 57 kHz), which
+    reads peaks of L-R, RDS and SCA low; zero from fstop, where the MPX holds only
+    FM noise (rising as f^2), which reads as peak. Least squares on a dense grid."""
+    k = np.arange(n // 2 + 1)
+    fp = np.linspace(0, fpass, 600) / fs
+    fz = np.linspace(fstop, fs / 2, 600) / fs
+    basis = lambda f: np.cos(2 * np.pi * np.outer(f, k)) * np.where(k > 0, 2, 1)  # noqa: E731
+    h = np.linalg.lstsq(np.concatenate([basis(fp), 10 * basis(fz)]),
+                        np.concatenate([1 / np.sinc(fp), np.zeros_like(fz)]), rcond=None)[0]
+    return np.concatenate([h[:0:-1], h])
+
+
 class FmMeter(gr.sync_block):
-    """Measures a station from its channel IQ and MPX (both at QUAD_RATE).
+    """Measures a station from its channel IQ, MPX and peak-path MPX (the MPX
+    through peak_taps()), all at QUAD_RATE.
 
     Results land in self.stats (a dict, replaced atomically) UPDATE_HZ times
     a second; on_stats(stats) is called with each result.
@@ -800,12 +896,14 @@ class FmMeter(gr.sync_block):
 
     def __init__(self, on_stats=None):
         gr.sync_block.__init__(self, name='fm_meter',
-                               in_sig=[(np.complex64, FM_BATCH), (np.float32, FM_BATCH)], out_sig=None)
+                               in_sig=[(np.complex64, FM_BATCH), (np.float32, FM_BATCH), (np.float32, FM_BATCH)],
+                               out_sig=None)
         self.stats = None
         self.last_update = None   # time.monotonic() of the last measurement: samples are flowing
         self._on_stats = on_stats
         self._period = int(QUAD_RATE / UPDATE_HZ)
         self._chunks = []
+        self._peak_chunks = []
         self._count = 0
         self._iq_energy = 0.0
         self._win = np.hanning(self.NFFT).astype(np.float32)
@@ -820,11 +918,30 @@ class FmMeter(gr.sync_block):
         self._peaks = deque(maxlen=UPDATE_HZ)  # 1 s peak hold
         self._pos = deque(maxlen=UPDATE_HZ)    # +/- peaks, 1 s hold
         self._neg = deque(maxlen=UPDATE_HZ)
-        self._over = deque(maxlen=60 * UPDATE_HZ)          # over-mod excursions per update, 60 s
-        self._over_prev = np.zeros(2, bool)                # was the last 1 ms window over 100/110%?
+        self._over = deque(maxlen=60 * UPDATE_HZ)          # over-mod bursts per update, 60 s
+        self._over_last = [-10 ** 9] * 2                   # last 1 ms window over 100/110%, from this update's start
+        self._exceed = deque()                             # per valid update: (histogram, samples), EXCEED_MIN_S
+        self._exceed_hist = np.zeros(EXCEED_BINS, np.int64)  # ...their sum
+        self._exceed_n = 0
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
         self._am_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # AM per update, for the peak gate
+        self._valid_hist = deque(maxlen=VALID_WINDOW_S * UPDATE_HZ)  # each update valid or not
+        self._hf_band = (self._freqs >= HF_LO_HZ) & (self._freqs <= HF_HI_HZ)
+        # FM noise power on the peak path per unit in HF_LO_HZ-HF_HI_HZ: its PSD rises as f^2,
+        # and the peak path passes it as the demodulator's sinc times the peak filter
+        f = np.linspace(0, QUAD_RATE / 2, 4001)
+        _, h = sps.freqz(peak_taps(), worN=f, fs=QUAD_RATE)
+        self._hf_to_peak = (float(np.sum(np.abs(h * np.sinc(f / QUAD_RATE)) ** 2 * f * f)) * (f[1] - f[0])
+                            / ((HF_HI_HZ ** 3 - HF_LO_HZ ** 3) / 3))
+        self._hf_noise = 0.0
+        self._noise_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # noise on the peak path per update
+        self._pilot_am = None
+        self._vpeaks = deque(maxlen=UPDATE_HZ)   # (+, -) peaks of the last 1 s's valid updates (None: invalid)
+        self._asym = deque(maxlen=ASYM_S * UPDATE_HZ)  # + peak minus - peak per update
+        self._rf_slow = None
+        self._hold = 0                            # updates an event keeps invalid still
+        self.interference = None                  # set from outside: why another station is suspected, or None
         self._rds = None
         self._rds_fft = None    # (block length, envelope length) the RDS measurement is set up for
         self._rds_hist = deque()  # per block: z² averaged down (RDS_ZZ_AVG), the last RDS_AVG_S
@@ -833,6 +950,7 @@ class FmMeter(gr.sync_block):
         self._env = []                                       # |IQ| chunks for this update
         self._rds_win = None
         self._phase_win = None
+        self._pilot_w = None
         self._rds_z = deque(maxlen=RDS_PHASE_S * UPDATE_HZ)  # RDS vs 3x pilot phasors (angle doubled)
         self._sync = None                                    # synchronous AM regression sums
         self._settle = SETTLE_UPDATES
@@ -844,17 +962,20 @@ class FmMeter(gr.sync_block):
         self.stats = None
 
     def work(self, input_items, output_items):
-        iq, mpx = (a.reshape(-1) for a in input_items)  # batches -> samples
+        iq, mpx, peak = (a.reshape(-1) for a in input_items)  # batches -> samples
         if self._reset:
             self._reset = False
-            self._chunks, self._count, self._iq_energy = [], 0, 0.0
+            self._chunks, self._peak_chunks, self._count, self._iq_energy = [], [], 0, 0.0
             self._psd = self._rf = self._offset = self._am = self._rds = None
             self._rds_fft = None
             self._env_sum, self._env, self._sync = 0.0, [], None
             for d in (self._peaks, self._pos, self._neg, self._over, self._mpx_ms, self._am_hist,
-                      self._rds_z):
+                      self._rds_z, self._valid_hist, self._vpeaks, self._exceed, self._noise_hist, self._asym):
                 d.clear()
-            self._over_prev = np.zeros(2, bool)
+            self._rf_slow, self._hold, self._pilot_am = None, 0, None
+            self._over_last = [-10 ** 9] * 2
+            self._exceed_hist[:] = 0
+            self._exceed_n = 0
             self._settle = SETTLE_UPDATES
             self.stats = None
         self._iq_energy += float(np.vdot(iq, iq).real)
@@ -862,13 +983,15 @@ class FmMeter(gr.sync_block):
         self._env.append(env)
         self._env_sum += float(np.sum(env))
         self._chunks.append(mpx.copy())
+        self._peak_chunks.append(peak.copy())
         self._count += len(mpx)
         if self._count >= self._period:
             self.last_update = time.monotonic()
             self.stats = self._measure(np.concatenate(self._chunks),
                                        self._iq_energy / self._count, self._env_sum / self._count,
-                                       np.concatenate(self._env))
-            self._chunks, self._count, self._iq_energy, self._env_sum, self._env = [], 0, 0.0, 0.0, []
+                                       np.concatenate(self._env), np.concatenate(self._peak_chunks))
+            self._chunks, self._peak_chunks, self._count, self._iq_energy, self._env_sum, self._env = \
+                [], [], 0, 0.0, 0.0, []
             if self._on_stats:
                 self._on_stats(self.stats)
         return len(input_items[0])
@@ -940,7 +1063,39 @@ class FmMeter(gr.sync_block):
 
     RDS_M = 640  # RDS phase: pilot and RDS as complex baseband at 6.4 kS/s (640 of the 10 Hz bins)
 
-    def _rds_phasor(self, x):
+    def _baseband(self, spec, lo, hi, centre):
+        """lo-hi Hz of a _block_spectrum() shifted down by `centre`, as complex
+        baseband at RDS_M samples per update (still Hann-windowed)."""
+        df = UPDATE_HZ
+        k0, k1, kc = round(lo / df), round(hi / df), round(centre / df)
+        buf = np.zeros(self.RDS_M, np.complex128)
+        buf[np.arange(k0 - kc, k1 - kc + 1) % self.RDS_M] = spec[k0:k1 + 1]
+        return np.fft.ifft(buf)
+
+    def _block_spectrum(self, x):
+        """One Hann-windowed FFT of an update's MPX (10 Hz bins), or None if short."""
+        n = int(QUAD_RATE / UPDATE_HZ)
+        if len(x) < n:
+            return None
+        if self._phase_win is None:
+            self._phase_win = np.hanning(n).astype(np.float32)
+        return np.fft.rfft(x[:n] * self._phase_win)
+
+    def _pilot_ripple(self, spec):
+        """The pilot's amplitude ripple in this update, RMS x sqrt(2) as % of its
+        level (as AM / multipath is), from 18-20 kHz: an echo modulates the
+        demodulated pilot's level as the carrier sweeps the channel's notches
+        (Inovonics' multipath indication). The window's middle half only, divided
+        out of the envelope."""
+        if self._pilot_w is None:
+            self._pilot_w = np.hanning(self.RDS_M)
+        env = np.abs(self._baseband(spec, 18e3, 20e3, 19e3))
+        mid = slice(self.RDS_M // 4, 3 * self.RDS_M // 4)
+        env = env[mid] / self._pilot_w[mid]
+        mean = float(np.mean(env))
+        return math.sqrt(2) * float(np.std(env)) / mean * 100 if mean > 0 else None
+
+    def _rds_phasor(self, spec):
         """RDS's 57 kHz subcarrier against the pilot's third harmonic, for one
         update: a unit phasor at twice the phase difference, or None.
 
@@ -952,21 +1107,9 @@ class FmMeter(gr.sync_block):
         Squaring removes the data's sign, so the sum's angle is 2 x phase.
         A delay anywhere in the chain moves the pilot's third harmonic and
         RDS alike, so it cancels."""
-        n = int(QUAD_RATE / UPDATE_HZ)
-        if len(x) < n:
+        if spec is None:
             return None
-        if self._phase_win is None:
-            self._phase_win = np.hanning(n).astype(np.float32)
-        spec = np.fft.rfft(x[:n] * self._phase_win)
-        df = QUAD_RATE / n
-        m = self.RDS_M
-
-        def baseband(lo, hi, centre):
-            k0, k1, kc = round(lo / df), round(hi / df), round(centre / df)
-            buf = np.zeros(m, np.complex128)
-            buf[np.arange(k0 - kc, k1 - kc + 1) % m] = spec[k0:k1 + 1]
-            return np.fft.ifft(buf)
-
+        baseband = functools.partial(self._baseband, spec)
         pilot = baseband(18.9e3, 19.1e3, 19e3)
         ref = pilot / np.maximum(np.abs(pilot), 1e-30)
         b = baseband(54.6e3, 59.4e3, 57e3) * np.conj(ref * ref * ref)
@@ -1007,7 +1150,48 @@ class FmMeter(gr.sync_block):
         fit = a * t + b * t * t
         return float(np.max(fit) - np.min(fit)) / 2
 
-    def _measure(self, x, iq_power, env_mean, env=None):
+    def _add_exceed(self, ax):
+        """Add a valid update's |MPX| (peak path) to the SM.1268 histogram of the
+        last EXCEED_MIN_S of valid time."""
+        hi = ax[ax >= EXCEED_LO_KHZ * 1e3 / MAX_DEV]
+        k = np.minimum(((hi * (MAX_DEV / 1e3) - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ).astype(np.int64), EXCEED_BINS - 1)
+        h = np.bincount(k, minlength=EXCEED_BINS).astype(np.uint16)  # (an update is < 65536 samples)
+        if len(self._exceed) >= EXCEED_MIN_S * UPDATE_HZ:
+            old, n = self._exceed.popleft()
+            self._exceed_hist -= old
+            self._exceed_n -= n
+        self._exceed.append((h, len(ax)))
+        self._exceed_hist += h
+        self._exceed_n += len(ax)
+
+    def _invalid(self, settling, iq_power):
+        """Why this update's peaks can't be trusted, or None (valid).
+
+        Slow site metrics decide whether the channel is fit for peaks at all:
+        AM / multipath, as SM.1268 judges it, over PEAK_AM_S. Fast events (an RF
+        level step; another station, flagged from outside) make it invalid at
+        once and for VALID_HOLD_S after. Gating on fast AM alone would tie the
+        gate to the programme (an echo's AM grows with the deviation's slew), so
+        the loudest moments would be the ones dropped."""
+        if settling:  # the filters' start-up isn't a level step: the average starts after it
+            self._rf_slow, self._hold = iq_power, 0
+            return 'settling'
+        step = iq_power > 0 and self._rf_slow > 0 and abs(_db(iq_power / self._rf_slow)) > VALID_STEP_DB
+        self._rf_slow = self._smooth(self._rf_slow, iq_power, VALID_RF_ALPHA)
+        if step or self.interference:
+            self._hold = round(VALID_HOLD_S * UPDATE_HZ) + 1
+        hold, self._hold = self._hold, max(self._hold - 1, 0)
+        if max(self._am_hist, default=0.0) * 100 >= PEAK_AM_PCT:
+            return 'multipath'
+        if max(self._noise_hist, default=0.0) * 100 >= PEAK_NOISE_PCT:
+            return 'noise'
+        if self.interference:
+            return self.interference
+        if hold:
+            return 'level step'
+        return None
+
+    def _measure(self, x, iq_power, env_mean, env=None, xp=None):
         # Carrier offset = DC of the MPX; Hann-weighted so bass leaks less,
         # then smoothed over a few seconds.
         if len(x) != len(self._dc_win):
@@ -1017,20 +1201,27 @@ class FmMeter(gr.sync_block):
         self._offset = self._smooth(self._offset, mean, 0.03)
         self._rf = self._smooth(self._rf, iq_power, 0.3)
         x = x - mean
+        # Peaks come from the peak path (demodulator roll-off undone, noise above
+        # 100 kHz removed); its filter passes DC unchanged.
+        xp = x if xp is None else xp - mean
         frames = x[:len(x) // self.NFFT * self.NFFT].reshape(-1, self.NFFT) * self._win
         # One-sided power per bin, so summing a band gives that band's variance.
         psd = np.mean(np.abs(np.fft.rfft(frames, axis=1)) ** 2, axis=0)
         psd *= 2.0 / (self.NFFT * np.sum(self._win ** 2)) * self._demod_comp
         self._psd = self._smooth(self._psd, psd, 0.25)
-        ax = np.abs(x)
-        self._peaks.append(_percentiles(ax, (99.9,))[0])
+        ax = np.abs(xp)
+        # A peak is the level the MPX exceeds for OVERMOD_MIN_S in this update, as the
+        # over-modulation counter's minimum: not a single sample (noise), but no
+        # shorter a trim than that, or a real peak's tip is cut and reads low.
+        trim = 100 * OVERMOD_MIN_S * QUAD_RATE / len(xp)
+        self._peaks.append(_percentiles(ax, (100 - trim,))[0])
         # Modulation-monitor style: +/- peaks (relative to the carrier's rest
         # frequency), 1 ms windows over 100%/110%, and BS.412 MPX power.
-        neg, pos = _percentiles(x, (0.05, 99.95))
+        neg, pos = _percentiles(xp, (trim, 100 - trim))
         self._pos.append(float(pos))
         self._neg.append(float(-neg))
-        # Count excursions (runs of 1 ms windows over the limit), like a
-        # monitor's peak counter, so one long burst counts once.
+        # Count bursts (1 ms windows over the limit, repeats within OVERMOD_GROUP_S
+        # as one), like a monitor's peak counter, so one long burst counts once.
         win = int(QUAD_RATE * OVERMOD_WINDOW_S)
         sustained = ax.copy()
         for k in range(1, max(1, round(QUAD_RATE * OVERMOD_MIN_S))):  # min with ax shifted by k (wrapping)
@@ -1038,15 +1229,15 @@ class FmMeter(gr.sync_block):
             np.minimum(sustained[:k], ax[-k:], out=sustained[:k])
         wmax = sustained[:len(x) // win * win].reshape(-1, win).max(axis=1)
         counts = []
+        group = round(OVERMOD_GROUP_S / OVERMOD_WINDOW_S)
         for i, limit in enumerate((1.0, 1.1)):
-            over = wmax > limit
-            starts = np.count_nonzero(over[1:] & ~over[:-1]) + int(bool(over[0]) and not self._over_prev[i])
-            self._over_prev[i] = bool(over[-1])
-            counts.append(starts)
-        if self._settle:  # filters still settling after a (re)start: their transients aren't programme
+            idx = np.flatnonzero(wmax > limit)
+            counts.append(int(np.count_nonzero(np.diff(idx, prepend=self._over_last[i]) > group)))
+            self._over_last[i] = (int(idx[-1]) if len(idx) else self._over_last[i]) - len(wmax)
+        settling = self._settle > 0  # filters still settling after a (re)start: their transients aren't programme
+        if settling:
             self._settle -= 1
         else:
-            self._over.append(counts)
             self._mpx_ms.append(float(np.mean(x * x)))
         # A clean FM carrier has constant amplitude; envelope ripple is
         # multipath / synchronous AM (plus noise on weak signals).
@@ -1055,6 +1246,23 @@ class FmMeter(gr.sync_block):
             self._am = self._smooth(self._am, math.sqrt(2 * max(iq_power - env_mean ** 2, 0.0)) / env_mean, 0.3)
             if not self._settle:  # filters' start-up ripple isn't multipath
                 self._am_hist.append(self._am)
+        # Noise above 100 kHz (Pira P275's quality metric): only noise and interference
+        # (an adjacent station, HD Radio) live there. FM noise rises as f^2, so it gives
+        # the noise left on the peak path (to 100 kHz), which reads as peak.
+        hf = float(np.sum(self._psd[self._hf_band]))
+        self._hf_noise = math.sqrt(hf * self._hf_to_peak)
+        if not settling:
+            self._noise_hist.append(self._hf_noise)
+        why = self._invalid(settling, iq_power)
+        if not settling:
+            self._valid_hist.append(why is None)
+            self._over.append(counts if why is None else [0, 0])
+        if why is None:
+            self._add_exceed(ax)
+        self._vpeaks.append(None if why else (float(pos), float(-neg)))
+        if not settling:
+            self._asym.append(float(pos + neg))   # (neg is negative)
+        vpeaks = [p for p in self._vpeaks if p]
         over = np.sum(self._over, axis=0) if self._over else np.zeros(2)
         sync_am = self._sync_am(x, env) if env is not None and not self._settle else None
 
@@ -1071,8 +1279,13 @@ class FmMeter(gr.sync_block):
         self._rds, rds_line = self._rds_power(x)
         # Report RDS only when its line stands clear of the search band's noise.
         rds_pct = math.sqrt(2 * self._rds) * RDS_CREST * 100 if rds_line >= RDS_MIN_LINE else 0.0
+        spec = self._block_spectrum(x) if pilot_pct > 3.0 else None
+        # The pilot's own amplitude ripple (smoothed like AM), while there is a pilot.
+        ripple = self._pilot_ripple(spec) if spec is not None and not self._settle else None
+        self._pilot_am = None if spec is None else self._smooth(self._pilot_am, ripple, 0.3) if ripple is not None \
+            else self._pilot_am
         # RDS phase against the pilot's third harmonic, while both are on air.
-        z = self._rds_phasor(x) if pilot_pct > 3.0 and rds_pct > 0.5 else None
+        z = self._rds_phasor(spec) if rds_pct > 0.5 else None
         if z is None:
             self._rds_z.clear()
         else:
@@ -1089,13 +1302,33 @@ class FmMeter(gr.sync_block):
             'peak_dev_khz': max(self._peaks) * MAX_DEV / 1e3,
             'pos_pct': max(self._pos) * 100,
             'neg_pct': max(self._neg) * 100,
-            'over100_min': int(over[0]),
+            'over100_min': int(over[0]),     # (valid time only)
             'over110_min': int(over[1]),
+            # validity: this update, why not, the share of the last VALID_WINDOW_S that was valid,
+            # and the peaks of the last 1 s's valid updates (None: none valid)
+            'valid': why is None,
+            'invalid_why': why,
+            'valid_pct': 100 * sum(self._valid_hist) / len(self._valid_hist) if self._valid_hist else None,
+            'valid_window_s': len(self._valid_hist) / UPDATE_HZ,
+            'valid_pos_pct': max(p for p, _ in vpeaks) * 100 if vpeaks else None,
+            'valid_neg_pct': max(n for _, n in vpeaks) * 100 if vpeaks else None,
+            # SM.1268: histogram of |deviation| over the last EXCEED_MIN_S of valid time (exceed_fraction())
+            'exceed_hist': self._exceed_hist.copy(),
+            'exceed_n': self._exceed_n,
+            'exceed_valid_s': len(self._exceed) / UPDATE_HZ,
             # BS.412: 0 dBr = power of a sine at +/-19 kHz deviation.
             'mpx_dbr': _db(np.mean(self._mpx_ms) * MAX_DEV ** 2 / (19e3 ** 2 / 2)) if self._mpx_ms else -math.inf,
             'mpx_window_s': len(self._mpx_ms) / UPDATE_HZ,
             'am_pct': (self._am or 0.0) * 100,
             'am_max_pct': max(self._am_hist, default=0.0) * 100,  # over the last PEAK_AM_S
+            # secondary quality checks: MPX noise in HF_LO_HZ-HF_HI_HZ (dB re a 100% sine), the noise it
+            # means on the peak path (% of 75 kHz, and its last 10 s maximum), the pilot's level ripple (%)
+            'hf_noise_db': _db(hf / 0.5),
+            'peak_noise_pct': self._hf_noise * 100,
+            'peak_noise_max_pct': max(self._noise_hist, default=0.0) * 100,
+            'pilot_am_pct': self._pilot_am,
+            # + peak minus - peak, % (mean over ASYM_S): a station on one side pulls one way (Inovonics)
+            'asym_pct': float(np.mean(self._asym)) * 100 if self._asym else None,
             'sync_am_pct': None if sync_am is None else sync_am * 100,
             'pilot_pct': pilot_pct,
             'rds_pct': rds_pct,
@@ -2688,6 +2921,8 @@ class FmStation(gr.hier_block2):
         self.connect(self, chan, demod)
         self.connect(chan, _batch(gr.sizeof_gr_complex, FM_BATCH), (self.meter, 0))
         self.connect(demod, _batch(gr.sizeof_float, FM_BATCH), (self.meter, 1))
+        peak_fir = filter.fir_filter_fff(1, peak_taps().astype(np.float32).tolist())
+        self.connect(demod, peak_fir, _batch(gr.sizeof_float, FM_BATCH), (self.meter, 2))
         # stereo
         self.connect(demod, pilot_bpf, pll)
         self.connect(pll, (square, 0))
@@ -3445,7 +3680,7 @@ class Annunciator(QtWidgets.QWidget):
     COLS = 4
     SHORT = {'CARRIER': 'CARR', 'SILENCE': 'SIL', 'OVERMOD': 'OVMD', 'PILOT': 'PILOT', 'PILOT_SPEC': 'P.SPEC',
              'SUBCARRIERS': 'SUBS', 'FREQUENCY': 'FREQ', 'RDS': 'RDS', 'BACKUP': 'N+1', 'PI': 'PI', 'ALERT': 'ALERT',
-             'DATA': 'DATA'}
+             'DATA': 'DATA', 'EXCEEDANCE': 'SM1268'}
     # state: (fill, text, outline or None, hatched)
     LOOK = {'clear': ('#26282d', '#7d838a', None, False),
             'waiting': ('#26282d', '#4f545a', None, False),
@@ -3453,9 +3688,9 @@ class Annunciator(QtWidgets.QWidget):
             'pending': ('#4a3a1c', '#f0a35e', None, False),
             'suppressed': ('#26282d', '#f0a35e', None, True),
             'off': (None, '#4f545a', '#3a3d44', False)}
-    MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, or no readings)',
+    MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, no readings, or under 15 min of valid time)',
              'raised': 'RAISED', 'pending': 'its condition holds; raises once its delay has run',
-             'suppressed': 'not judged now: reception not clean enough for the technical rules',
+             'suppressed': 'not judged now: reception not clean or not valid enough',
              'off': 'switched off for this receiver (Settings)'}
 
     def __init__(self):
@@ -4177,6 +4412,7 @@ ALARM_DEFS = (
     ('CARRIER', 'carrier low or lost', 5),
     ('SILENCE', 'audio silence', 10),
     ('OVERMOD', 'over-modulation', 3),
+    ('EXCEEDANCE', 'over-deviation over 15 min (ITU-R SM.1268: over 1e-6 of samples above the limit + 2 kHz)', 10),
     ('PILOT', 'stereo pilot lost', 5),
     ('PILOT_SPEC', 'stereo pilot out of tolerance', 10),
     ('SUBCARRIERS', 'subcarrier injection over the limit', 10),
@@ -4443,6 +4679,25 @@ def _rds_phase_html(phase, mode, level):
     return _coloured(f'{round(phase):+d}\u00b0 ({mode}, locked)', level)
 
 
+def _valid_html(pct, window_s, why, level):
+    """'97% of 15 min', with why the reception isn't valid now (if it isn't)."""
+    if pct is None:
+        return '-'
+    span = f'{window_s / 60:.0f} min' if window_s >= 60 else f'{window_s:.0f} s'
+    now = f'  <span style="color:{DIM}">now: {_html(why)}</span>' if why else ''
+    return _coloured(f'{pct:.0f}% of {span}', level) + now
+
+
+def _exceed_html(frac, khz, valid_s, level):
+    """'0.20 ppm of samples over 78.5 kHz (limit 1 ppm), 12 of 15 min valid'."""
+    if frac is None:
+        return '-'
+    held = (f'{valid_s / 60:.0f} of {EXCEED_MIN_S / 60:.0f} min valid' if valid_s < EXCEED_MIN_S
+            else f'last {EXCEED_MIN_S / 60:.0f} min valid')
+    return (_coloured(f'{frac * 1e6:.2f} ppm of samples over {khz:.1f} kHz', level)
+            + f'  <span style="color:{DIM}">(limit {EXCEED_FRACTION * 1e6:g} ppm; {held})</span>')
+
+
 def _sync_am_db(pct):
     return 20 * math.log10(pct / 100) if pct else -math.inf
 
@@ -4547,6 +4802,7 @@ class StationPanel(QtCore.QObject):
         self._data_lost = []
         self._data_codes = {}  # service: its code for a name ('7A', 'SCA67')
         self._rt_alarm = ''
+        self._reset_identity()
         self.rate = 0.0
         self._groups = deque()
         self.readings = {}      # the latest _measure(): every reading as plain values
@@ -4803,8 +5059,9 @@ class StationPanel(QtCore.QObject):
                                   'last 5 minutes (log height). Red: over the limit in force; amber: over 100%')
         box.addWidget(dim_label('Peak distribution \u00b7 last 5 min'))
         box.addWidget(self.peak_hist)
-        box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'L / R', 'L+R / L−R',
-                                'Limit'), 2, wide=('Limit',)))
+        box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R',
+                                'L+R / L−R', 'Valid time', 'Limit', 'SM.1268'), 2,
+                               wide=('Valid time', 'Limit', 'SM.1268')))
         box.addStretch(1)
         cards.addWidget(mod, 0, 0)
 
@@ -4823,9 +5080,10 @@ class StationPanel(QtCore.QObject):
         self.mpx_tapes['offset'].setToolTip('Carrier offset; the grey band is the tolerance (includes the SDR\'s own error)')
         for t in self.mpx_tapes.values():
             box.addWidget(t)
-        box.addLayout(self._kv(('RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'RDS phase', 'Sync AM',
-                                'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 2,
-                               wide=('RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal')))
+        box.addLayout(self._kv(('RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase',
+                                'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 2,
+                               wide=('RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz',
+                                     'IBOC signal')))
         self.absent['mpx'] = dim_label()
         box.addWidget(self.absent['mpx'])
         box.addStretch(1)
@@ -5116,6 +5374,7 @@ class StationPanel(QtCore.QObject):
         self._data_lost = []
         self._data_codes = {}
         self._rt_alarm = ''
+        self._reset_identity()
         self.readings = {}
         self.history.reset()
         for m in self.meters.values():
@@ -5131,6 +5390,33 @@ class StationPanel(QtCore.QObject):
         self.peak_hist.set_data([], None)
         self.gonio.set_data(None)
         self.mpx.set_data(None)
+
+    def _reset_identity(self):
+        self._pi_seen = (None, 0.0)    # (PI, decoded unchanged since)
+        self._pi_ref = None            # the PI held PI_LEARN_S since tuning
+        self._interference, self._interference_until = None, 0.0
+
+    def _other_station(self, pi):
+        """Why another station is suspected on the channel, or None: its PI
+        decoded instead of this station's (the expected one, else the one held
+        PI_LEARN_S since tuning; the expected one only while the PI alarm is on). Co-channel (tropospheric ducting, sporadic E)
+        and intermod are caught by their signature, not by AM depth alone;
+        Inovonics' co-channel alarm is the same PI check. Peaks are withheld
+        until INTERFERENCE_HOLD_S after the last sign (FmMeter.interference)."""
+        now = time.monotonic()
+        if pi:
+            if pi != self._pi_seen[0]:
+                self._pi_seen = (pi, now)
+            elif self._pi_ref is None and now - self._pi_seen[1] >= PI_LEARN_S:
+                self._pi_ref = pi
+        # (with the PI alarm switched off, the expected PI isn't acted on here either)
+        ref = (self.settings.expected_pi if self.settings.alarms.get('PI', True) else '') or self._pi_ref
+        if pi and ref and pi != ref:
+            self._interference, self._interference_until = f'PI {pi}, not {ref}', now + INTERFERENCE_HOLD_S
+        elif now >= self._interference_until:
+            self._interference = None
+        self.station.meter.interference = self._interference
+        return self._interference
 
     def _rds_rate(self):
         """Groups per second over the last 3 s."""
@@ -5267,7 +5553,25 @@ class StationPanel(QtCore.QObject):
                      stereo_mode='stereo' if st.stereo else 'forced mono' if st.pilot else 'mono',
                      pos_pct=s['pos_pct'], neg_pct=s['neg_pct'], limit_pct=limit, limit_why=why,
                      dev_khz=s['peak_dev_khz'], over100_min=s['over100_min'], over110_min=s['over110_min'],
-                     mpx_dbr=s['mpx_dbr'], mpx_window_s=s['mpx_window_s'], mpx_db=s['mpx_db'])
+                     mpx_dbr=s['mpx_dbr'], mpx_window_s=s['mpx_window_s'], mpx_db=s['mpx_db'],
+                     valid=s['valid'] and not self._interference,
+                     invalid_why=self._interference or s['invalid_why'], valid_pct=s['valid_pct'],
+                     valid_window_s=s['valid_window_s'], hf_noise_db=s['hf_noise_db'],
+                     peak_noise_pct=s['peak_noise_pct'], pilot_am_pct=s['pilot_am_pct'], asym_pct=s['asym_pct'])
+            if s['asym_pct'] is not None and abs(s['asym_pct']) >= ASYM_WARN_PCT:
+                lv['asym_pct'] = 'warn'
+            if s['peak_noise_max_pct'] >= PEAK_NOISE_PCT:
+                lv['hf_noise_db'] = 'warn'
+            if s['pilot_am_pct'] is not None and s['pilot_am_pct'] >= PILOT_AM_WARN_PCT:
+                lv['pilot_am_pct'] = 'warn'
+            if s['valid_pct'] is not None and s['valid_pct'] < VALID_WARN_PCT:
+                lv['valid_pct'] = 'warn'
+            # SM.1268 against this station's own limit (FCC / ISED: with its subcarrier allowance)
+            r['exceed_khz'] = limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ
+            r['exceed_frac'] = exceed_fraction(s, r['exceed_khz'])
+            r['exceed_valid_s'] = s['exceed_valid_s']
+            if r['exceed_frac'] is not None and r['exceed_frac'] > EXCEED_FRACTION:
+                lv['exceed_frac'] = 'alarm' if s['exceed_valid_s'] >= EXCEED_MIN_S else 'warn'
             # RDS phase only for a station with RDS: an SCA's skirt or noise in the 57 kHz band has a phase too.
             r['rds_phase_deg'] = s['rds_phase_deg'] if total else None
             r['rds_phase_mode'], level = rds_phase(r['rds_phase_deg'], s['rds_lock'])
@@ -5391,18 +5695,34 @@ class StationPanel(QtCore.QObject):
             v['RDS phase'].setText(_rds_phase_html(r['rds_phase_deg'], r['rds_phase_mode'], lv.get('rds_phase_deg')))
             v['Sync AM'].setText(_sync_am_html(r['sync_am_pct'], lv.get('sync_am_pct'), r['sync_am_multipath']))
             v['IBOC signal'].setText(self._iboc_text(r['iboc_found'], r['iboc_dbc']))
+            v['Noise >100 kHz'].setText(
+                _coloured(_num(r['hf_noise_db'], 'dB', '.0f'), lv.get('hf_noise_db'))
+                + f'  <span style="color:{DIM}">(±{r["peak_noise_pct"] * MAX_DEV / 1e5:.2f} kHz RMS on peaks)</span>')
+            v['Pilot AM'].setText('-' if r['pilot_am_pct'] is None else
+                                  _coloured(f"{r['pilot_am_pct']:.1f}%", lv.get('pilot_am_pct')))
             for khz in (67, 92):
                 pct = r[f'sca{khz}_pct']
                 v[f'SCA {khz} kHz'].setText(
                     f'{pct:.1f}%  ' + self._sca_kind_html(r[f'sca{khz}_kind'], r[f'sca{khz}_baud']) if pct is not None
                     else f'<span style="color:{DIM}">none</span>')
             self._sca_sources({khz: {'kind': r[f'sca{khz}_kind']} for khz in (67, 92)})
+            asym = ''
+            if lv.get('asym_pct'):  # an adjacent station pulls the deviation its way
+                side = 'above' if r['asym_pct'] > 0 else 'below'
+                asym = '  ' + _coloured(f"{'+' if r['asym_pct'] > 0 else '−'} {abs(r['asym_pct']):.0f}% higher: "
+                                        f"a station {side}?", 'warn')
             v['Peak + / −'].setText(f"+{_pct_html(r['pos_pct'], lv.get('pos_pct'))}"
-                                    f" / −{_pct_html(r['neg_pct'], lv.get('neg_pct'))}")
+                                    f" / −{_pct_html(r['neg_pct'], lv.get('neg_pct'))}" + asym)
+            v['Peak balance'].setText('-' if r['asym_pct'] is None else asym.strip() if asym else
+                                      f"even ({r['asym_pct']:+.1f}%)")
             v['Limit'].setText(f"{r['limit_pct']:.1f}%  <span style=\"color:{DIM}\">({_html(r['limit_why'])})</span>")
             v['Peak deviation'].setText(f"{r['dev_khz']:.1f} kHz  ({r['dev_khz'] / 0.75:.0f}%)")
             v['Over 100%'].setText(f"{r['over100_min']} /min")
             v['Over 110%'].setText(f"{r['over110_min']} /min")
+            v['Valid time'].setText(_valid_html(r['valid_pct'], r['valid_window_s'], r['invalid_why'],
+                                                lv.get('valid_pct')))
+            v['SM.1268'].setText(_exceed_html(r['exceed_frac'], r['exceed_khz'], r['exceed_valid_s'],
+                                              lv.get('exceed_frac')))
             window = '' if r['mpx_window_s'] >= MPX_POWER_S else f"  ({r['mpx_window_s']:.0f} s)"
             v['MPX power'].setText(_num(r['mpx_dbr'], 'dBr', '+.1f') + window)
             self.mpx.set_data(r['mpx_db'])
@@ -5451,8 +5771,8 @@ class StationPanel(QtCore.QObject):
         lv = r['levels']
         peak = max(r['pos_pct'], r['neg_pct'])
         mod_state = lv.get('pos_pct') if r['pos_pct'] >= r['neg_pct'] else lv.get('neg_pct')
-        if mod_state == 'alarm' and lv.get('am_pct'):
-            mod_state = 'warn'   # over the limit, but multipath: not judged
+        if mod_state == 'alarm' and not r.get('valid', True):
+            mod_state = 'warn'   # over the limit, but reception not valid: not judged
         self.tapes['mod'].set_value(peak, f"+{r['pos_pct']:.0f} / −{r['neg_pct']:.0f}%", mod_state,
                                     limit=r['limit_pct'], band=(85, r['limit_pct']))
         self.tapes['mod'].setToolTip(f"Peak modulation +{r['pos_pct']:.0f}% / −{r['neg_pct']:.0f}% "
@@ -5469,7 +5789,7 @@ class StationPanel(QtCore.QObject):
         for key in ('pos', 'neg'):
             pct = r[f'{key}_pct']
             state = lv.get(f'{key}_pct')
-            if state == 'alarm' and lv.get('am_pct'):
+            if state == 'alarm' and not r.get('valid', True):
                 state = 'warn'
             self.peak_tapes[key].set_value(pct, f"{pct:.0f}%  {pct * 0.75:.1f} kHz", state, limit=lim, band=(85, lim))
         self.limit_note.setText(f'limit {lim:.1f}% \u24d8')
@@ -5498,7 +5818,8 @@ class StationPanel(QtCore.QObject):
                                      ('Alt. freqs', not r['af']), ('Clock', not r['clock']),
                                      ('Data services', not r['data_services'] and not r['data_lost'])) if gone]
         if r['has_signal']:
-            mpx = [n for n, gone in (('Pilot freq', r['pilot_hz'] is None), ('RDS injection', r['pi'] is None),
+            mpx = [n for n, gone in (('Pilot freq', r['pilot_hz'] is None), ('Pilot AM', r['pilot_am_pct'] is None),
+                                     ('RDS injection', r['pi'] is None),
                                      ('RDS phase', r['rds_phase_mode'] is None), ('Sync AM', r['sync_am_pct'] is None),
                                      ('SCA 67 kHz', r['sca67_pct'] is None), ('SCA 92 kHz', r['sca92_pct'] is None),
                                      ('IBOC signal', r['iboc_found'] != 'detected')) if gone]
@@ -5508,7 +5829,7 @@ class StationPanel(QtCore.QObject):
                 if w.isHidden() != (name in hidden):
                     w.setVisible(name not in hidden)
         short = {'SCA 67 kHz': 'SCA 67', 'SCA 92 kHz': 'SCA 92', 'IBOC signal': 'IBOC', 'RDS injection': 'RDS',
-                 'Pilot freq': 'pilot', 'RDS phase': 'RDS phase', 'Sync AM': 'sync AM'}
+                 'Pilot freq': 'pilot', 'Pilot AM': 'pilot AM', 'RDS phase': 'RDS phase', 'Sync AM': 'sync AM'}
         on_air = [short[n] for n in mpx if n in ('SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal', 'RDS injection')]
         self.absent['mpx'].setText('Not on air: ' + ' \u00b7 '.join(on_air) if on_air else '')
         self.absent['mpx'].setVisible(bool(on_air))
@@ -5528,11 +5849,11 @@ class StationPanel(QtCore.QObject):
         parts.append(f'Rx {self.slot + 1}' + (f' {_html(self.settings.name)}' if self.settings.name else ''))
         return ' · '.join(parts)
 
-    def _alarm_states(self, conditions, clean):
+    def _alarm_states(self, conditions, suppressed=(), waiting=()):
         """{alarm: state} for an annunciator: 'off' (switched off for this receiver),
-        'raised', 'waiting' (not judged yet: grace period after tuning, or no
-        readings), 'suppressed' (not judged now: reception not clean enough for the
-        technical rules), 'pending' (its condition holds, its delay is running) or 'clear'."""
+        'raised', 'waiting' (not judged yet: grace period after tuning, no readings,
+        or in `waiting`: not enough held yet), 'suppressed' (in `suppressed`, not judged now: reception not clean
+        or not valid enough), 'pending' (its condition holds, its delay is running) or 'clear'."""
         out = {}
         pending = self.alarms.pending()
         for name, *_ in ALARM_DEFS:
@@ -5540,9 +5861,9 @@ class StationPanel(QtCore.QObject):
                 out[name] = 'off'
             elif name in self.alarms.active:
                 out[name] = 'raised'
-            elif conditions is None or not self.alarms.ready():
+            elif conditions is None or not self.alarms.ready() or name in waiting:
                 out[name] = 'waiting'
-            elif name in JUDGED_CLEAN and not clean:
+            elif name in suppressed:
                 out[name] = 'suppressed'
             elif name in pending:
                 out[name] = 'pending'
@@ -5561,7 +5882,7 @@ class StationPanel(QtCore.QObject):
         rate = r['rds_rate']
 
         changes = []
-        conditions, clean = None, False
+        conditions, suppressed, waiting = None, set(), set()
         if s and a:
             cfg = self.settings
             carrier = s['rf_dbfs'] < -75 or s['snr_db'] < cfg.min_snr_db
@@ -5571,9 +5892,17 @@ class StationPanel(QtCore.QObject):
             pi = f.get(0, '').strip().upper()
             # Multipath and noise spikes look like over-modulation (and upset the
             # other readings); only judge the technical rules on clean reception,
-            # and peaks only on reception clean enough for them (ITU-R SM.1268).
+            # and peaks only from the valid time of the last second (ITU-R SM.1268).
             clean = not carrier and s['am_pct'] < CLEAN_AM_PCT and s['snr_db'] > 25
-            peaks_clean = clean and s['am_max_pct'] < PEAK_AM_PCT
+            other = self._other_station(pi)
+            valid_peak = (max(s['valid_pos_pct'], s['valid_neg_pct'])
+                          if clean and not other and s['valid_pos_pct'] is not None else None)
+            suppressed = set(JUDGED_CLEAN) if not clean else set()
+            if valid_peak is None:
+                suppressed.add('OVERMOD')
+            exceed = r.get('exceed_frac')
+            if s['exceed_valid_s'] < EXCEED_MIN_S:
+                waiting.add('EXCEEDANCE')
             rules = self.rules()
             lim = cfg.limits(self.country)
             limit, _ = mod_limit(rules, lim, s)
@@ -5586,7 +5915,8 @@ class StationPanel(QtCore.QObject):
             conditions = {
                 'CARRIER': carrier,
                 'SILENCE': silent,
-                'OVERMOD': (peaks_clean and max(s['pos_pct'], s['neg_pct']) > limit),
+                'OVERMOD': valid_peak is not None and valid_peak > limit,
+                'EXCEEDANCE': ('EXCEEDANCE' not in waiting and exceed is not None and exceed > EXCEED_FRACTION),
                 'PILOT_SPEC': (clean and st.pilot and (not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']
                                                        or (st.pilot_hz is not None
                                                            and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']))),
@@ -5608,7 +5938,7 @@ class StationPanel(QtCore.QObject):
                     self.history.log_alarm(time.time(), name, raised)
                 details = self._alarm_details(s, a, lim, limit, subcarriers, rate, pi)
                 changes = [(desc, raised, details.get(name, '')) for name, desc, raised in changes]
-        r['alarms'] = self._alarm_states(conditions, clean)
+        r['alarms'] = self._alarm_states(conditions, suppressed, waiting)
         self.history.add(time.time(), r)
         if time.monotonic() - self._trend_t >= TREND_S:
             self._trend_t = time.monotonic()
@@ -5675,6 +6005,11 @@ class StationPanel(QtCore.QObject):
         why = (f"AM / multipath {r['am_pct']:.1f}%, S/N {_num(r['snr_db'], 'dB', '.0f')}"
                f" (judged under {CLEAN_AM_PCT:g}% AM and over 25 dB S/N; over-modulation under {PEAK_AM_PCT:g}%)")
         notes = {name: why for name, state in r['alarms'].items() if state == 'suppressed'}
+        if r['alarms'].get('OVERMOD') == 'suppressed' and r.get('invalid_why'):
+            notes['OVERMOD'] = f"reception not valid for peaks now: {r['invalid_why']}"
+        if r.get('exceed_frac') is not None:
+            notes['EXCEEDANCE'] = (f"{r['exceed_frac'] * 1e6:.2f} ppm of samples over {r['exceed_khz']:.1f} kHz; "
+                                   f"{r['exceed_valid_s'] / 60:.0f} of {EXCEED_MIN_S / 60:.0f} min of valid time held")
         if r['alarms'].get('OVERMOD') in ('raised', 'pending', 'clear'):
             notes['OVERMOD'] = f"peak +{r['pos_pct']:.0f}% / \u2212{r['neg_pct']:.0f}%, limit {r['limit_pct']:.1f}%"
         return notes
@@ -5697,7 +6032,11 @@ class StationPanel(QtCore.QObject):
                        f'(alarm below {cfg.min_snr_db:g} dB S/N or -75 dBFS)',
             'SILENCE': f'momentary loudness {num(a["momentary"])} LUFS '
                        f'(alarm below {cfg.silence_lufs:g} LUFS for {cfg.silence_s} s)',
-            'OVERMOD': f'peak +{num(s["pos_pct"])}% / -{num(s["neg_pct"])}%, limit {num(limit)}%',
+            'OVERMOD': f'peak +{num(s["valid_pos_pct"])}% / -{num(s["valid_neg_pct"])}% (valid reception), '
+                       f'limit {num(limit)}%',
+            'EXCEEDANCE': (f'{num((exceed_fraction(s, limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ) or 0) * 1e6, ".2f")} '
+                           f'ppm of samples over {num(limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ)} kHz in the last '
+                           f'{EXCEED_MIN_S / 60:.0f} min of valid reception (limit {EXCEED_FRACTION * 1e6:g} ppm)'),
             'PILOT_SPEC': f'pilot {num(s["pilot_pct"])}%{pilot_hz} (allowed {lim["pilot_min_pct"]:g}-'
                           f'{lim["pilot_max_pct"]:g}%, 19000 +/- {lim["pilot_tol_hz"]:g} Hz)',
             'SUBCARRIERS': f'subcarriers {num(subcarriers)}% total (RDS {num(s["rds_pct"])}%'

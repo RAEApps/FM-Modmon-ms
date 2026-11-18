@@ -437,6 +437,18 @@ function readouts(r) {
     o['Over 100%'] = `${r.over100_min} /min`; o['Over 110%'] = `${r.over110_min} /min`;
     o['MPX power'] = `${sgn(r.mpx_dbr)} dBr` + (r.mpx_window_s >= 60 ? '' : `  (${fx(r.mpx_window_s, 0)} s)`);
     o['Limit'] = [`${fx(r.limit_pct)}%  `, [`(${r.limit_why})`, 'dimt']];
+    const span = r.valid_window_s >= 60 ? `${(r.valid_window_s / 60).toFixed(0)} min` : `${fx(r.valid_window_s, 0)} s`;
+    o['Valid time'] = r.valid_pct == null ? '-' : [[`${fx(r.valid_pct, 0)}% of ${span}`, L('valid_pct')],
+                                                    ...(r.invalid_why ? [[`  now: ${r.invalid_why}`, 'dimt']] : [])];
+    const held = r.exceed_valid_s < 900 ? `${(r.exceed_valid_s / 60).toFixed(0)} of 15 min valid` : 'last 15 min valid';
+    o['SM.1268'] = r.exceed_frac == null ? '-' : [[`${(r.exceed_frac * 1e6).toFixed(2)} ppm of samples over ${fx(r.exceed_khz)} kHz`,
+                                                   L('exceed_frac')], [`  (limit 1 ppm; ${held})`, 'dimt']];
+    o['Peak balance'] = r.asym_pct == null ? '-' : L('asym_pct')
+      ? [[`${r.asym_pct > 0 ? '+' : '−'} ${Math.abs(r.asym_pct).toFixed(0)}% higher: a station ${r.asym_pct > 0 ? 'above' : 'below'}?`, 'warn']]
+      : `even (${sgn(r.asym_pct)}%)`;
+    o['Noise >100 kHz'] = [[num(r.hf_noise_db, 'dB', 0), L('hf_noise_db')],
+                           [`  (±${fx(r.peak_noise_pct * 0.75, 2)} kHz RMS on peaks)`, 'dimt']];
+    o['Pilot AM'] = r.pilot_am_pct == null ? '-' : [[fx(r.pilot_am_pct) + '%', L('pilot_am_pct')]];
   }
   if (r.has_audio) {
     const pct = k => [fx(r[k], 0) + '%', L(k)];
@@ -460,7 +472,7 @@ function collapse(r) {
   else rds = [['PTYN', !r.ptyn], ['ECC', r.ecc == null], ['ODA', !(r.oda || []).length], ['Alt. freqs', !r.af],
               ['Clock', !r.clock], ['Data services', !(r.data_services || []).length && !(r.data_lost || []).length]]
              .filter(x => x[1]).map(x => x[0]);
-  if (r.has_signal) mpx = [['Pilot freq', r.pilot_hz == null], ['RDS injection', r.pi == null], ['RDS phase', r.rds_phase_mode == null],
+  if (r.has_signal) mpx = [['Pilot freq', r.pilot_hz == null], ['Pilot AM', r.pilot_am_pct == null], ['RDS injection', r.pi == null], ['RDS phase', r.rds_phase_mode == null],
                            ['Sync AM', r.sync_am_pct == null], ['SCA 67 kHz', r.sca67_pct == null], ['SCA 92 kHz', r.sca92_pct == null],
                            ['IBOC signal', r.iboc_found !== 'detected']].filter(x => x[1]).map(x => x[0]);
   const short = {'SCA 67 kHz': 'SCA 67', 'SCA 92 kHz': 'SCA 92', 'IBOC signal': 'IBOC', 'RDS injection': 'RDS'};
@@ -744,7 +756,8 @@ function buildReceiver(r, alarmDefs) {
   p.hist = h('canvas', 'hist');
   p.hist.title = 'How peak modulation spreads: the share of updates at each peak level over the last 5 minutes (log height). Red: over the limit in force; amber: over 100%';
   mod.append(p.peak.pos.el, p.peak.neg.el, h('div', 'cap', 'Peak distribution · last 5 min'), p.hist,
-             add(kv(['Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'L / R', 'L+R / L−R', 'Limit'], 2, ['Limit'])));
+             add(kv(['Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
+                       'Valid time', 'Limit', 'SM.1268'], 2, ['Valid time', 'Limit', 'SM.1268'])));
   // multiplex
   const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'));
   p.mpx = h('canvas', 'mpx');
@@ -752,8 +765,9 @@ function buildReceiver(r, alarmDefs) {
             offset: makeTape('Offset', -3000, 3000, {origin: 0, band: [-1000, 1000], nameW: 50, valW: 110})};
   p.absMpx = h('div', 'absent');
   mpx.append(p.mpx, p.mpxT.snr.el, p.mpxT.pilot.el, p.mpxT.offset.el,
-             add(kv(['RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'], 2,
-                    ['RDS phase', 'Sync AM', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'])), p.absMpx);
+             add(kv(['RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase', 'Sync AM', 'Noise >100 kHz',
+                     'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'], 2,
+                    ['RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'])), p.absMpx);
   // RDS
   p.rdsNote = h('span', 'x');
   const rds = card('RDS', p.rdsNote);
@@ -866,14 +880,14 @@ function updateReceiver(p, r) {
   if (rd.has_signal) {
     const peak = Math.max(rd.pos_pct, rd.neg_pct);
     let ms = rd.pos_pct >= rd.neg_pct ? lv.pos_pct : lv.neg_pct;
-    if (ms === 'alarm' && lv.am_pct) ms = 'warn';
+    if (ms === 'alarm' && rd.valid === false) ms = 'warn';   // reception not valid: not judged
     p.tapes.mod.set(peak, `+${fx(rd.pos_pct, 0)} / −${fx(rd.neg_pct, 0)}%`, ms, limit, [85, limit]);
     p.tapes.rf.set(rd.rf_dbfs, num(rd.rf_dbfs, 'dBFS', 0), rd.rf_dbfs < -75 ? 'alarm' : null);
     p.tapes.am.set(rd.am_pct, fx(rd.am_pct) + '%', lv.am_pct);
     p.tapes.rf.el.title = `RF level ${num(rd.rf_dbfs, 'dBFS')}, MPX S/N ${num(rd.snr_db, 'dB')}`;
     for (const k of ['pos', 'neg']) {
       const v = rd[k + '_pct']; let s = lv[k + '_pct'];
-      if (s === 'alarm' && lv.am_pct) s = 'warn';
+      if (s === 'alarm' && rd.valid === false) s = 'warn';
       p.peak[k].set(v, `${fx(v, 0)}%  ${fx(v * 0.75)} kHz`, s, limit, [85, limit]);
     }
     setText(p.limitNote, `limit ${fx(limit)}% ⓘ`); p.limitNote.title = 'Over-modulation limit in force: ' + rd.limit_why;
