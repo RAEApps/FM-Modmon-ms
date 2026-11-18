@@ -5837,6 +5837,18 @@ class HelpDialog(QtWidgets.QDialog):
         layout.addWidget(close)
 
 
+class _WebServer(ThreadingHTTPServer):
+    """On Windows, SO_REUSEADDR (http.server's default) lets a second process
+    bind the same port without error, and the two then answer each other's
+    requests. Bind it exclusively there, so a port in use fails to open."""
+    allow_reuse_address = os.name != 'nt'
+
+    def server_bind(self):
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class WebView:
     """The web version of the app: fm-modmon-ms-web.html draws the receiver panels
     from /state.json (rebuilt at UPDATE_HZ while anyone is watching), sends
@@ -5870,7 +5882,7 @@ class WebView:
         self.commands = queue.Queue()  # (action, args, Future or None) for the GUI thread
         self.sessions = {}             # token -> last heard from (monotonic)
         self.last_hit = 0.0
-        self.server = ThreadingHTTPServer((bind, port), self._handler())
+        self.server = _WebServer((bind, port), self._handler())
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
