@@ -133,6 +133,21 @@ states = settle(p, rds_seen=True)
 check('silent programme: RDS lost, not N+1', states[-1]['RDS'] == 'raised' and states[-1]['BACKUP'] == 'clear',
       (states[-1]['RDS'], states[-1]['BACKUP']))
 
+# ---- the large MPX spectrum window: opens on a click, follows the panel, holds peaks
+p, st = panel(left=[(997, 0.4)], right=[(1600, 0.4)], pilot=0.09, rds=0.04)
+settle(p, n=3)
+p.mpx.on_click()
+win = p._mpx_win
+check('MPX window opens on the spectrum and shows the readings', win is not None and win.isVisible()
+      and np.array_equal(win.spectrum._db, p.readings['mpx_db']) and 'RDS injection:' in win.readouts.text())
+db = p.readings['mpx_db']
+win.spectrum.set_data(db - 20)          # everything 20 dB lower: the hold falls slowly from the old trace
+check('peak hold falls MPX_HOLD_DECAY_DB per update', np.allclose(win.spectrum._hold, db - rm.MPX_HOLD_DECAY_DB),
+      float(np.max(np.abs(win.spectrum._hold - db))))
+p.reset_display()
+check('retuning clears the peak hold', win.spectrum._hold is None)
+win.close()
+
 # ---- IBOC lines from readings
 ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,
       'artist': 'A', 'title': 'B', 'album': '', 'genre': 'Rock', 'comment': '', 'name': 'CKNX', 'slogan': '',

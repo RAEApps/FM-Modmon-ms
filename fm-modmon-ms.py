@@ -401,6 +401,7 @@ PI_LEARN_S = 60            # a PI decoded this long since tuning is the station'
 INTERFERENCE_HOLD_S = 60   # peaks withheld this long after the last sign of another station (tropo lasts hours)
 ASYM_S = 10                # +/- peak asymmetry averaged over this long...
 ASYM_WARN_PCT = 3.0        # ...flagged from here: programme is symmetric, a station on one side isn't
+MPX_HOLD_DECAY_DB = 0.3    # the large MPX spectrum's peak hold falls this much per update (3 dB/s)
 PILOT_AM_WARN_PCT = 1.0    # pilot amplitude ripple shown amber from here (Inovonics' multipath sign; a confirmation,
                            # not a gate: noise and composite clipping that hits the pilot raise it too)
 IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor
@@ -3248,8 +3249,9 @@ LCD = 'background: #0b1a0b; border: 1px solid #1f3a1f; border-radius: 6px;'
 APP_QSS = """
 QWidget { font-family: "Segoe UI"; font-size: 9pt; }
 QToolTip { background: #2b2d31; color: #e0e0e0; border: 1px solid #3c4043; padding: 4px 6px; }
-QFrame#row { background: #1e1f22; border: 1px solid #2e3035; border-radius: 6px; }
-QFrame#row[selected="true"] { background: #1f232a; border-color: #3d5f8f; }
+QFrame#row { background: #1e1f22; border: 1px solid #2e3035; border-left: 5px solid #1e1f22; border-radius: 6px; }
+QFrame#row[selected="true"] { background: #1c2636; border: 1px solid #5b8fd6; border-left: 5px solid #8ab4f8; }
+QFrame#row[selected="true"] QComboBox#freq { color: #8ab4f8; }
 QFrame#detail { background: #1b1c20; border: 1px solid #3d5f8f; border-radius: 6px; }
 QLabel#colHead { color: #8c9197; font-family: Consolas; font-size: 7pt; font-weight: 600; letter-spacing: 1px; }
 QComboBox#freq { font-size: 15pt; font-weight: 600; padding: 0 4px; border-color: transparent; background: transparent; }
@@ -3412,6 +3414,17 @@ def install_icon(app):
                 fh.write(ico_bytes())
         except OSError as e:
             print(f'could not write {ICON_PATH}: {e}')
+
+
+def enable_high_dpi():
+    """Scale the whole window with Windows' display scaling (150% etc.), not just
+    its fonts: without this Qt 5 enlarges the text but keeps every width and
+    height given in pixels, so readouts crowd and get cut. Before QApplication."""
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    if hasattr(QtGui.QGuiApplication, 'setHighDpiScaleFactorRoundingPolicy'):  # Qt 5.14+: 150% stays 1.5, not 2
+        QtGui.QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
 
 def apply_dark_theme(app):
@@ -3659,10 +3672,14 @@ class StationRow(QtWidgets.QFrame):
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
     def set_selected(self, on):
+        """Selected: an accent bar down the left, a tinted background, the
+        frequency in the accent colour (children restyled too, for that)."""
         if self.property('selected') != on:
             self.setProperty('selected', on)
-            self.style().unpolish(self)
-            self.style().polish(self)
+            for w in [self] + self.findChildren(QtWidgets.QComboBox):
+                self.style().unpolish(w)
+                self.style().polish(w)
+            self.update()
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton and self.on_click:
@@ -4237,19 +4254,45 @@ def _fits(freqs):
 
 class MpxSpectrum(QtWidgets.QWidget):
     """Demodulated MPX spectrum, 0-100 kHz, 0 to -70 dB, with markers for the
-    19 kHz pilot, the 38 kHz stereo subcarrier and 57 kHz RDS."""
+    19 kHz pilot, the 38 kHz stereo subcarrier and 57 kHz RDS. on_click: called
+    when clicked. The large one (hold=True) adds a peak-hold trace that falls
+    MPX_HOLD_DECAY_DB per update, like an analyser's, and reads out the
+    frequency and level under the mouse."""
 
     TOP, BOTTOM, MAX_KHZ = 0.0, -70.0, 100.0
     MARKERS = ((19, 'pilot', '#9aa0a6'), (38, '38k', '#6d737a'), (57, 'RDS', '#9aa0a6'),
                (67, 'SCA', '#6d737a'), (92, 'SCA', '#6d737a'))
 
-    def __init__(self):
+    def __init__(self, hold=False):
         super().__init__()
         self.setMinimumHeight(240)
         self._db = None
+        self._hold_on, self._hold = hold, None
+        self._cursor = None             # mouse x, while over the large one
+        self.on_click = None
+        self.setMouseTracking(hold)
 
     def set_data(self, mpx_db):
         self._db = mpx_db
+        if not self._hold_on or mpx_db is None:
+            self._hold = None
+        elif self._hold is None or len(self._hold) != len(mpx_db):
+            self._hold = np.array(mpx_db, dtype=float)
+        else:
+            self._hold = np.maximum(mpx_db, self._hold - MPX_HOLD_DECAY_DB)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self.on_click and event.button() == QtCore.Qt.LeftButton:
+            self.on_click()
+
+    def mouseMoveEvent(self, event):
+        if self._hold_on:
+            self._cursor = event.pos().x()
+            self.update()
+
+    def leaveEvent(self, event):
+        self._cursor = None
         self.update()
 
     def paintEvent(self, event):
@@ -4279,6 +4322,11 @@ class MpxSpectrum(QtWidgets.QWidget):
             p.drawText(QtCore.QRectF(x(khz) - 20, bottom + 2, 40, fm_.height()),
                        QtCore.Qt.AlignHCenter, str(khz))
 
+        if self._hold is not None:
+            khz = (np.arange(len(self._hold)) + 1) * 0.5
+            p.setPen(QtGui.QPen(QtGui.QColor(240, 163, 94, 170), 1))
+            p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(x(k), y(d))
+                                            for k, d in zip(khz.tolist(), self._hold.tolist())]))
         if self._db is not None:
             khz = (np.arange(len(self._db)) + 1) * 0.5
             pts = [QtCore.QPointF(x(k), y(d)) for k, d in zip(khz.tolist(), self._db.tolist())]
@@ -4293,11 +4341,26 @@ class MpxSpectrum(QtWidgets.QWidget):
             p.setBrush(QtCore.Qt.NoBrush)
             p.drawPolyline(trace)
 
-        # subcarrier markers
+        # subcarrier markers (a label that would run into the one before is left out; its line stays)
+        free = left
         for khz_, label, colour in self.MARKERS:
             p.setPen(QtGui.QPen(QtGui.QColor(colour), 1, QtCore.Qt.DotLine))
             p.drawLine(QtCore.QPointF(x(khz_), top), QtCore.QPointF(x(khz_), bottom))
-            p.drawText(QtCore.QPointF(x(khz_) + 4, top + fm_.ascent()), label)
+            if x(khz_) + 4 >= free:
+                p.drawText(QtCore.QPointF(x(khz_) + 4, top + fm_.ascent()), label)
+                free = x(khz_) + 4 + fm_.horizontalAdvance(label) + 4
+
+        # the frequency and level under the mouse (large view)
+        if self._cursor is not None and self._db is not None and left <= self._cursor <= right:
+            i = min(max(round((self._cursor - left) / (right - left) * self.MAX_KHZ / 0.5) - 1, 0), len(self._db) - 1)
+            p.setPen(QtGui.QPen(QtGui.QColor('#e3e4e6'), 1, QtCore.Qt.DotLine))
+            p.drawLine(QtCore.QPointF(x((i + 1) * 0.5), top), QtCore.QPointF(x((i + 1) * 0.5), bottom))
+            text = f'{(i + 1) * 0.5:.1f} kHz   {self._db[i]:.1f} dB'
+            if self._hold is not None:
+                text += f'   (hold {self._hold[i]:.1f} dB)'
+            p.setPen(QtGui.QColor('#e3e4e6'))
+            p.drawText(QtCore.QRectF(left, top + fm_.height() + 2, right - left - 6, fm_.height()),
+                       QtCore.Qt.AlignRight, text)
 
 
 class Goniometer(QtWidgets.QWidget):
@@ -4400,6 +4463,37 @@ class StereoWindow(QtWidgets.QDialog):
         self.readouts.setText('   \u00b7   '.join(
             f'{n}: <b style="color:#e0e0e0">{QtGui.QTextDocumentFragment.fromHtml(panel.values[n].text()).toPlainText()}</b>'
             for n in self.READOUTS))
+
+
+class MpxWindow(QtWidgets.QDialog):
+    """A receiver's MPX spectrum, large and live, with peak hold, a readout
+    under the mouse and the multiplex readouts. Opened by clicking the panel's
+    spectrum; follows the panel until closed."""
+
+    READOUTS = ('Pilot (19 kHz)', 'RDS injection', 'SCA 67 kHz', 'SCA 92 kHz', 'MPX power', 'Noise >100 kHz')
+
+    def __init__(self, panel, parent):
+        super().__init__(parent)
+        self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
+        self.resize(960, 560)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.spectrum = MpxSpectrum(hold=True)
+        self.spectrum.setMinimumSize(480, 300)
+        self.spectrum.setToolTip('Grey: now. Amber: peak hold, falling '
+                                 f'{MPX_HOLD_DECAY_DB * UPDATE_HZ:g} dB/s. dB re a 100% (75 kHz) sine, 500 Hz bins')
+        layout.addWidget(self.spectrum, 1)
+        self.readouts = QtWidgets.QLabel('')
+        self.readouts.setAlignment(QtCore.Qt.AlignCenter)
+        self.readouts.setWordWrap(True)
+        self.readouts.setStyleSheet('color: #9aa0a6; padding: 4px;')
+        layout.addWidget(self.readouts)
+
+    def follow(self, panel):
+        self.setWindowTitle(f'{panel.title} \u2013 MPX spectrum')
+        self.spectrum.set_data(panel.readings.get('mpx_db'))
+        plain = lambda n: QtGui.QTextDocumentFragment.fromHtml(panel.values[n].text()).toPlainText()  # noqa: E731
+        self.readouts.setText('   \u00b7   '.join(f'{n}: <b style="color:#e0e0e0">{_html(plain(n))}</b>'
+                                                for n in self.READOUTS if n in panel.values))
 
 
 AMBER = '#f0a35e'
@@ -4997,6 +5091,7 @@ class StationPanel(QtCore.QObject):
         self._rdns_row = ()     # the RadioDNS row: shown only while RadioDNS works for the station
         self._rdns_working = False
         self._stereo = None     # the large stereo-image window, once opened
+        self._mpx_win = None    # the large MPX spectrum window, once opened
         self.rdns_line.setToolTip('RadioDNS service information (ETSI TS 103 270 / TS 102 818)')
         self.logo_img, self.art_img = QtWidgets.QLabel(), QtWidgets.QLabel()
         for img in (self.logo_img, self.art_img):
@@ -5060,7 +5155,7 @@ class StationPanel(QtCore.QObject):
         box.addWidget(dim_label('Peak distribution \u00b7 last 5 min'))
         box.addWidget(self.peak_hist)
         box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R',
-                                'L+R / L−R', 'Valid time', 'Limit', 'SM.1268'), 2,
+                                'L+R / L−R', 'Valid time', 'Limit', 'SM.1268'), 1,
                                wide=('Valid time', 'Limit', 'SM.1268')))
         box.addStretch(1)
         cards.addWidget(mod, 0, 0)
@@ -5069,6 +5164,9 @@ class StationPanel(QtCore.QObject):
         mpx_card, box = card('Multiplex', dim_label('0–100 kHz'))
         self.mpx = MpxSpectrum()
         self.mpx.setMinimumHeight(140)
+        self.mpx.setCursor(QtCore.Qt.PointingHandCursor)
+        self.mpx.setToolTip('Click for a larger view')
+        self.mpx.on_click = self._open_mpx
         box.addWidget(self.mpx)
         self.mpx_tapes = {
             'snr': Tape('S/N', 0, 70, band=(30, 70), name_w=50, val_w=110),
@@ -5081,7 +5179,7 @@ class StationPanel(QtCore.QObject):
         for t in self.mpx_tapes.values():
             box.addWidget(t)
         box.addLayout(self._kv(('RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase',
-                                'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 2,
+                                'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'), 1,
                                wide=('RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz',
                                      'IBOC signal')))
         self.absent['mpx'] = dim_label()
@@ -5096,7 +5194,7 @@ class StationPanel(QtCore.QObject):
         self.rds_spark.setToolTip('RDS groups per second, the last 5 minutes (11.4/s is every group)')
         box.addWidget(self.rds_spark)
         box.addLayout(self._kv(('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs',
-                                'Clock', 'Group types', 'Data services'), 2,
+                                'Clock', 'Group types', 'Data services'), 1,
                                wide=('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')))
         self.absent['rds'] = dim_label()
         self.absent['rds'].setWordWrap(True)
@@ -5111,7 +5209,7 @@ class StationPanel(QtCore.QObject):
         reset.setStyleSheet('padding: 0 6px;')
         reset.clicked.connect(station.audio_meter.reset_integrated)
         audio, box = card('Audio', reset)
-        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 2))
+        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 1))
         self.lufs_spark = Spark(-40, 0, ref=-23)
         self.lufs_spark.setToolTip('Short-term loudness, the last 5 minutes (dotted: -23 LUFS)')
         box.addWidget(self.lufs_spark)
@@ -5128,10 +5226,11 @@ class StationPanel(QtCore.QObject):
         side = QtWidgets.QVBoxLayout()
         side.setSpacing(2)
         side.addWidget(self.meters['corr'])
-        side.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R', 'Correlation'), 1))
         side.addStretch(1)
         stereo.addLayout(side, 1)
         box.addLayout(stereo)
+        # the stereo readouts under the goniometer, the card's full width (beside it they were cut)
+        box.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R', 'Correlation'), 1))
         self.source = QtWidgets.QComboBox()
         for key, label in AUDIO_SOURCES:
             self.source.addItem(label, key)
@@ -5177,6 +5276,8 @@ class StationPanel(QtCore.QObject):
             value.setTextFormat(QtCore.Qt.RichText)
             value.setStyleSheet('font-weight: 600;')
             value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            value.setWordWrap(name in wide)   # long ones wrap in the card rather than being cut
+            label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
             grid.addWidget(label, row, col * 2)
             grid.addWidget(value, row, col * 2 + 1, 1, span)
             self.values[name] = value
@@ -5390,6 +5491,8 @@ class StationPanel(QtCore.QObject):
         self.peak_hist.set_data([], None)
         self.gonio.set_data(None)
         self.mpx.set_data(None)
+        if self._mpx_win:
+            self._mpx_win.spectrum.set_data(None)   # the old station's peak hold goes too
 
     def _reset_identity(self):
         self._pi_seen = (None, 0.0)    # (PI, decoded unchanged since)
@@ -5464,6 +5567,14 @@ class StationPanel(QtCore.QObject):
                 self.source.setItemText(i, text)
                 self.source.setItemData(i, tip, QtCore.Qt.ToolTipRole)
                 self._web_lists = None
+
+    def _open_mpx(self):
+        if self._mpx_win is None:
+            self._mpx_win = MpxWindow(self, self.detail)
+        self._mpx_win.follow(self)
+        self._mpx_win.show()
+        self._mpx_win.raise_()
+        self._mpx_win.activateWindow()
 
     def _open_stereo(self):
         if self._stereo is None:
@@ -5765,6 +5876,8 @@ class StationPanel(QtCore.QObject):
             self.gonio.set_data(st.audio_meter.scope)
         if self._stereo and self._stereo.isVisible():
             self._stereo.follow(self)
+        if self._mpx_win and self._mpx_win.isVisible():
+            self._mpx_win.follow(self)
 
     def _show_tapes(self, r):
         """The station row's tapes: peak modulation against the limit in force, RF, AM."""
@@ -8576,6 +8689,7 @@ def feed_opener(args):
 def main():
     args = parse_args()
     clear_cache(stale=True)  # caches left by a session that didn't close cleanly
+    enable_high_dpi()
     app = QtWidgets.QApplication(sys.argv)
     install_icon(app)
     apply_dark_theme(app)
