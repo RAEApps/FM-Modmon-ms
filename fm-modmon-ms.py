@@ -105,6 +105,10 @@ S/N over the noise floor is kept: the least gain within CAL_TOLERANCE_DB of
 the best (once antenna noise dominates, more gain only costs headroom). Gain then stays fixed, so RF
 levels are comparable. "Recalibrate gain" repeats it on the running receivers
 (for example after the SDR window has moved); their meters restart afterwards.
+While running, the wideband samples' peak is watched: when it reaches CAL_CLIP
+(the level calibration counts as overload) in ADC_OVERLOAD_N of
+ADC_OVERLOAD_WINDOW_S seconds, "SDR overload" is logged and notified and the
+gain chip turns red, until ADC_OVERLOAD_CLEAR_S pass without one.
 
 Measurements (refreshed 10x per second):
   RDS
@@ -177,7 +181,9 @@ Measurements (refreshed 10x per second):
     width (side/mid energy ratio), goniometer
   Alarms (raise/clear after holding 3-30 s)
     carrier low/lost, audio silence, over-modulation, pilot lost, RDS
-    lost, wrong PI, emergency alert (IBOC while it plays, or an RT+
+    lost (but "possibly on N+1" when the carrier, pilot and audio stay
+    fine: the N+1 backup transmitter has no RDS encoder; switch that alarm
+    off and it is plain RDS lost), wrong PI, emergency alert (IBOC while it plays, or an RT+
     Alarm tag), data service lost (a service on air 5+ min unbroken,
     then gone; 60 s hold), and the
     technical rules of the receiver's rule set (ISED for --country CA,
@@ -306,6 +312,10 @@ CAL_CLIP = 0.9            # ...and any sample at this fraction of full scale mea
 CAL_LNA_STATES = range(9, -1, -1)  # tried from least gain to most
 CAL_DEFAULT = (4, 40)      # LNA state, IF gain reduction when not calibrated
 IQ_TAP_BATCH = 65536       # live calibration reads the SDR in batches this big
+ADC_BATCH = 16384          # the wideband peak meter reads the SDR in batches this big
+ADC_OVERLOAD_N = 3         # ADC overload: raised once this many of the last...
+ADC_OVERLOAD_WINDOW_S = 10  # ...this many seconds had a peak at CAL_CLIP or above,
+ADC_OVERLOAD_CLEAR_S = 30  # and cleared after this long without one
 SETTLE_UPDATES = 5         # meters ignore over-modulation this long after a (re)start
 SCA_CLASSIFY_DB = 15.0     # below this (above the gap) demodulated noise hides what an SCA carries
 SCA_BATCH = 4096           # the SCA analyser gets its signal in 85 ms batches
@@ -682,6 +692,64 @@ class IqTap(gr.sync_block):
                     self._done.set()
                     break
         return len(input_items[0])
+
+
+class AdcMeter(gr.sync_block):
+    """The wideband IQ's peak: the largest |I| or |Q| (full scale 1.0) since
+    the last take(). The ADC clips each of I and Q at full scale."""
+
+    def __init__(self):
+        gr.sync_block.__init__(self, name='adc_meter', in_sig=[(np.complex64, ADC_BATCH)], out_sig=None)
+        self._peak = None
+
+    def take(self):
+        """The peak since the last call; None if no samples came."""
+        peak, self._peak = self._peak, None
+        return peak
+
+    def work(self, input_items, output_items):
+        x = input_items[0].view(np.float32)  # I and Q interleaved
+        peak = max(float(x.max()), -float(x.min()))
+        self._peak = peak if self._peak is None else max(self._peak, peak)
+        return len(input_items[0])
+
+
+def _dbfs(amplitude):
+    return 20 * math.log10(max(amplitude, 1e-12))
+
+
+class AdcOverload:
+    """Whether the RSP1A's ADC overloads while running. Gain calibration picks
+    a gain that doesn't clip (CAL_CLIP) for the band as it was; this catches a
+    stronger signal later, or a gain set too hot by --lna / --ifgr. Fed one
+    peak a second: raised once ADC_OVERLOAD_N of the last ADC_OVERLOAD_WINDOW_S
+    seconds reached CAL_CLIP, cleared after ADC_OVERLOAD_CLEAR_S without one."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.active = False
+        self.peak = None      # the last peak fed in
+        self._hits = deque()  # when a peak reached CAL_CLIP
+
+    def update(self, peak, now=None):
+        """peak: from AdcMeter.take(). True if the overload is raised now,
+        False if cleared now, else None."""
+        now = time.monotonic() if now is None else now
+        self.peak = peak
+        if peak is not None and peak >= CAL_CLIP:
+            self._hits.append(now)
+        while self._hits and now - self._hits[0] > max(ADC_OVERLOAD_WINDOW_S, ADC_OVERLOAD_CLEAR_S):
+            self._hits.popleft()
+        recent = sum(now - t < ADC_OVERLOAD_WINDOW_S for t in self._hits)
+        if not self.active and recent >= ADC_OVERLOAD_N:
+            self.active = True
+            return True
+        if self.active and not any(now - t < ADC_OVERLOAD_CLEAR_S for t in self._hits):
+            self.active = False
+            return False
+        return None
 
 
 def make_rsp1a(center_hz, lna_state, if_gain_reduction):
@@ -2715,6 +2783,9 @@ class FmMonitor(gr.top_block):
         self._source_factory = source_factory  # () -> a new source, for reopening (tests); else the RSP1A
         self._sdr_lock = threading.RLock()  # the SDR reopening thread vs IBOC changes on the GUI thread
         self.src = _min_buffer(source or make_rsp1a(self.center_hz, lna_state, if_gain_reduction), SRC_BUFFER)
+        self.adc = AdcMeter()  # the wideband peak, for the overload warning
+        self._adc_in = _batch(gr.sizeof_gr_complex, ADC_BATCH, 8)
+        self.connect(self.src, self._adc_in, self.adc)
         self.slots = [None] * MAX_RECEIVERS
         self._mix = [blocks.add_ff(), blocks.add_ff()]
         self._silence = [[blocks.null_source(gr.sizeof_float) for _ in range(2)]
@@ -2823,6 +2894,7 @@ class FmMonitor(gr.top_block):
                 self.disconnect(self.src, st)
                 if st.iboc:
                     self.disconnect(self.src, st.iboc.blocks[0])
+            self.disconnect(self.src, self._adc_in)
             self.src = None
             gc.collect()  # the source block closes the device when it goes
 
@@ -2835,6 +2907,7 @@ class FmMonitor(gr.top_block):
                 self.connect(src, st)
                 if st.iboc:
                     self.connect(src, st.iboc.blocks[0])
+            self.connect(src, self._adc_in)
             self.src = src
             self.start()
 
@@ -3395,6 +3468,7 @@ ALARM_DEFS = (
     ('SUBCARRIERS', 'subcarrier injection over the limit', 10),
     ('FREQUENCY', 'carrier frequency out of tolerance', 30),
     ('RDS', 'RDS lost', 10),
+    ('BACKUP', 'possibly on N+1 (backup transmitter has no RDS)', 10),
     ('PI', 'wrong station (PI differs from expected)', 5),
     ('ALERT', 'emergency alert (IBOC or RT+ Alarm)', 0),  # IBOC: only while an IBOC programme is playing
     ('DATA', 'data service lost (paging, EWS, ODA or SCA data)', 60),
@@ -3568,6 +3642,16 @@ class StationAlarms:
                 (self.active.add if want else self.active.discard)(name)
                 changes.append((name, desc, want))
         return changes
+
+
+def rds_conditions(seen_rds, rate, carrier, pilot_ok, silent, backup_on=True):
+    """(RDS lost, possibly on N+1) alarm conditions. RDS gone while the carrier,
+    pilot and audio stay fine points at the N+1 backup transmitter, whose exciter
+    has no RDS encoder, rather than an RDS fault: that is BACKUP, not RDS, unless
+    the BACKUP alarm is switched off for the receiver."""
+    lost = seen_rds and rate < 1
+    backup = backup_on and lost and not carrier and pilot_ok and not silent
+    return lost and not backup, backup
 
 
 class DataServices:
@@ -4543,9 +4627,13 @@ class StationPanel(QtWidgets.QGroupBox):
             limit, _ = mod_limit(rules, lim, s)
             tol = lim['freq_tol_hz']
             subcarriers = (s['rds_pct'] or 0.0) + sum(s[f'sca{k}_pct'] or 0.0 for k in (67, 92))
+            silent = not carrier and a['momentary'] < cfg.silence_lufs
+            rds_lost, backup = rds_conditions(self.alarms.seen_rds, rate, carrier,
+                                              st.pilot or not self.alarms.seen_pilot, silent,
+                                              cfg.alarms.get('BACKUP', True))
             conditions = {
                 'CARRIER': carrier,
-                'SILENCE': not carrier and a['momentary'] < cfg.silence_lufs,
+                'SILENCE': silent,
                 'OVERMOD': (peaks_clean and max(s['pos_pct'], s['neg_pct']) > limit),
                 'PILOT_SPEC': (clean and st.pilot and (not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']
                                                        or (st.pilot_hz is not None
@@ -4554,7 +4642,8 @@ class StationPanel(QtWidgets.QGroupBox):
                                            or (s['sca92_pct'] or 0.0) > lim['sub_high_pct'])),
                 'FREQUENCY': bool(clean and tol and abs(s['offset_hz']) > tol),
                 'PILOT': self.alarms.seen_pilot and not st.pilot,
-                'RDS': self.alarms.seen_rds and rate < 1,
+                'RDS': rds_lost,
+                'BACKUP': backup,
                 'PI': bool(cfg.expected_pi and pi and pi != cfg.expected_pi),
                 'ALERT': bool(st.iboc and st.iboc.status['alert']) or bool(self._rt_alarm),
                 # RDS services only while RDS itself is fine (else the RDS alarm says it)
@@ -4614,6 +4703,8 @@ class StationPanel(QtWidgets.QGroupBox):
                          'includes the tuning error of the SDR)',
             'PILOT': f'pilot {num(s["pilot_pct"])}%',
             'RDS': f'RDS {num(rate)} groups/s',
+            'BACKUP': f'RDS {num(rate)} groups/s while carrier, pilot ({num(s["pilot_pct"])}%) and audio '
+                      f'({num(a["momentary"])} LUFS) are fine: the N+1 backup transmitter has no RDS encoder',
             'PI': f'PI {pi or "-"}, expected {cfg.expected_pi}',
             'ALERT': f'RT+ Alarm: {self._rt_alarm}' if self._rt_alarm else '',
             'DATA': (f'not on air for {DATA_GAP_S:.0f}+ s: {", ".join(map(self._service_label, self._data_lost))}'
@@ -6176,6 +6267,7 @@ class MainWindow(QtWidgets.QWidget):
         self.notifier = Notifier(self.notify_settings, self._where)
         self._recovery = None   # while the SDR is being reopened: {'since', 'attempt', 'error', 'done'}
         self._watch_from = None  # the SDR watchdog starts once the flowgraph does
+        self.overload = AdcOverload()  # judged by the watchdog
         self.args = None   # the command line, set by main(), for the help
         self.cal_btn = QtWidgets.QPushButton('\u27f2  Recalibrate gain')
         self.cal_btn.setMinimumHeight(32)
@@ -6361,6 +6453,27 @@ class MainWindow(QtWidgets.QWidget):
         silent = time.monotonic() - self._last_samples()
         if self._watch_from and silent > SDR_STALL_S:
             self._sdr_lost(silent)
+            return
+        self._watch_overload()
+
+    def _watch_overload(self):
+        """Once a second: warn when the wideband samples reach the ADC's full scale
+        (not while calibrating: its gain steps overload on purpose)."""
+        peak = self.tb.adc.take()
+        if self._cal:
+            return
+        change = self.overload.update(peak)
+        if change is None:
+            return
+        if change:
+            text = (f'SDR overload: the RSP1A\'s wideband samples reach {_dbfs(peak):.1f} dBFS (clipping from '
+                    f'{_dbfs(CAL_CLIP):.1f}): every receiver\'s readings may be false. Recalibrate gain, '
+                    'or with --lna / --ifgr use less gain (higher values)')
+        else:
+            text = f'SDR overload cleared: no wideband peak at {_dbfs(CAL_CLIP):.1f} dBFS for {ADC_OVERLOAD_CLEAR_S} s'
+        self.log(text)
+        self.notifier.event('sdr', text)
+        self._update_window()
 
     def _sdr_lost(self, silent):
         rec = self._recovery = {'since': time.time(), 'attempt': 0, 'error': None}
@@ -6516,6 +6629,8 @@ class MainWindow(QtWidgets.QWidget):
         if self._cal:
             return 'Gain: calibrating\u2026'
         text = f'LNA {tb.lna} \u00b7 IFGR {tb.ifgr} dB'
+        if self.overload.active:
+            return text + ' \u00b7 ADC OVERLOAD'
         if not tb.gain_auto:
             return text
         if tb.cal_center_hz != tb.center_hz:
@@ -6612,7 +6727,8 @@ class MainWindow(QtWidgets.QWidget):
                 p.settings.audio_source = 'analog'
                 self._apply_audio(p)
         lost = bool(self._recovery)
-        self.chips['gain'].setStyleSheet('background: #3a1d1f; color: #ff8a8a; border-color: #6b2a2e;' if lost else '')
+        self.chips['gain'].setStyleSheet('background: #3a1d1f; color: #ff8a8a; border-color: #6b2a2e;'
+                                         if lost or self.overload.active else '')
         self.cal_btn.setEnabled(not lost and not self._cal)
         for p in self.panels:
             p.combo.setEnabled(not lost)
