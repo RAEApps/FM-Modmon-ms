@@ -3444,7 +3444,8 @@ class Annunciator(QtWidgets.QWidget):
     alarm's state (StationPanel._alarm_states); hover one for what it means."""
     COLS = 4
     SHORT = {'CARRIER': 'CARR', 'SILENCE': 'SIL', 'OVERMOD': 'OVMD', 'PILOT': 'PILOT', 'PILOT_SPEC': 'P.SPEC',
-             'SUBCARRIERS': 'SUBS', 'FREQUENCY': 'FREQ', 'RDS': 'RDS', 'PI': 'PI', 'ALERT': 'ALERT', 'DATA': 'DATA'}
+             'SUBCARRIERS': 'SUBS', 'FREQUENCY': 'FREQ', 'RDS': 'RDS', 'BACKUP': 'N+1', 'PI': 'PI', 'ALERT': 'ALERT',
+             'DATA': 'DATA'}
     # state: (fill, text, outline or None, hatched)
     LOOK = {'clear': ('#26282d', '#7d838a', None, False),
             'waiting': ('#26282d', '#4f545a', None, False),
