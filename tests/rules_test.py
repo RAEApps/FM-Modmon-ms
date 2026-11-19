@@ -168,7 +168,7 @@ finally:
     rm.time = real_time
 check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
 
-print('--- RDS gone: plain fault or N+1 backup (its exciter has no RDS encoder)')
+print('--- RDS gone: plain fault or an N+1 backup without RDS')
 st = station(**music)
 check('carrier, pilot and audio fine: possibly on N+1', judge(st, '', keep=('RDS',), rds_seen=True)[0], ['BACKUP'])
 check('...with that alarm switched off: RDS lost', judge(st, '', keep=('RDS',), rds_seen=True,
@@ -305,8 +305,8 @@ k80 = round((80.0 - rm.EXCEED_LO_KHZ) / rm.EXCEED_BIN_KHZ)
 h0[k80] = h20[k80] = 100
 stats = {'exceed_n': 1_000_000, 'exceed_hist': h0 + h20, 'exceed_by_inj': {0.0: h0, 20.0: h20}}
 check('80 kHz samples taken without SCA count; those with SCA 20% do not',
-      rm.exceed_fraction(stats, lambda inj: rm.exceed_khz(fcc, inj)), 100 / 1_000_000)
-check('...a single threshold (today\'s, SCA 20%) would miss them', rm.exceed_fraction(stats, rm.exceed_khz(fcc, 20.0)), 0.0)
+      rm.exceed_fraction(stats, lambda inj: rm.exceed_khz(rm.limit_at(fcc, inj))), 100 / 1_000_000)
+check('...a single threshold (today\'s, SCA 20%) would miss them', rm.exceed_fraction(stats, rm.exceed_khz(rm.limit_at(fcc, 20.0))), 0.0)
 
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
 sys.exit(1 if bad else 0)

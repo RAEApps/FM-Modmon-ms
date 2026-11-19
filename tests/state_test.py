@@ -121,8 +121,8 @@ lamps = p.annunciator.states
 check('N+1: the annunciator lights N+1, not RDS', lamps.get('BACKUP') == 'raised' and lamps.get('RDS') == 'clear'
       and rm.Annunciator.SHORT['BACKUP'] == 'N+1', lamps)
 check('N+1: the event names the backup and what is fine',
-      [(d, up) for d, up, _ in changes] == [('possibly on N+1 (backup transmitter has no RDS)', True)]
-      and 'no RDS encoder' in changes[0][2] and 'pilot' in changes[0][2], changes)
+      [(d, up) for d, up, _ in changes] == [('possibly on a backup transmitter without RDS (N+1)', True)]
+      and 'backup transmitter without RDS' in changes[0][2] and 'pilot' in changes[0][2], changes)
 check('N+1: logged in the history', [(n, up) for _, n, up in p.history.alarm_log] == [('BACKUP', True)],
       list(p.history.alarm_log))
 states = settle(p, rds_seen=True, alarms={'BACKUP': False})
@@ -150,13 +150,13 @@ win.close()
 
 # ---- IBOC lines from readings
 ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,
-      'artist': 'A', 'title': 'B', 'album': '', 'genre': 'Rock', 'comment': '', 'name': 'CKNX', 'slogan': '',
+      'artist': 'A', 'title': 'B', 'album': '', 'genre': 'Rock', 'comment': '', 'name': 'TESTFM', 'slogan': '',
       'message': '', 'alert': ''}
 line = rm.StationPanel._iboc_line_text(ib)
 psd, sis = rm.StationPanel._psd_sis_text(ib)
 check('IBOC line from readings', '(MPS)' in line and 'synchronized' in line and '48 kbps' in line
       and 'MER 7.5 dB' in line and 'BER 2.0e-05' in line, line)
-check('PSD and SIS lines from readings', psd == 'A – B  ·  Rock' and sis == 'CKNX', f'{psd!r} {sis!r}')
+check('PSD and SIS lines from readings', psd == 'A – B  ·  Rock' and sis == 'TESTFM', f'{psd!r} {sis!r}')
 check('no IBOC: dashes', rm.StationPanel._iboc_line_text(None) == '-' and rm.StationPanel._psd_sis_text(None) == ('-', '-'))
 
 print('\nall state checks passed' if not failed else f'\n{len(failed)} FAILED: {failed}')

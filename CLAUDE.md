@@ -15,7 +15,9 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
 - CPU: `tools\profile_cpu.py` profiles the monitor on the RSP1A (~70 s; needs the SDR free).
   Pass `--config` with a copy that has notifications off when testing here.
 - Install: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins
-  download URLs + SHA-256; the SoapySDRPlay3 module and nrsc5 come from the `deps-2026.11`
-  release. Rebuilt either? Publish a new release and update the URLs and hashes.
+  third-party download URLs + SHA-256; the SoapySDRPlay3 module and nrsc5 come from the
+  `deps-2026.11` release. Rebuilt either? Publish a new release and update the URLs and hashes.
+  Two exceptions, by design: the app itself is this repo's `main` (no hash), and the SDRplay
+  API, which only SDRplay's site offers, is checked by its Authenticode signer.
 - Public repo, GPL-3.0-or-later: no secrets, personal data, local paths or captured audio/IQ
   in commits. Config and logs are git-ignored.

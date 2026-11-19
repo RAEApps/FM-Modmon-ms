@@ -227,8 +227,8 @@ Measurements (refreshed 10x per second):
     carrier low/lost, audio silence, over-modulation, over-deviation over
     15 min (ITU-R SM.1268, against the limit below + 2 kHz), pilot lost, RDS
     lost (but "possibly on N+1" when the carrier, pilot and audio stay
-    fine: the N+1 backup transmitter has no RDS encoder; switch that alarm
-    off and it is plain RDS lost), wrong PI, emergency alert (IBOC while it plays, or an RT+
+    fine, as when a backup transmitter without an RDS encoder is on air;
+    switch that alarm off and it is plain RDS lost), wrong PI, emergency alert (IBOC while it plays, or an RT+
     Alarm tag), data service lost (a service on air 5+ min unbroken, then
     unseen for 15 s and the alarm held 60 s: about 75 s), and the
     technical rules of the receiver's rule set (ISED for --country CA,
@@ -285,6 +285,7 @@ import warnings
 import xml.etree.ElementTree as ET
 from collections import Counter, OrderedDict, deque
 from dataclasses import asdict, dataclass, field, fields
+from typing import NamedTuple
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -3721,14 +3722,42 @@ class StationRow(QtWidgets.QFrame):
             self.on_double()
 
 
+# Each alarm: its name, its lamp's short label, what it means, the seconds its
+# condition must hold before it raises or clears (SILENCE's is a receiver
+# setting), and whether it judges the transmission against the rules, which is
+# done only on clean reception.
+class AlarmDef(NamedTuple):
+    name: str
+    short: str
+    desc: str
+    hold: int
+    clean_only: bool = False
+
+
+ALARM_DEFS = (
+    AlarmDef('CARRIER', 'CARR', 'carrier low or lost', 5),
+    AlarmDef('SILENCE', 'SIL', 'audio silence', 10),
+    AlarmDef('OVERMOD', 'OVMD', 'over-modulation', 3, clean_only=True),
+    AlarmDef('EXCEEDANCE', 'SM1268',
+             'over-deviation over 15 min (ITU-R SM.1268: over 1e-6 of samples above the limit + 2 kHz)', 10),
+    AlarmDef('PILOT', 'PILOT', 'stereo pilot lost', 5),
+    AlarmDef('PILOT_SPEC', 'P.SPEC', 'stereo pilot out of tolerance', 10, clean_only=True),
+    AlarmDef('SUBCARRIERS', 'SUBS', 'subcarrier injection over the limit', 10, clean_only=True),
+    AlarmDef('FREQUENCY', 'FREQ', 'carrier frequency out of tolerance', 30, clean_only=True),
+    AlarmDef('RDS', 'RDS', 'RDS lost', 10),
+    AlarmDef('BACKUP', 'N+1', 'possibly on a backup transmitter without RDS (N+1)', 10),
+    AlarmDef('PI', 'PI', 'wrong station (PI differs from expected)', 5),
+    AlarmDef('ALERT', 'ALERT', 'emergency alert (IBOC or RT+ Alarm)', 0),  # IBOC: only while an IBOC programme is playing
+    AlarmDef('DATA', 'DATA', 'data service lost (paging, EWS, ODA or SCA data)', 60),
+)
+
+
 class Annunciator(QtWidgets.QWidget):
     """Every alarm as a lamp in a fixed grid, in the same place on every row, like
     a transmitter remote control's annunciator panel. The lamp's look says the
     alarm's state (StationPanel._alarm_states); hover one for what it means."""
     COLS = 4
-    SHORT = {'CARRIER': 'CARR', 'SILENCE': 'SIL', 'OVERMOD': 'OVMD', 'PILOT': 'PILOT', 'PILOT_SPEC': 'P.SPEC',
-             'SUBCARRIERS': 'SUBS', 'FREQUENCY': 'FREQ', 'RDS': 'RDS', 'BACKUP': 'N+1', 'PI': 'PI', 'ALERT': 'ALERT',
-             'DATA': 'DATA', 'EXCEEDANCE': 'SM1268'}
+    SHORT = {d.name: d.short for d in ALARM_DEFS}
     # state: (fill, text, outline or None, hatched)
     LOOK = {'clear': ('#26282d', '#7d838a', None, False),
             'waiting': ('#26282d', '#4f545a', None, False),
@@ -3763,7 +3792,7 @@ class Annunciator(QtWidgets.QWidget):
         rows = (len(ALARM_DEFS) + self.COLS - 1) // self.COLS
         w, h, gap = self.width(), self.height(), 2
         cw, ch = (w - gap * (self.COLS - 1)) / self.COLS, (h - gap * (rows - 1)) / rows
-        for i, (name, desc, _) in enumerate(ALARM_DEFS):
+        for i, (name, _, desc, *_) in enumerate(ALARM_DEFS):
             r, c = divmod(i, self.COLS)
             yield name, desc, QtCore.QRectF(c * (cw + gap), r * (ch + gap), cw, ch)
 
@@ -4531,24 +4560,6 @@ AMBER = '#f0a35e'
 IMG_PX = 88        # station logo / album art on the panel
 IMG_TIP_PX = 320   # and in their tooltips
 
-# Alarm name, description, seconds the condition must hold before it raises or
-# clears (SILENCE's is a receiver setting).
-ALARM_DEFS = (
-    ('CARRIER', 'carrier low or lost', 5),
-    ('SILENCE', 'audio silence', 10),
-    ('OVERMOD', 'over-modulation', 3),
-    ('EXCEEDANCE', 'over-deviation over 15 min (ITU-R SM.1268: over 1e-6 of samples above the limit + 2 kHz)', 10),
-    ('PILOT', 'stereo pilot lost', 5),
-    ('PILOT_SPEC', 'stereo pilot out of tolerance', 10),
-    ('SUBCARRIERS', 'subcarrier injection over the limit', 10),
-    ('FREQUENCY', 'carrier frequency out of tolerance', 30),
-    ('RDS', 'RDS lost', 10),
-    ('BACKUP', 'possibly on N+1 (backup transmitter has no RDS)', 10),
-    ('PI', 'wrong station (PI differs from expected)', 5),
-    ('ALERT', 'emergency alert (IBOC or RT+ Alarm)', 0),  # IBOC: only while an IBOC programme is playing
-    ('DATA', 'data service lost (paging, EWS, ODA or SCA data)', 60),
-)
-
 # FM technical rules the alarms check, per rule set. FCC: 47 CFR 73.1570(b)(2)
 # (modulation), 73.322 (pilot), 73.319(d) (subcarriers), 73.1545(b) (frequency).
 # ISED: BETS-6 issue 3 A.2.2.2, A.2.2.4, 7.2.3 and BPR-3 issue 7 3.13.2 (the
@@ -4708,7 +4719,7 @@ class StationAlarms:
         changes = []
         if now - self._t0 < ALARM_GRACE_S:
             return changes
-        for name, desc, hold in ALARM_DEFS:
+        for name, _, desc, hold, _ in ALARM_DEFS:
             hold = (holds or {}).get(name, hold)
             want = bool(conditions.get(name))
             if want == (name in self.active):
@@ -4723,8 +4734,8 @@ class StationAlarms:
 
 def rds_conditions(seen_rds, rate, carrier, pilot_ok, silent, backup_on=True):
     """(RDS lost, possibly on N+1) alarm conditions. RDS gone while the carrier,
-    pilot and audio stay fine points at the N+1 backup transmitter, whose exciter
-    has no RDS encoder, rather than an RDS fault: that is BACKUP, not RDS, unless
+    pilot and audio stay fine points at a backup (N+1) transmitter without an RDS
+    encoder rather than an RDS fault: that is BACKUP, not RDS, unless
     the BACKUP alarm is switched off for the receiver."""
     lost = seen_rds and rate < 1
     backup = backup_on and lost and not carrier and pilot_ok and not silent
@@ -4759,9 +4770,9 @@ def limit_at(limits, inj):
     return min(limits['mod_base_pct'] + limits['mod_per_sub'] * inj, limits['mod_max_pct'])
 
 
-def exceed_khz(limits, inj):
-    """The SM.1268 threshold (kHz): the limit at injection `inj` (%), plus EXCEED_MARGIN_KHZ."""
-    return limit_at(limits, inj) * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ
+def exceed_khz(limit_pct):
+    """The SM.1268 threshold (kHz) for a peak modulation limit (%): the limit plus EXCEED_MARGIN_KHZ."""
+    return limit_pct * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ
 
 
 def mod_limit(rules, limits, stats):
@@ -4918,7 +4929,7 @@ class History:
 
 
 # Alarms that judge the transmission against the rules: only on clean reception
-JUDGED_CLEAN = ('OVERMOD', 'PILOT_SPEC', 'SUBCARRIERS', 'FREQUENCY')
+JUDGED_CLEAN = tuple(d.name for d in ALARM_DEFS if d.clean_only)
 
 
 class StationPanel(QtCore.QObject):
@@ -5722,8 +5733,8 @@ class StationPanel(QtCore.QObject):
                 lv['valid_pct'] = 'warn'
             # SM.1268 against this station's own limit (FCC / ISED: with its subcarrier allowance)
             # (each sample against the limit when it was taken: the injection can change)
-            r['exceed_khz'] = limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ
-            r['exceed_frac'] = exceed_fraction(s, lambda inj: exceed_khz(lim, inj))
+            r['exceed_khz'] = exceed_khz(limit)
+            r['exceed_frac'] = exceed_fraction(s, lambda inj: exceed_khz(limit_at(lim, inj)))
             r['exceed_valid_s'] = s['exceed_valid_s']
             if r['exceed_frac'] is not None and r['exceed_frac'] > EXCEED_FRACTION:
                 lv['exceed_frac'] = 'alarm' if s['exceed_valid_s'] >= EXCEED_MIN_S else 'warn'
@@ -5923,13 +5934,18 @@ class StationPanel(QtCore.QObject):
         if self._mpx_win and self._mpx_win.isVisible():
             self._mpx_win.follow(self)
 
+    @staticmethod
+    def _peak_state(r, key):
+        """A peak reading's level ('pos_pct' / 'neg_pct'): over the limit while
+        reception isn't valid is not judged, so amber, not red."""
+        state = r['levels'].get(key)
+        return 'warn' if state == 'alarm' and not r.get('valid', True) else state
+
     def _show_tapes(self, r):
         """The station row's tapes: peak modulation against the limit in force, RF, AM."""
         lv = r['levels']
         peak = max(r['pos_pct'], r['neg_pct'])
-        mod_state = lv.get('pos_pct') if r['pos_pct'] >= r['neg_pct'] else lv.get('neg_pct')
-        if mod_state == 'alarm' and not r.get('valid', True):
-            mod_state = 'warn'   # over the limit, but reception not valid: not judged
+        mod_state = self._peak_state(r, 'pos_pct' if r['pos_pct'] >= r['neg_pct'] else 'neg_pct')
         self.tapes['mod'].set_value(peak, f"+{r['pos_pct']:.0f} / −{r['neg_pct']:.0f}%", mod_state,
                                     limit=r['limit_pct'], band=(85, r['limit_pct']))
         self.tapes['mod'].setToolTip(f"Peak modulation +{r['pos_pct']:.0f}% / −{r['neg_pct']:.0f}% "
@@ -5942,24 +5958,22 @@ class StationPanel(QtCore.QObject):
 
     def _show_detail_tapes(self, r):
         lv = r['levels']
-        lim = r['limit_pct']
+        limit_pct = r['limit_pct']
         for key in ('pos', 'neg'):
             pct = r[f'{key}_pct']
-            state = lv.get(f'{key}_pct')
-            if state == 'alarm' and not r.get('valid', True):
-                state = 'warn'
-            self.peak_tapes[key].set_value(pct, f"{pct:.0f}%  {pct * 0.75:.1f} kHz", state, limit=lim, band=(85, lim))
-        self.limit_note.setText(f'limit {lim:.1f}% \u24d8')
+            self.peak_tapes[key].set_value(pct, f"{pct:.0f}%  {pct * 0.75:.1f} kHz", self._peak_state(r, f'{key}_pct'),
+                                           limit=limit_pct, band=(85, limit_pct))
+        self.limit_note.setText(f'limit {limit_pct:.1f}% \u24d8')
         self.limit_note.setToolTip(f"Over-modulation limit in force: {r['limit_why']}")
         snr = r['snr_db']
         self.mpx_tapes['snr'].set_value(snr, _num(snr, 'dB'), 'alarm' if snr < self.settings.min_snr_db else None)
-        lim_ = r['limits']
+        limits = r['limits']
         if r['stereo_mode'] == 'mono':
             self.mpx_tapes['pilot'].set_value(None, 'none (mono)')
         else:
             self.mpx_tapes['pilot'].set_value(r['pilot_pct'], f"{r['pilot_pct']:.1f}%  {r['stereo_mode']}",
-                                              lv.get('pilot_pct'), band=(lim_['pilot_min_pct'], lim_['pilot_max_pct']))
-        tol = lim_['freq_tol_hz']
+                                              lv.get('pilot_pct'), band=(limits['pilot_min_pct'], limits['pilot_max_pct']))
+        tol = limits['freq_tol_hz']
         off = self.mpx_tapes['offset']
         off.lo, off.hi = -3 * tol, 3 * tol
         off.set_value(r['offset_hz'], f"{r['offset_hz']:+.0f} Hz", lv.get('offset_hz'), band=(-tol, tol))
@@ -6194,8 +6208,8 @@ class StationPanel(QtCore.QObject):
                        f'(alarm below {cfg.silence_lufs:g} LUFS for {cfg.silence_s} s)',
             'OVERMOD': f'peak +{num(s["valid_pos_pct"])}% / -{num(s["valid_neg_pct"])}% (valid reception), '
                        f'limit {num(limit)}%',
-            'EXCEEDANCE': (f'{num((exceed_fraction(s, lambda inj: exceed_khz(lim, inj)) or 0) * 1e6, ".2f")} '
-                           f'ppm of samples over {num(limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ)} kHz in the last '
+            'EXCEEDANCE': (f'{num((exceed_fraction(s, lambda inj: exceed_khz(limit_at(lim, inj))) or 0) * 1e6, ".2f")} '
+                           f'ppm of samples over {num(exceed_khz(limit))} kHz in the last '
                            f'{EXCEED_MIN_S / 60:.0f} min of valid reception (limit {EXCEED_FRACTION * 1e6:g} ppm)'),
             'PILOT_SPEC': f'pilot {num(s["pilot_pct"])}%{pilot_hz} (allowed {lim["pilot_min_pct"]:g}-'
                           f'{lim["pilot_max_pct"]:g}%, 19000 +/- {lim["pilot_tol_hz"]:g} Hz)',
@@ -6208,7 +6222,7 @@ class StationPanel(QtCore.QObject):
             'PILOT': f'pilot {num(s["pilot_pct"])}%',
             'RDS': f'RDS {num(rate)} groups/s',
             'BACKUP': f'RDS {num(rate)} groups/s while carrier, pilot ({num(s["pilot_pct"])}%) and audio '
-                      f'({num(a["momentary"])} LUFS) are fine: the N+1 backup transmitter has no RDS encoder',
+                      f'({num(a["momentary"])} LUFS) are fine: as when a backup transmitter without RDS is on air',
             'PI': f'PI {pi or "-"}, expected {cfg.expected_pi}',
             'ALERT': f'RT+ Alarm: {self._rt_alarm}' if self._rt_alarm else '',
             'DATA': (f'not on air for {DATA_GAP_S:.0f}+ s: {", ".join(map(self._service_label, self._data_lost))}'
@@ -6794,7 +6808,7 @@ class ReceiverDialog(QtWidgets.QDialog):
         alarms = QtWidgets.QGroupBox('Alarms')
         grid = QtWidgets.QGridLayout(alarms)
         self.alarm_checks = {}
-        for i, (name, desc, _) in enumerate(ALARM_DEFS):
+        for i, (name, _, desc, *_) in enumerate(ALARM_DEFS):
             box = QtWidgets.QCheckBox(desc[0].upper() + desc[1:])
             box.setChecked(settings.alarms.get(name, True))
             self.alarm_checks[name] = box
@@ -8424,7 +8438,7 @@ class MainWindow(QtWidgets.QWidget):
     def _clear_alarms(self, panel, why):
         """Send 'cleared' for a receiver's raised alarms before it stops judging
         them (retuned or removed), so email and webhooks see each one end."""
-        for name, desc, _ in ALARM_DEFS:
+        for name, _, desc, *_ in ALARM_DEFS:
             if name in panel.alarms.active:
                 self._alarm_event(panel, desc, False, why)
         panel.alarms.active.clear()
@@ -8477,7 +8491,7 @@ class MainWindow(QtWidgets.QWidget):
             'audio_formats': [{'key': f, 'label': WEB_FORMATS[f]['label'], 'canplay': WEB_FORMATS[f]['canplay']}
                               for f in (web.formats if self.ffmpeg else [])],
             'listeners': web.listeners(), 'max_listeners': WEB_MAX_LISTENERS,
-            'alarm_defs': [[name, desc, Annunciator.SHORT[name]] for name, desc, _ in ALARM_DEFS],
+            'alarm_defs': [[d.name, d.desc, d.short] for d in ALARM_DEFS],
             'alarm_means': Annunciator.MEANS,
             'alarm_episodes': [{k: e[k] for k in ('station', 'desc', 'start', 'end', 'detail')}
                                for e in self.alarm_table.episodes[-100:]],
