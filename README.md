@@ -53,9 +53,9 @@ right now and the rule or standard behind it.
 ## Alarms
 
 Carrier low/lost, audio silence, over-modulation, over-deviation over 15 minutes (ITU-R
-SM.1268), pilot lost, RDS lost ("possibly on N+1"
-instead when the carrier, pilot and audio stay fine, as an N+1 backup transmitter without an
-RDS encoder would cause), wrong PI, emergency alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
+SM.1268), pilot lost, RDS lost ("possibly on AUX"
+instead when the carrier, pilot and audio stay fine, as the auxiliary/backup (AUX) transmitter
+without an RDS encoder would cause), wrong PI, emergency alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
 then unseen for 15 s, the alarm held 60 s; paging that only bursts during an alert never
 alarms), and the FM technical rules of a preset (pilot out of tolerance, subcarriers over
 the limit, carrier frequency out of tolerance), each limit adjustable per receiver:

@@ -111,27 +111,27 @@ check('heavy multipath: over-modulation not judged (suppressed)', states[-1]['OV
 check('heavy multipath: other alarms still judged', states[-1]['CARRIER'] == 'clear')
 check('no RDS: no PI, no flags, no loss figure', r['pi'] is None and r['flags'] is None and r['rds_loss_pct'] is None)
 
-# ---- RDS gone while the carrier, pilot and audio stay fine: possibly on the N+1 backup
+# ---- RDS gone while the carrier, pilot and audio stay fine: possibly on the AUX (auxiliary/backup) transmitter
 p, st = panel(left=[(997, 0.42)], right=[(1600, 0.42)], pilot=0.09, rds=0.04)
 changes = []
 states = settle(p, rds_seen=True, changes=changes)
-check('N+1: possibly-on-N+1 pending, then raised', 'pending' in [x['BACKUP'] for x in states]
+check('AUX: possibly-on-AUX pending, then raised', 'pending' in [x['BACKUP'] for x in states]
       and states[-1]['BACKUP'] == 'raised', [x['BACKUP'] for x in states][:16])
-check('N+1: not shown as an RDS fault', states[-1]['RDS'] == 'clear', states[-1]['RDS'])
+check('AUX: not shown as an RDS fault', states[-1]['RDS'] == 'clear', states[-1]['RDS'])
 lamps = p.annunciator.states
-check('N+1: the annunciator lights N+1, not RDS', lamps.get('BACKUP') == 'raised' and lamps.get('RDS') == 'clear'
-      and rm.Annunciator.SHORT['BACKUP'] == 'N+1', lamps)
-check('N+1: the event names the backup and what is fine',
-      [(d, up) for d, up, _ in changes] == [('possibly on a backup transmitter without RDS (N+1)', True)]
-      and 'backup transmitter without RDS' in changes[0][2] and 'pilot' in changes[0][2], changes)
-check('N+1: logged in the history', [(n, up) for _, n, up in p.history.alarm_log] == [('BACKUP', True)],
+check('AUX: the annunciator lights AUX, not RDS', lamps.get('BACKUP') == 'raised' and lamps.get('RDS') == 'clear'
+      and rm.Annunciator.SHORT['BACKUP'] == 'AUX', lamps)
+check('AUX: the event names the AUX transmitter and what is fine',
+      [(d, up) for d, up, _ in changes] == [('possibly on the auxiliary/backup transmitter, without RDS (AUX)', True)]
+      and 'auxiliary/backup transmitter, without RDS' in changes[0][2] and 'pilot' in changes[0][2], changes)
+check('AUX: logged in the history', [(n, up) for _, n, up in p.history.alarm_log] == [('BACKUP', True)],
       list(p.history.alarm_log))
 states = settle(p, rds_seen=True, alarms={'BACKUP': False})
-check('N+1 alarm off: off, and RDS lost raised instead', states[-1]['BACKUP'] == 'off'
+check('AUX alarm off: off, and RDS lost raised instead', states[-1]['BACKUP'] == 'off'
       and states[-1]['RDS'] == 'raised', (states[-1]['BACKUP'], states[-1]['RDS']))
 p, st = panel(pilot=0.09, rds=0.04)
 states = settle(p, rds_seen=True)
-check('silent programme: RDS lost, not N+1', states[-1]['RDS'] == 'raised' and states[-1]['BACKUP'] == 'clear',
+check('silent programme: RDS lost, not AUX', states[-1]['RDS'] == 'raised' and states[-1]['BACKUP'] == 'clear',
       (states[-1]['RDS'], states[-1]['BACKUP']))
 
 # ---- the large MPX spectrum window: opens on a click, follows the panel, holds peaks

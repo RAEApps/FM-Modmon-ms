@@ -240,8 +240,8 @@ Measurements (refreshed 10x per second):
   service lost after 60 s, silence after its own time, 10 s by default)
     carrier low/lost, audio silence, over-modulation, over-deviation over
     15 min (ITU-R SM.1268, against the limit below + 2 kHz), pilot lost, RDS
-    lost (but "possibly on N+1" when the carrier, pilot and audio stay
-    fine, as when a backup transmitter without an RDS encoder is on air;
+    lost (but "possibly on AUX" when the carrier, pilot and audio stay
+    fine, as when the auxiliary/backup transmitter, without an RDS encoder, is on air;
     switch that alarm off and it is plain RDS lost), wrong PI, emergency alert (IBOC while it plays, or an RT+
     Alarm tag), data service lost (a service on air 5+ min unbroken, then
     unseen for 15 s and the alarm held 60 s: about 75 s), and the
@@ -3818,10 +3818,10 @@ ALARM_DEFS = (
                   "SDR's own frequency error.", source=_FCC_ISED_FREQ),
     AlarmDef('RDS', 'RDS', 'RDS lost', 10,
              what='Under 1 RDS group a second (over 3 s) on a station seen with RDS since tuning. When the '
-                  'carrier, pilot and audio stay fine it is "possibly on N+1" instead, unless that alarm is off.'),
-    AlarmDef('BACKUP', 'N+1', 'possibly on a backup transmitter without RDS (N+1)', 10,
-             what='RDS has gone while the carrier, pilot and audio stay fine, as when a backup transmitter '
-                  'without an RDS encoder is on air. Switch it off and it is plain RDS lost.'),
+                  'carrier, pilot and audio stay fine it is "possibly on AUX" instead, unless that alarm is off.'),
+    AlarmDef('BACKUP', 'AUX', 'possibly on the auxiliary/backup transmitter, without RDS (AUX)', 10,
+             what='RDS has gone while the carrier, pilot and audio stay fine, as when the auxiliary/backup '
+                  'transmitter, without an RDS encoder, is on air. Switch it off and it is plain RDS lost.'),
     AlarmDef('PI', 'PI', 'wrong station (PI differs from expected)', 5,
              what='The PI decoded is not the expected one (Settings): another station, or the wrong feed. '
                   'With no expected PI set it never raises.'),
@@ -5264,8 +5264,8 @@ class StationAlarms:
 
 
 def rds_conditions(seen_rds, rate, carrier, pilot_ok, silent, backup_on=True):
-    """(RDS lost, possibly on N+1) alarm conditions. RDS gone while the carrier,
-    pilot and audio stay fine points at a backup (N+1) transmitter without an RDS
+    """(RDS lost, possibly on AUX) alarm conditions. RDS gone while the carrier,
+    pilot and audio stay fine points at the auxiliary/backup (AUX) transmitter without an RDS
     encoder rather than an RDS fault: that is BACKUP, not RDS, unless
     the BACKUP alarm is switched off for the receiver."""
     lost = seen_rds and rate < 1
@@ -6964,7 +6964,7 @@ class StationPanel(QtCore.QObject):
             'PILOT': f'pilot {num(s["pilot_pct"])}%',
             'RDS': f'RDS {num(rate)} groups/s',
             'BACKUP': f'RDS {num(rate)} groups/s while carrier, pilot ({num(s["pilot_pct"])}%) and audio '
-                      f'({num(a["momentary"])} LUFS) are fine: as when a backup transmitter without RDS is on air',
+                      f'({num(a["momentary"])} LUFS) are fine: as when the auxiliary/backup transmitter, without RDS, is on air',
             'PI': f'PI {pi or "-"}, expected {cfg.expected_pi}',
             'ALERT': f'RT+ Alarm: {self._rt_alarm}' if self._rt_alarm else '',
             'DATA': (f'not on air for {DATA_GAP_S:.0f}+ s: {", ".join(map(self._service_label, self._data_lost))}'

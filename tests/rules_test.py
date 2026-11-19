@@ -169,18 +169,18 @@ finally:
     rm.time = real_time
 check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
 
-print('--- RDS gone: plain fault or an N+1 backup without RDS')
+print('--- RDS gone: plain fault or the AUX transmitter without RDS')
 st = station(**music)
-check('carrier, pilot and audio fine: possibly on N+1', judge(st, '', keep=('RDS',), rds_seen=True)[0], ['BACKUP'])
+check('carrier, pilot and audio fine: possibly on AUX', judge(st, '', keep=('RDS',), rds_seen=True)[0], ['BACKUP'])
 check('...with that alarm switched off: RDS lost', judge(st, '', keep=('RDS',), rds_seen=True,
                                                          alarms={'BACKUP': False})[0], ['RDS'])
 check('RDS still there: neither', judge(st, '', keep=('RDS',))[0], [])
-check('silent programme too: RDS lost, not N+1',
+check('silent programme too: RDS lost, not AUX',
       judge(station(pilot=0.09, rds=0.04), '', keep=('RDS', 'SILENCE'), rds_seen=True)[0], ['RDS', 'SILENCE'])
-check('carrier lost too: RDS lost, not N+1',
+check('carrier lost too: RDS lost, not AUX',
       judge(station(rf_amp=0.0001, **music), '', keep=('RDS',), rds_seen=True)[0], ['CARRIER', 'RDS'])
-check('pilot lost too: RDS lost, not N+1', rm.rds_conditions(True, 0.0, False, False, False), (True, False))
-check('mono station (never had a pilot): N+1', rm.rds_conditions(True, 0.0, False, True, False), (False, True))
+check('pilot lost too: RDS lost, not AUX', rm.rds_conditions(True, 0.0, False, False, False), (True, False))
+check('mono station (never had a pilot): AUX', rm.rds_conditions(True, 0.0, False, True, False), (False, True))
 check('RDS at 11.4 groups/s: neither', rm.rds_conditions(True, 11.4, False, True, False), (False, False))
 
 print('--- wideband ADC overload')
