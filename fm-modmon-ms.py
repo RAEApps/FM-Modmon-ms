@@ -55,7 +55,8 @@ RADIODNS_CLIENT_ID (or --radiodns-client-id). Images and service information
 are cached for the session only (a %TEMP% folder deleted on exit).
 
 The detail cards show each card's essential readings; "All (+n)" on a card shows
-the rest (remembered, and the same for every receiver), and a reading beyond the
+the rest (remembered, and the same for every receiver; the web page remembers its
+own choice, per browser), and a reading beyond the
 essentials shows anyway, marked with a triangle, while it is out of range. The
 line above the cards lists every reading out of range. Click any reading, bar,
 graph's (i) or alarm lamp for what it is, how it is measured, what it means
@@ -122,9 +123,11 @@ stations' alarms are held (neither raised nor cleared), as every reading is fals
 
 Measurements (refreshed 10x per second):
   RDS
-    PI, PS, RT, PTY, flags, AF      from gr-rds' parser
-    RT+, PTYN, ECC, ODA list, CT    decoded here from the raw groups (CT as
-                                    local time, with its offset from UTC)
+    PI, RT, flags, AF               from gr-rds' parser (flags from groups
+                                    0A/0B only: gr-rds skips group 15B)
+    PS, PTY, RT+, PTYN, ECC, ODA    decoded here from the raw groups (PS and
+    list, CT                        PTY falling back to gr-rds'; CT as local
+                                    time, with its offset from UTC)
     Groups/s, group loss            error-free groups; 11.4/s = no loss
     Group types                     share of each group type received
     Data services                   paging (7A), TMC (8A), EWS (9A), other
@@ -152,8 +155,8 @@ Measurements (refreshed 10x per second):
     Sync AM         synchronous AM: the envelope ripple that follows the
                     modulation, as the AM depth it reaches at +/-75 kHz, in %
                     and dB. A mistuned transmitter, filter, combiner or
-                    antenna match causes it (Orban: <= -35 dB, -40 dB
-                    preferred) - but so does any short-delay echo on the
+                    antenna match causes it (Orban: better than -35 dB)
+                    - but so does any short-delay echo on the
                     path, identically (a 3 us echo 20 dB down reads ~7%).
                     So it is a figure for this receiving site: the
                     transmitter's own share is at most this, and at a fixed,
@@ -192,11 +195,11 @@ Measurements (refreshed 10x per second):
     IBOC signal     IBOC sidebands found by the start-up scan, in dBc
   Modulation (100% = 75 kHz deviation)
     Peak + / -      1 s peak of positive and negative excursions: the level
-                    the MPX exceeds for 17 us of each 100 ms (a single noise
-                    sample doesn't count), read through a filter that undoes
-                    the demodulator's sinc roll-off (L-R, RDS and SCA peaks
-                    read up to 3% low without it) and stops the noise above
-                    100 kHz
+                    the MPX exceeds for a total of 17 us in each 100 ms (a
+                    single noise sample doesn't count), read through a filter
+                    that undoes the demodulator's sinc roll-off (without it
+                    L-R reads about 2% low, RDS about 4%, SCA 5-9%) and stops
+                    the noise above 100 kHz
                     Flagged when one side reads 3% higher than the other
                     over 10 s: programme is symmetric, but a station 200 kHz
                     above pulls the positive peaks up (below: the negative)
@@ -230,7 +233,8 @@ Measurements (refreshed 10x per second):
     true peak per channel (4x oversampled, 1 s hold)
   Stereo image (300 ms window)
     L/R RMS level, balance, correlation (+1 mono, 0 wide, <0 out of phase),
-    width (side/mid energy ratio), goniometer
+    width (side/mid energy ratio); the goniometer draws the last 8 ms of each
+    update (its large view, the last eight 20 ms snapshots), auto-scaled
   Alarms (raise/clear after holding 3-30 s; emergency alert at once, data
   service lost after 60 s, silence after its own time, 10 s by default)
     carrier low/lost, audio silence, over-modulation, over-deviation over
@@ -245,15 +249,20 @@ Measurements (refreshed 10x per second):
     the receiver's rules custom):
       over-modulation  above 100% + 0.5% per 1% of subcarrier injection
                        (RDS + SCA), never above 110% (FCC 47 CFR
-                       73.1570(b)(2); ISED BETS-6 A.2.2.4.4, BPR-3 3.13.2)
+                       73.1570(b)(2)); ISED gives the allowance only "when
+                       more than one subcarrier is used" (BPR-3 3.13.2,
+                       BETS-6 A.2.2.4), so with ISED rules it needs two of
+                       RDS, SCA 67 and SCA 92 on air (else the limit is 100%)
       pilot            stereo pilot outside 8-10% or 19 kHz +/-2 Hz
-                       (FCC 73.322; ISED BETS-6 A.2.2.2)
+                       (FCC 73.322(a)(2); ISED BETS-6 A.2.2.2)
       subcarriers      total injection over 20% in stereo or 30% in mono, or
-                       over 10% above 75/76 kHz (FCC 73.319(d); ISED BETS-6
-                       A.2.2.4.3, BPR-3 3.13.2)
-      carrier freq.    off by more than 2 kHz (FCC 73.1545(b)) / 1 kHz (ISED
-                       BETS-6 7.2.3, the transmitter stability standard);
-                       the reading includes the SDR's own tuning error
+                       the 92 kHz SCA over 10% (above 75 kHz; FCC 73.319(d));
+                       ISED: 20% in stereo or mono, 10% above 76 kHz (BPR-3
+                       3.13.2, BETS-6 A.2.2.4)
+      carrier freq.    off by more than 2 kHz (FCC 73.1545(b)(1), stations
+                       over 10 W) / 1 kHz (ISED BETS-6 7.2.3, the transmitter
+                       stability standard); the reading includes the SDR's
+                       own frequency error
 """
 
 import argparse
@@ -474,7 +483,7 @@ RADIODNS_IMAGE_MAX = 2 << 20  # a RadioDNS logo or slide bigger than this (bytes
 VIS_TRANSPORTS = (('push', '_radiopush._tcp'), ('stomp', '_radiovis._tcp'), ('http', '_radiovis-http._tcp'))
 VIS_TRANSPORT_NAMES = {'push': 'Server-sent Events', 'stomp': 'Stomp', 'http': 'HTTP'}
 
-# PTY names: RBDS (North America, NRSC-4-B) and RDS (IEC 62106 / EN 50067).
+# PTY names: RBDS (North America: IEC 62106-9, formerly NRSC-4-B) and RDS (IEC 62106).
 PTY_RBDS = ('None', 'News', 'Information', 'Sports', 'Talk', 'Rock', 'Classic Rock', 'Adult Hits',
             'Soft Rock', 'Top 40', 'Country', 'Oldies', 'Soft', 'Nostalgia', 'Jazz', 'Classical',
             'Rhythm and Blues', 'Soft Rhythm and Blues', 'Language', 'Religious Music',
@@ -492,7 +501,7 @@ ODA_NAMES = {0x4BD7: 'RT+', 0x6552: 'eRT', 0xCD46: 'TMC', 0xCD47: 'TMC', 0xC3B0:
 RTPLUS_TYPES = {1: 'Title', 2: 'Album', 3: 'Track', 4: 'Artist', 5: 'Composition',
                 7: 'Conductor', 8: 'Composer', 9: 'Band', 10: 'Comment', 11: 'Genre',
                 12: 'News', 27: 'Alarm', 30: 'Info', 31: 'Programme', 32: 'Next programme'}
-RTPLUS_ALARM = 27          # INFO.ALARM: public alert text (Alert FM's RadioText copy, NRSC-G300 7.2)
+RTPLUS_ALARM = 27          # INFO.ALARM: public alert text (Alert FM's RadioText copy, NRSC-G300 (2012) 7.2.2.2)
 
 # Data services: non-programme data a station carries, watched for presence only.
 # Paging, EWS and leased ODAs are addressed to their own receivers and often
@@ -909,7 +918,7 @@ def _percentiles(x, qs):
 def exceed_fraction(stats, khz):
     """The fraction of valid samples whose deviation exceeds `khz` (to the
     nearest EXCEED_BIN_KHZ), from FmMeter's SM.1268 histogram; None without samples.
-    `khz` may be a function of the subcarrier injection (%) at the time: each
+    `khz` may be a function khz(injection %, subcarriers on air) of the time: each
     sample is then judged against the limit that held when it was taken."""
     if not stats.get('exceed_n'):
         return None
@@ -920,12 +929,13 @@ def exceed_fraction(stats, khz):
 
     if not callable(khz):
         return over(stats['exceed_hist'], khz) / stats['exceed_n']
-    return sum(over(hist, khz(inj)) for inj, hist in stats['exceed_by_inj'].items()) / stats['exceed_n']
+    return sum(over(hist, khz(*key) if isinstance(key, tuple) else khz(key))
+               for key, hist in stats['exceed_by_inj'].items()) / stats['exceed_n']
 
 
 def peak_taps(n=PEAK_TAPS_N, fpass=PEAK_PASS_HZ, fstop=PEAK_STOP_HZ, fs=QUAD_RATE):
     """Linear-phase FIR for the peak path: 1/sinc(f/fs) to fpass, undoing the
-    quadrature demodulator's roll-off (-1.6% at 38 kHz, -3.2% at 57 kHz), which
+    quadrature demodulator's roll-off (-1.6% at 38 kHz, -3.6% at 57 kHz), which
     reads peaks of L-R, RDS and SCA low; zero from fstop, where the MPX holds only
     FM noise (rising as f^2), which reads as peak. Least squares on a dense grid."""
     k = np.arange(n // 2 + 1)
@@ -964,7 +974,7 @@ class FmMeter(gr.sync_block):
         self._dc_win = np.hanning(self._period)
         self._freqs = np.fft.rfftfreq(self.NFFT, 1.0 / QUAD_RATE)
         # The quadrature demodulator's phase-difference output rolls off as
-        # sinc(f/fs): -0.8 dB at 57 kHz, -2.2 dB at 92 kHz. Undo it.
+        # sinc(f/fs): -0.3 dB at 57 kHz, -0.8 dB at 92 kHz. Undo it.
         self._demod_comp = 1.0 / np.sinc(self._freqs / QUAD_RATE) ** 2
         self._psd = None
         self._rf = None
@@ -977,8 +987,9 @@ class FmMeter(gr.sync_block):
         self._exceed = deque()                             # per valid update: (histogram, samples), EXCEED_MIN_S
         self._exceed_hist = np.zeros(EXCEED_BINS, np.int64)  # ...their sum
         self._exceed_n = 0
-        self._exceed_by_inj = {}                           # ...and summed by injection (%, EXCEED_INJ_STEP)
+        self._exceed_by_inj = {}                           # ...and summed by (injection %, subcarriers on air)
         self._inj = 0.0                                    # subcarrier injection at the last update, %
+        self._nsub = 0                                     # ...and how many subcarriers were on air
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
         self._am_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # AM per update, for the peak gate
@@ -1033,7 +1044,7 @@ class FmMeter(gr.sync_block):
             self._exceed_hist[:] = 0
             self._exceed_n = 0
             self._exceed_by_inj.clear()
-            self._inj = 0.0
+            self._inj, self._nsub = 0.0, 0
             self._settle = SETTLE_UPDATES
             self.stats = None
         self._iq_energy += float(np.vdot(iq, iq).real)
@@ -1221,9 +1232,9 @@ class FmMeter(gr.sync_block):
             self._exceed_by_inj[inj] -= old
             if not self._exceed_by_inj[inj].any():
                 del self._exceed_by_inj[inj]
-        # The limit depends on the injection (RDS + SCA), which can change within
-        # the window: keep the injection each update was taken at.
-        inj = round(self._inj / EXCEED_INJ_STEP) * EXCEED_INJ_STEP
+        # The limit depends on the injection (RDS + SCA) and on how many subcarriers
+        # are on air, which can change within the window: keep both for each update.
+        inj = (round(self._inj / EXCEED_INJ_STEP) * EXCEED_INJ_STEP, self._nsub)
         self._exceed.append((h, len(ax), inj))
         self._exceed_hist += h
         self._exceed_n += len(ax)
@@ -1409,6 +1420,7 @@ class FmMeter(gr.sync_block):
             'mpx_db': 10 * np.log10(np.add.reduceat(self._psd[:2005], range(5, 2005, 10)) / 0.5 + 1e-12),
         }
         self._inj = rds_pct + (stats['sca67_pct'] or 0.0) + (stats['sca92_pct'] or 0.0)
+        self._nsub = subcarriers_on_air(stats)
         return stats
 
 
@@ -3773,43 +3785,69 @@ class AlarmDef(NamedTuple):
     source: str = ''     # the rule or standard behind it
 
 
-_FCC_ISED_MOD = 'FCC 47 CFR 73.1570(b)(2); ISED BETS-6 A.2.2.4.4, BPR-3 3.13.2.'
-_FCC_ISED_PILOT = 'FCC 47 CFR 73.322; ISED BETS-6 A.2.2.2.'
-_FCC_ISED_SUBS = 'FCC 47 CFR 73.319(d); ISED BETS-6 A.2.2.4.3, BPR-3 3.13.2.'
-_FCC_ISED_FREQ = 'ISED BETS-6 7.2.3 (transmitter stability); FCC 47 CFR 73.1545(b).'
+_FCC_ISED_MOD = ('FCC 47 CFR 73.1570(b)(2); ISED BPR-3 3.13.2 and BETS-6 A.2.2.4 (which give the allowance '
+                 '"when more than one subcarrier is used").')
+_FCC_ISED_PILOT = 'FCC 47 CFR 73.322(a)(2); ISED BETS-6 A.2.2.2.'
+_FCC_ISED_SUBS = ('FCC 47 CFR 73.319(d): 20% in stereo, 30% in mono, 10% above 75 kHz. ISED BPR-3 3.13.2 and '
+                  'BETS-6 A.2.2.4: 20% in stereo or mono (30% only with no programme), 10% above 76 kHz.')
+_FCC_ISED_FREQ = ('ISED BETS-6 7.2.3 (a transmitter stability test: BPR-1 sets no in-service figure); '
+                  'FCC 47 CFR 73.1545(b)(1) (±2 kHz over 10 W, ±3 kHz at 10 W or less).')
 _SM1268 = 'ITU-R SM.1268 and ERC/REC 54-01 (European practice, where the limit is 75 kHz + 2 kHz).'
 ALARM_DEFS = (
     AlarmDef('CARRIER', 'CARR', 'carrier low or lost', 5,
-             what='The carrier is gone, or the MPX S/N is below the setting for this receiver.'),
+             what="The RF level is below −75 dBFS, or the MPX S/N is below this receiver's setting."),
     AlarmDef('SILENCE', 'SIL', 'audio silence', 10,
-             what='The audio stays below the silence level for the time set for this receiver.'),
+             what="The momentary loudness stays below this receiver's silence level for its silence time "
+                  '(Settings), with the carrier fine.'),
     AlarmDef('OVERMOD', 'OVMD', 'over-modulation', 3, clean_only=True,
-             what='Peak modulation over the limit in force, judged on valid reception only.', source=_FCC_ISED_MOD),
+             what='The valid peaks of the last second are over the limit in force.', source=_FCC_ISED_MOD),
     AlarmDef('EXCEEDANCE', 'OVDEV', 'over-deviation over 15 min', 10,
              what='More than one in a million samples over the limit + 2 kHz, over the last 15 minutes of '
                   'valid reception. Judged once 15 minutes of valid time is held.', source=_SM1268),
-    AlarmDef('PILOT', 'PILOT', 'stereo pilot lost', 5, what='The 19 kHz stereo pilot has gone.'),
+    AlarmDef('PILOT', 'PILOT', 'stereo pilot lost', 5,
+             what='The 19 kHz pilot, seen since tuning, has fallen below 2%.'),
     AlarmDef('PILOT_SPEC', 'P.SPEC', 'stereo pilot out of tolerance', 10, clean_only=True,
-             what='The pilot is outside its injection range or more than its tolerance off 19 kHz.',
+             what='The pilot is outside its injection range, or further off 19 kHz than its tolerance.',
              source=_FCC_ISED_PILOT),
     AlarmDef('SUBCARRIERS', 'SUBS', 'subcarrier injection over the limit', 10, clean_only=True,
-             what='Subcarrier injection (RDS + SCA) over the total allowed in stereo or mono, or too much '
-                  'above 75 kHz.', source=_FCC_ISED_SUBS),
+             what='RDS + SCA injection over the total allowed (one limit in stereo, another in mono), or the '
+                  '92 kHz SCA over the limit above 75 kHz.', source=_FCC_ISED_SUBS),
     AlarmDef('FREQUENCY', 'FREQ', 'carrier frequency out of tolerance', 30, clean_only=True,
              what="The carrier is further off its frequency than the tolerance. The reading includes the "
-                  "SDR's own tuning error.", source=_FCC_ISED_FREQ),
-    AlarmDef('RDS', 'RDS', 'RDS lost', 10, what='No RDS groups are decoded.'),
+                  "SDR's own frequency error.", source=_FCC_ISED_FREQ),
+    AlarmDef('RDS', 'RDS', 'RDS lost', 10,
+             what='Under 1 RDS group a second (over 3 s) on a station seen with RDS since tuning. When the '
+                  'carrier, pilot and audio stay fine it is "possibly on N+1" instead, unless that alarm is off.'),
     AlarmDef('BACKUP', 'N+1', 'possibly on a backup transmitter without RDS (N+1)', 10,
              what='RDS has gone while the carrier, pilot and audio stay fine, as when a backup transmitter '
                   'without an RDS encoder is on air. Switch it off and it is plain RDS lost.'),
     AlarmDef('PI', 'PI', 'wrong station (PI differs from expected)', 5,
-             what='The PI decoded is not the expected one: another station, or the wrong feed.'),
+             what='The PI decoded is not the expected one (Settings): another station, or the wrong feed. '
+                  'With no expected PI set it never raises.'),
     AlarmDef('ALERT', 'ALERT', 'emergency alert (IBOC or RT+ Alarm)', 0,  # IBOC: only while an IBOC programme is playing
-             what='An IBOC emergency alert while an IBOC programme plays, or an RT+ Alarm tag.',
-             source='NRSC-G300 7.2 (RT+ Alarm).'),
+             what='An IBOC emergency alert while an IBOC programme plays, or an RT+ Alarm tag in the RadioText.',
+             source='RT+ content type 27, INFO.ALARM (RDS Forum RT+ specification); its use for Alert FM: '
+                    'NRSC-G300 (2012) 7.2.2.2.'),
     AlarmDef('DATA', 'DATA', 'data service lost (paging, EWS, ODA or SCA data)', 60,
-             what='A data service on air for 5 minutes unbroken is no longer seen (about 75 s after it stops).'),
+             what='A data service on air for 5 minutes without a 15 s gap is no longer seen: about 75 s after '
+                  'an RDS service stops (judged only while RDS itself decodes), about 60 s after SCA data does.'),
 )
+# How each alarm that waits for good reception is judged (the others: always, once tuned).
+_CLEAN = f'AM / multipath under {CLEAN_AM_PCT:g}%, S/N over 25 dB and the carrier not low'
+ALARM_JUDGED = {
+    'OVERMOD': f'Judged only on valid peaks ({_CLEAN}, and reception valid: see Valid time).',
+    **{name: f'Judged only on clean reception ({_CLEAN}).' for name in ('PILOT_SPEC', 'SUBCARRIERS', 'FREQUENCY')},
+}
+
+
+def alarm_when(d, hold):
+    """When an alarm raises and clears, in a sentence or two; hold: its seconds (SILENCE: the receiver's)."""
+    text = ('It raises and clears at once.' if not hold else
+            f'It raises once its condition has held {hold:g} s, and clears once it has been gone {hold:g} s.')
+    if d.name in ALARM_JUDGED:
+        text += (f' {ALARM_JUDGED[d.name]} While it is not judged it counts as clear, so a raised alarm '
+                 f'clears {hold:g} s later.')
+    return text
 
 
 # Each reading on the detail cards: what the panel and the web page say about it
@@ -3829,173 +3867,227 @@ class ReadoutDef(NamedTuple):
 
 CARDS = (('mod', 'Modulation'), ('mpx', 'Multiplex'), ('rds', 'RDS'), ('aud', 'Audio'))
 _RULES_SET = " The rule set is the receiver's (Settings)."
+_PEAK_HOW = ('The level the MPX exceeds for a total of 17 µs in each 100 ms (so a lone noise sample doesn\'t '
+             'count), from the carrier\'s mean frequency, through a filter that undoes the demodulator\'s '
+             'roll-off (without it L−R reads about 2% low, RDS about 4%, SCA 5–9%) and stops the noise above '
+             '100 kHz. Shown for all reception; the over-modulation alarm judges valid time only. Amber over '
+             '100%, red over the limit (amber while reception isn\'t valid). White tick: the highest of the last '
+             '2 s; red notch: the limit; grey band: 85% to the limit.')
 READOUTS = (
     # Modulation
-    ReadoutDef('+ peak', 'mod', True, ('pos_pct',), 'up to the limit',
+    ReadoutDef('+ peak', 'mod', True, ('pos_pct',), 'up to 100% (red over the limit)',
                'The highest positive swing of the composite (MPX) signal in the last second, as a percentage '
-               'of 75 kHz deviation.',
-               'The level the MPX exceeds for 17 µs in each 100 ms, so one noise sample doesn\'t count, read '
-               'through a filter that undoes the demodulator\'s roll-off (L−R, RDS and SCA peaks would read up to '
-               '3% low without it). White tick: 2 s peak hold; red notch: the limit in force.',
-               'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
-    ReadoutDef('− peak', 'mod', True, ('neg_pct',), 'up to the limit',
+               'of 75 kHz deviation.', _PEAK_HOW, 'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
+    ReadoutDef('− peak', 'mod', True, ('neg_pct',), 'up to 100% (red over the limit)',
                'The deepest negative swing of the composite signal in the last second, as a percentage of 75 kHz.',
                'The same detector as + peak, on the negative side.', 'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
     ReadoutDef('Limit', 'mod', True, (), '',
                'The over-modulation limit this station is judged against.',
-               '100%, plus 0.5% for each 1% of subcarrier injection (RDS and SCA), never above 110%. Every limit '
-               'can be changed per receiver; the rules then become custom.', _FCC_ISED_MOD + _RULES_SET),
+               '100%, plus 0.5% for each 1% of subcarrier injection (RDS and SCA, as measured here), never above '
+               '110%. ISED gives that allowance only with more than one subcarrier, so with ISED rules it needs two '
+               'of RDS, SCA 67 and SCA 92 on air (RDS alone: 100%); FCC rules give it with any. Every limit '
+               'can be changed per receiver; the rules then become custom.',
+               _FCC_ISED_MOD + _RULES_SET),
     ReadoutDef('Peak distribution', 'mod', False, (), '',
                'How the peak modulation has spread over the last 5 minutes: the share of updates at each level.',
-               'Log height. Red: over the limit in force; amber: over 100%.'),
-    ReadoutDef('Peak deviation', 'mod', False, (), 'up to the limit',
-               'The 1 s peak of either polarity, in kHz.', 'The same detector as + / − peak.'),
+               'The 1 s peak (the higher of + and −), every 100 ms, valid or not, in 2% bins from 60% to 130% '
+               '(beyond: the end bins). Log height. Dashed line: the limit; red bins lie wholly over it, amber '
+               'ones over 100%.'),
+    ReadoutDef('Peak deviation', 'mod', False, (), 'up to 75 kHz × the limit',
+               'The 1 s peak of either polarity, in kHz (and as a percentage).',
+               "The same detector as + / − peak, on the MPX's magnitude (either polarity). Not coloured."),
     ReadoutDef('MPX power', 'mod', False, (), 'information only here',
                'The average power of the whole composite over 60 s, against a ±19 kHz sine (0 dBr).',
-               'Integrated over 60 s (the time so far while it fills).',
-               'ITU-R BS.412: a European limit (+0 dBr), not an FCC or ISED rule.'),
+               'Integrated over 60 s (the time so far while it fills), over the whole demodulated band, valid or '
+               'not: on a weak signal, receiver noise adds to it.',
+               'ITU-R BS.412 (+0 dBr): a planning limit applied mainly in Europe, not an FCC or ISED rule.'),
     ReadoutDef('Over 100%', 'mod', False, (), 'up to 10 a minute',
                'Bursts above 100% in the last minute.',
-               'Counted in valid time only; repeats within 5 ms are one burst.',
+               'A burst is a 1 ms window in which the MPX stays over 100% for 17 µs in a row; repeats within 5 ms '
+               'are one burst. Counted in valid time only. Not coloured here (the station row\'s trend note turns '
+               'amber at any).',
                'The FCC 93-370-era convention: industry practice, not a rule.'),
-    ReadoutDef('Over 110%', 'mod', False, (), '0',
-               'Bursts above 110% in the last minute.', 'As Over 100%.',
+    ReadoutDef('Over 110%', 'mod', False, (), 'none',
+               'Bursts above 110% in the last minute.', 'Counted as Over 100%, at 110%. Not coloured.',
                'The FCC 93-370-era convention: industry practice, not a rule.'),
-    ReadoutDef('Peak balance', 'mod', False, ('asym_pct',), f'within ±{ASYM_WARN_PCT:g}%',
+    ReadoutDef('Peak balance', 'mod', False, ('asym_pct',), f'within ±{ASYM_WARN_PCT:g} points',
                'How much higher the positive peaks run than the negative ones.',
-               'Over 10 s. Programme audio is symmetric, so a lasting difference means something adds to one '
-               'side: a station 200 kHz above pulls the positive peaks up (below: the negative).'),
+               'The mean over 10 s of + peak minus − peak, in points of modulation (% of 75 kHz), valid or not. '
+               f'Amber from {ASYM_WARN_PCT:g}. Programme audio is symmetric, so a lasting difference means something '
+               'adds to one side: a station 200 kHz above pulls the positive peaks up (below: the negative).'),
     ReadoutDef('L / R', 'mod', False, ('mod_l', 'mod_r'), 'up to 100%',
-               'The peak modulation of the left and right channels, 1 s, as transmitted.', 'Decoded from the MPX.'),
+               'The peak modulation of the left and right channels in the last second, as transmitted.',
+               'Decoded from the MPX before de-emphasis, to 15 kHz, as the highest sample at 48 kHz (no 17 µs '
+               'rule). Amber over 100%, red over 110% (not the station\'s limit). In mono, L and R both read L+R.'),
     ReadoutDef('L+R / L−R', 'mod', False, ('mod_m', 'mod_s'), 'up to 100%',
-               'The peak modulation of the mono sum and the stereo difference, 1 s, as transmitted.',
-               'Decoded from the MPX.'),
+               'The peak modulation of the mono sum and the stereo difference in the last second, as transmitted.',
+               'As L / R. In mono, L−R reads 0.'),
     ReadoutDef('Valid time', 'mod', False, ('valid_pct',), f'{VALID_WARN_PCT:g}% or more',
                'How much of the last 15 minutes had reception clean enough to trust the peak readings.',
-               f'Each 100 ms is valid or not: not while AM / multipath has been {PEAK_AM_PCT:g}% or more in the '
-               'last 10 s, nor while Noise >100 kHz is high, nor for 1 s after a 3 dB RF level step, nor for 60 s '
-               "after another station's PI is decoded. The over-modulation alarms judge valid time only. A station "
-               'seldom valid says more about the antenna than the transmitter.',
+               f'Each 100 ms is valid or not: not while AM / multipath has reached {PEAK_AM_PCT:g}% in the last '
+               '10 s, nor while Noise >100 kHz has been amber in the last 10 s, nor while the RF level is more than '
+               '3 dB off its average of the last few seconds (and 1 s after), nor until 60 s after another '
+               "station's PI was last decoded (against the expected PI, else the one held 60 s since tuning). "
+               f'Amber under {VALID_WARN_PCT:g}%. The over-modulation alarms judge valid time only. A station seldom '
+               'valid says more about the antenna than the transmitter.',
                'The site practice of ITU-R SM.1268.'),
-    ReadoutDef('Over-deviation (15 min)', 'mod', False, ('exceed_frac',), 'under 1 ppm',
+    ReadoutDef('Over-deviation (15 min)', 'mod', False, ('exceed_frac',), '1 ppm or less',
                'The share of samples over the limit + 2 kHz in the last 15 minutes of valid reception.',
-               'Every sample counts; more than one in a million (1 ppm) is a violation. Its alarm is judged once '
-               '15 minutes of valid time is held.', _SM1268),
+               'Every sample of the peak path counts, each against the limit at its time (to the nearest 0.5 kHz). '
+               'More than one in a million (1 ppm) is a violation: amber while under 15 minutes of valid time is '
+               'held, red after. Its alarm is judged once 15 minutes is held.', _SM1268),
     # Multiplex
     ReadoutDef('MPX spectrum', 'mpx', True, (), '',
                'The spectrum of the composite signal, 0–100 kHz: programme (L+R) to 15 kHz, the 19 kHz pilot, '
                'stereo (L−R) 23–53 kHz, RDS at 57 kHz, and any SCA at 67 / 92 kHz.',
-               'dB against 100% modulation, 500 Hz bins. Click the graph for a larger view.'),
+               'dB against a 100% (75 kHz) sine in 500 Hz bins, 0 to −70 dB: a tone reads its injection (a 9% '
+               'pilot: −21 dB); programme and noise read per 500 Hz. The demodulator\'s roll-off is undone. Click '
+               'the graph for a larger view with a peak hold (falling 3 dB/s) and a readout under the mouse.'),
     ReadoutDef('S/N', 'mpx', True, ('snr_db',), "above the carrier alarm's setting",
-               'Signal-to-noise of the received composite: a 100% tone against the receiver noise in 0–15 kHz.',
-               'Unweighted, no de-emphasis. The noise is estimated from the empty 16–18.3 kHz guard band, '
-               "allowing for FM noise rising with frequency. Below the carrier alarm's setting is carrier low; "
-               'the grey band (30 dB and up) is good reception.'),
+               'Signal-to-noise of the received composite: a 100% tone against the noise in 0–15 kHz, from the '
+               'path, the receiver and the station itself.',
+               'Unweighted, no de-emphasis, the mono band only (stereo L / R is noisier). The noise is estimated '
+               'from the empty 16–18.3 kHz guard band, allowing for FM noise rising with frequency. Red below the '
+               "carrier alarm's setting (carrier low); under 25 dB the technical rules aren't judged. The grey "
+               'band (30 dB and up) is good reception.'),
     ReadoutDef('Pilot', 'mpx', True, ('pilot_pct',), 'the grey band',
                'The level of the 19 kHz stereo pilot, as a percentage of 75 kHz.',
-               'Stereo from 3% until it falls below 2%. The grey band is the range the rules allow.',
+               'Stereo from 3% until it falls below 2%. The grey band is the range the rules allow; red outside it.',
                _FCC_ISED_PILOT + _RULES_SET),
     ReadoutDef('Offset', 'mpx', True, ('offset_hz',), 'the grey band',
                'How far the carrier is from its frequency.',
-               "The DC level of the demodulated signal. It includes the SDR's own tuning error, so recalibrate "
-               'before trusting a small offset. The grey band is the tolerance.', _FCC_ISED_FREQ + _RULES_SET),
-    ReadoutDef('RF level', 'mpx', True, (), '',
+               'The DC level of the demodulated signal, averaged over about 3 s. It includes the SDR\'s own '
+               'frequency error, so check a small offset against a station known to be on frequency. The grey band '
+               'is the tolerance; red outside it (the alarm waits for clean reception and 30 s).',
+               _FCC_ISED_FREQ + _RULES_SET),
+    ReadoutDef('RF level', 'mpx', True, ('rf_dbfs',), 'above −75 dBFS',
                'The channel power at the SDR.',
                'In dBFS, uncalibrated: it depends on the gain. Compare it with itself over time, not with a '
-               'field-strength meter.'),
+               'field-strength meter. Under −75 dBFS is carrier low.'),
     ReadoutDef('RDS injection', 'mpx', True, (), 'typically 2–5%',
                'The peak deviation of the 57 kHz RDS subcarrier, as a percentage of 75 kHz.',
                'As encoders are set (2 kHz = 2.7%), with the receiver noise removed. It counts toward the '
                'subcarrier total and raises the modulation limit.', 'The subcarrier total: ' + _FCC_ISED_SUBS),
     ReadoutDef('AM / multipath', 'mpx', False, ('am_pct',), f'under {PEAK_AM_PCT:g}%',
-               'Amplitude ripple on the carrier: echoes on the path, or a transmitter fault. 0% is clean reception.',
-               f'RMS envelope ripple as a percentage of 100% AM (10% sine AM reads 10%). Peaks are judged only '
-               f'while it stays under {PEAK_AM_PCT:g}%; the other rules while under {CLEAN_AM_PCT:g}%.',
+               'Amplitude ripple on the carrier: echoes on the path, or a transmitter fault (on a weak signal, '
+               'noise too). 0% is clean reception.',
+               f'RMS envelope ripple as a percentage of 100% AM (10% sine AM reads 10%). Amber from '
+               f'{PEAK_AM_PCT:g}%, red from {CLEAN_AM_PCT:g}%. Peaks are judged only while it has stayed under '
+               f'{PEAK_AM_PCT:g}% for the last 10 s; the other rules while it is under {CLEAN_AM_PCT:g}% (and S/N '
+               'is over 25 dB).',
                f'The {PEAK_AM_PCT:g}% threshold follows ITU-R SM.1268 (echoes 26 dB down).'),
     ReadoutDef('Pilot freq', 'mpx', False, ('pilot_hz',), '19 kHz ± the tolerance',
-               'The frequency of the 19 kHz pilot.', 'From the stereo PLL.', _FCC_ISED_PILOT + _RULES_SET),
+               'The frequency of the 19 kHz pilot.', 'From the stereo PLL; red beyond the tolerance.',
+               _FCC_ISED_PILOT + _RULES_SET),
     ReadoutDef('Pilot AM', 'mpx', False, ('pilot_am_pct',), f'under {PILOT_AM_WARN_PCT:g}%',
                "Ripple in the pilot's level.",
                "RMS × √2. An echo modulates it as the carrier sweeps the channel's notches, so it confirms "
-               'multipath; noise and composite clipping raise it too, plain AM doesn\'t.',
+               'multipath; noise and composite clipping raise it too, plain AM doesn\'t. Amber from '
+               f'{PILOT_AM_WARN_PCT:g}%.',
                "Inovonics' multipath indication."),
     ReadoutDef('RDS phase', 'mpx', False, ('rds_phase_deg',), '0° or ±90°, within ±10°',
-               "The phase of the RDS subcarrier against the pilot's third harmonic, over 5 s.",
-               'In phase (0°) or quadrature (±90°) are both correct. Drifting means the RDS encoder isn\'t '
-               'locked to the pilot: late RadioText, skipped PS.', 'IEC 62106.'),
+               "The phase of the RDS subcarrier against the pilot's third harmonic, averaged over up to 5 s.",
+               'In phase (0°) or quadrature (±90°) are both correct. More than 10° off either is red. Drifting '
+               '(amber) means the RDS encoder isn\'t locked to the pilot: receivers that take 57 kHz from the '
+               'pilot then decode poorly (late RadioText, skipped PS). Measured only with a pilot over 3% and RDS '
+               'decoded.', 'IEC 62106.'),
     ReadoutDef('Sync AM', 'mpx', False, ('sync_am_pct',), '−35 dB or better',
                'Amplitude ripple that follows the modulation, as the AM depth it reaches at ±75 kHz.',
                'A mistuned transmitter, filter, combiner or antenna match causes it, but a short echo on the path '
                "reads the same, so it is a figure for this receiving site: the transmitter's share is at most "
-               f'this. Judged only while AM / multipath stays under {PEAK_AM_PCT:g}%.',
-               "Orban's transmitter guidance (−35 dB, −40 dB preferred)."),
-    ReadoutDef('Noise >100 kHz', 'mpx', False, ('hf_noise_db',), 'low',
+               f'this. Averaged over about 2 s. Amber above −35 dB, judged only while AM / multipath has stayed '
+               f"under {PEAK_AM_PCT:g}% for the last 10 s (greyed 'multipath' otherwise); '-' while the "
+               'modulation is too light (under 7.5 kHz RMS).',
+               "Orban's guidance: better than −35 dB (Orban measures it with de-emphasis, so its figure is "
+               'not the same as this one).'),
+    ReadoutDef('Noise >100 kHz', 'mpx', False, ('hf_noise_db',), 'under ±1.05 kHz RMS on the peaks',
                'Noise in 105–145 kHz of the composite, where nothing but noise and interference belongs.',
-               'dB against a 100% sine; in brackets, the noise it leaves on the peak readings. While it is amber '
-               'reception isn\'t valid.', "Pira's quality metric."),
+               'The band\'s total power in dB against a 100% sine; in brackets, the noise it leaves on the peak '
+               'readings now. Amber, and reception not valid, while that has reached ±1.05 kHz RMS in the last '
+               '10 s.', "One of the inputs to Pira's signal quality figure (P275)."),
     ReadoutDef('SCA 67 kHz', 'mpx', False, (), 'within the subcarrier total',
                'Subcarrier injection at 67 kHz, and what it carries.',
-               'Shown when it stands 10 dB above the empty 77–82 kHz gap. Its content is classed as audio, data, '
-               'tone or idle: identified, never decoded.',
+               'Shown when its 60–74 kHz slot stands 10 dB above the empty 77–82 kHz gap. Its content is classed '
+               'over about 6 s as audio, data (with its symbol rate when it is NRZ), tone or idle; under 15 dB '
+               'above the gap it is too weak to tell. Identified, never decoded.',
                _FCC_ISED_SUBS + ' Not decoded: Radiocommunication Act s. 9(2).'),
-    ReadoutDef('SCA 92 kHz', 'mpx', False, (), 'within the subcarrier total',
-               'Subcarrier injection at 92 kHz, and what it carries.', 'As SCA 67 kHz.',
+    ReadoutDef('SCA 92 kHz', 'mpx', False, (), 'within the subcarrier total and the limit above 75 kHz',
+               'Subcarrier injection at 92 kHz, and what it carries.', 'As SCA 67 kHz, in its 85–99 kHz slot.',
                _FCC_ISED_SUBS + ' Not decoded: Radiocommunication Act s. 9(2).'),
     ReadoutDef('IBOC signal', 'mpx', False, (), '',
-               'The HD Radio sidebands the start-up scan found.', 'In dBc, against the analog carrier.', 'NRSC-5.'),
+               'The HD Radio sidebands the start-up scan found.',
+               'Both sidebands\' total power against the analog signal, in dBc, measured once at start-up '
+               '(unknown when a station 200 kHz away hides them).', 'NRSC-5.'),
     # RDS
     ReadoutDef('RDS rate', 'rds', True, (), '11.4 groups/s',
                'RDS groups decoded each second, over the last 5 minutes.', '11.4 a second is every group sent.'),
-    ReadoutDef('PI', 'rds', True, (), 'the expected PI',
+    ReadoutDef('PI', 'rds', True, ('pi',), 'the expected PI',
                "Programme Identification: the station's RDS code.",
-               'The wrong-station alarm compares it with the expected PI (Settings).', 'IEC 62106; NRSC-4-B (RBDS).'),
+               'Red when it differs from the expected PI (Settings), which also raises the wrong-station alarm; '
+               'with none set it is never red. Any other PI (against the expected one, else the one held 60 s '
+               'since tuning) also makes reception not valid for 60 s.', 'IEC 62106; IEC 62106-9 (RBDS, formerly '
+               'NRSC-4-B).'),
     ReadoutDef('PTY', 'rds', True, (), '',
                'The programme type the station sends.', 'Named from the RBDS or the RDS list (Settings).',
-               'NRSC-4-B (North America); IEC 62106.'),
+               'IEC 62106-9 (RBDS, North America; formerly NRSC-4-B); IEC 62106.'),
     ReadoutDef('Groups/s', 'rds', True, (), '11.4',
                'RDS groups decoded each second.', 'Over the last 3 s; 11.4 a second is every group the encoder sends.'),
     ReadoutDef('Group loss', 'rds', True, (), 'under about 5%',
-               "The share of RDS groups that didn't decode.", 'The decode rate against 11.4 a second.'),
+               "The share of RDS groups that didn't decode.",
+               'The decode rate over the last 3 s against 11.4 a second (one group missed in 3 s is about 3%).'),
     ReadoutDef('PTYN', 'rds', False, (), '', 'A free-text programme type name.', 'Group 10A.', 'IEC 62106.'),
     ReadoutDef('ECC', 'rds', False, (), '', 'The extended country code: with the PI, it identifies the country.',
                'Group 1A.', 'IEC 62106.'),
     ReadoutDef('Flags', 'rds', False, (), '', 'Traffic programme and announcement, music / speech, and the '
-               'decoder identification flags.', 'Groups 0A and 15B; lit when set.', 'IEC 62106.'),
-    ReadoutDef('ODA', 'rds', False, (), '', 'The open data applications announced (RT+, TMC, ...).', 'Group 3A.',
-               'IEC 62106.'),
+               'decoder identification flags.',
+               'From groups 0A / 0B. TP, TA and the decoder identification flags (stereo, artificial head, '
+               'compressed) are lit when set; Music or Speech is shown by name.', 'IEC 62106.'),
+    ReadoutDef('ODA', 'rds', False, (), '', 'The open data applications announced (RT+, TMC, ...) since tuning.',
+               'Group 3A.', 'IEC 62106.'),
     ReadoutDef('Alt. freqs', 'rds', False, (), '', 'The alternative frequencies the station lists.', 'Group 0A.',
                'IEC 62106.'),
-    ReadoutDef('Clock', 'rds', False, (), 'within seconds of the time', "The station's clock, in local time.",
-               'Group 4A, sent as UTC with the local offset.', 'IEC 62106.'),
-    ReadoutDef('Group types', 'rds', False, (), '', 'The share of each RDS group type received.', 'Since tuning.'),
+    ReadoutDef('Clock', 'rds', False, (), 'the right local time, to the minute', "The station's clock, in local time.",
+               'Group 4A, sent as UTC with the local offset; shown to the minute, as last received.', 'IEC 62106.'),
+    ReadoutDef('Group types', 'rds', False, (), '', 'The share of each RDS group type received.',
+               'Error-free groups since tuning; the five most common.'),
     ReadoutDef('Data services', 'rds', False, ('data_lost',), '',
                'Paging, TMC, EWS, other ODAs and SCA data: present or lost, with their share of the groups.',
-               'Identified, never decoded. A service on air 5 minutes unbroken counts as lost once it is unseen.',
+               'Identified, never decoded. Present while seen in the last 15 s; a service on air 5 minutes without '
+               'a 15 s gap shows as lost once unseen for 15 s (its alarm follows 60 s later). Share: of all groups '
+               'since tuning.',
                'Not decoded: Radiocommunication Act s. 9(2).'),
     # Audio
     ReadoutDef('Momentary', 'aud', False, (), '', 'Loudness over the last 400 ms.',
-               'K-weighted, from the de-emphasised L/R; 0 dBFS = 75 kHz deviation.', 'ITU-R BS.1770; EBU R128.'),
+               'K-weighted, from the de-emphasised L/R; 0 dBFS in a channel is 75 kHz deviation at low audio '
+               'frequencies (below the de-emphasis corner), pilot and subcarriers excluded.',
+               'ITU-R BS.1770; EBU R128.'),
     ReadoutDef('Short-term', 'aud', True, (), '', 'Loudness over the last 3 s.',
                'As Momentary. FM sets no loudness limit; the trend\'s dotted line is the EBU reference, −23 LUFS.',
                'ITU-R BS.1770; EBU R128.'),
-    ReadoutDef('Integrated', 'aud', True, (), '', 'Loudness since start, or since reset I.',
-               'Gated, as EBU R128 specifies.', 'ITU-R BS.1770; EBU R128.'),
+    ReadoutDef('Integrated', 'aud', True, (), '',
+               'Loudness since tuning, a gain recalibration, an SDR restart, or reset I.',
+               'Gated as BS.1770 defines (−70 LUFS absolute, −10 LU relative), as EBU R128 requires.',
+               'ITU-R BS.1770; EBU R128.'),
     ReadoutDef('True peak L/R', 'aud', True, (), 'below 0 dBTP', 'The true peak of each channel.',
-               '4× oversampled, 1 s hold.', 'ITU-R BS.1770.'),
+               '4× oversampled, 1 s hold; 0 dBTP as for Momentary. Not coloured.', 'ITU-R BS.1770.'),
     ReadoutDef('Loudness trend', 'aud', True, (), '', 'Short-term loudness over the last 5 minutes.',
-               'Dotted: −23 LUFS, the EBU reference.'),
+               'Scale −40 to 0 LUFS; dotted: −23 LUFS, the EBU reference.'),
     ReadoutDef('Stereo image', 'aud', True, (), 'taller than wide',
                'A goniometer: L against R, turned 45° so mono is a vertical line and out-of-phase audio a '
-               'horizontal one.', 'From the de-emphasised L/R, 300 ms. Click it for a larger view.'),
+               'horizontal one.',
+               'From the de-emphasised L/R: the last 8 ms of each 100 ms on the panel (the last eight 20 ms '
+               'snapshots in the larger view). Auto-scaled, so its size isn\'t level. Click it for a larger view.'),
     ReadoutDef('Phase', 'aud', True, ('correlation',), 'above 0',
                'How alike L and R are: +1 mono, 0 wide stereo, below 0 out of phase (it cancels in mono).',
-               '300 ms window.'),
-    ReadoutDef('Balance', 'aud', False, (), 'near centre', 'The level difference between L and R.', 'RMS, 300 ms.'),
+               '300 ms window; red below 0.'),
+    ReadoutDef('Balance', 'aud', False, (), 'centre', 'The level difference between L and R.',
+               "RMS over 300 ms; 'centre' within ±0.5 dB, else how much louder the named side is. Not coloured."),
     ReadoutDef('Width (S/M)', 'aud', False, (), '', 'Side energy against mid energy: how wide the stereo is.',
-               '300 ms; mono below −40 dB.'),
-    ReadoutDef('Level L/R', 'aud', False, (), '', 'The RMS level of each channel.', '300 ms, dBFS.'),
-    ReadoutDef('Correlation', 'aud', False, (), 'above 0', "The Phase meter's value: +1 mono, 0 wide stereo, "
-               'below 0 out of phase.', '300 ms window.'),
+               '300 ms. Mono below −40 dB; 0 dB: L and R unrelated; above 0: more side than mid (out of phase).'),
+    ReadoutDef('Level L/R', 'aud', False, (), '', 'The RMS level of each channel.',
+               'Over 300 ms, in dB against full scale (a full-scale sine reads −3 dB).'),
+    ReadoutDef('Correlation', 'aud', False, ('correlation',), 'above 0', "The Phase meter's value: +1 mono, 0 wide "
+               'stereo, below 0 out of phase.', '300 ms window; red below 0.'),
 )
 READOUT = {d.name: d for d in READOUTS}
 
@@ -4009,13 +4101,21 @@ def readout_now(name, r):
     if name == 'Valid time' and r.get('invalid_why'):
         return f"Not valid now: {r['invalid_why']}."
     level = next((lv[k] for k in d.levels if lv.get(k)), None)
-    if name == 'AM / multipath' and level:
-        return (f'Over {CLEAN_AM_PCT:g}%: no technical rule is judged now.' if level == 'alarm' else
-                f'Over {PEAK_AM_PCT:g}%: the peaks are not judged now; the other rules still are.')
+    if name == 'AM / multipath':
+        if level == 'alarm':
+            return (f'Over {CLEAN_AM_PCT:g}%: no technical rule is judged now (over-deviation keeps its last '
+                    '15 minutes of valid time).')
+        if level:
+            return (f'Over {PEAK_AM_PCT:g}%: the peaks are not judged now; the other rules still are while S/N '
+                    'stays over 25 dB.')
+        if r.get('am_max_pct') is not None and r['am_max_pct'] >= PEAK_AM_PCT:
+            return f'Under {PEAK_AM_PCT:g}% now, but not in the last 10 s: the peaks are not judged yet.'
     if name == 'Sync AM' and r.get('sync_am_multipath'):
-        return f'Not judged: AM / multipath has been over {PEAK_AM_PCT:g}% in the last 10 s.'
+        return f'Not judged: AM / multipath has reached {PEAK_AM_PCT:g}% in the last 10 s.'
     if name == 'Data services' and r.get('data_lost'):
-        return 'Lost: ' + ', '.join(r['data_lost']) + '.'
+        return 'Lost: ' + ', '.join(r.get('data_lost_names') or r['data_lost']) + '.'
+    if name == 'PI' and level:
+        return f"Not the expected PI ({r.get('expected_pi')})."
     return readout_plain_now(d, level)
 
 
@@ -4034,13 +4134,17 @@ READOUTS_JSON = json.dumps({
     'cards': CARDS, 'readouts': [d._asdict() for d in READOUTS],
     'alarms': {d.name: {'what': d.what, 'source': d.source, 'hold': d.hold, 'clean_only': d.clean_only}
                for d in ALARM_DEFS},
-    'clean_am_pct': CLEAN_AM_PCT}).encode()
+    'judged': ALARM_JUDGED}).encode()
 
 
 def out_of_range(r):
     """The readings out of their normal range now, in card order."""
-    lv = r.get('levels', {})
-    return [d.name for d in READOUTS if any(lv.get(k) for k in d.levels)]
+    lv, out, seen = r.get('levels', {}), [], set()
+    for d in READOUTS:
+        if any(lv.get(k) for k in d.levels) and d.levels not in seen:   # (Correlation repeats Phase)
+            seen.add(d.levels)
+            out.append(d.name)
+    return out
 
 
 class Annunciator(QtWidgets.QWidget):
@@ -4056,9 +4160,10 @@ class Annunciator(QtWidgets.QWidget):
             'pending': ('#4a3a1c', '#f0a35e', None, False),
             'suppressed': ('#26282d', '#f0a35e', None, True),
             'off': (None, '#4f545a', '#3a3d44', False)}
-    MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, no readings, or under 15 min of valid time)',
+    MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, the SDR just re-adjusted, no readings yet, '
+                                       'or not enough held yet)',
              'raised': 'RAISED', 'pending': 'its condition holds; raises once its delay has run',
-             'suppressed': 'not judged now: reception not clean or not valid enough',
+             'suppressed': 'not judged now: reception not clean or not valid enough (it counts as clear meanwhile)',
              'off': 'switched off for this receiver (Settings)'}
 
     def __init__(self):
@@ -4119,7 +4224,7 @@ class Annunciator(QtWidgets.QWidget):
                     tip = f'<b>{self.SHORT[name]}</b>: {desc}<br>{self.MEANS[state]}'
                     if self.notes.get(name):
                         tip += f'<br>{_html(self.notes[name])}'
-                    QtWidgets.QToolTip.showText(event.globalPos(), tip + '<br><i>Click for details</i>', self,
+                    QtWidgets.QToolTip.showText(event.globalPos(), tip + '<br><i>Click for details.</i>', self,
                                                 rect.toRect())
                     return True
             QtWidgets.QToolTip.hideText()
@@ -4929,14 +5034,17 @@ IMG_PX = 88        # station logo / album art on the panel
 IMG_TIP_PX = 320   # and in their tooltips
 
 # FM technical rules the alarms check, per rule set. FCC: 47 CFR 73.1570(b)(2)
-# (modulation), 73.322 (pilot), 73.319(d) (subcarriers), 73.1545(b) (frequency).
-# ISED: BETS-6 issue 3 A.2.2.2, A.2.2.4, 7.2.3 and BPR-3 issue 7 3.13.2 (the
-# modulation, pilot and subcarrier limits match the FCC's; BPR-1 sets no
-# numeric in-service frequency tolerance, so BETS-6's transmitter stability is used).
+# (modulation), 73.322(a)(2) (pilot), 73.319(d) (subcarriers), 73.1545(b)(1) (frequency).
+# ISED: BETS-6 issue 3 A.2.2.2, A.2.2.4, 7.2.3 and BPR-3 issue 7 3.13.2. Its pilot
+# limits match the FCC's; its subcarrier total is 20% in mono too (30% only with no
+# programme, not modelled), and it gives the modulation allowance "when more than one subcarrier is
+# used". BPR-1 sets no numeric in-service frequency tolerance, so BETS-6's
+# transmitter stability is used.
 # The limits, each adjustable per receiver: (setting, label, unit, low, high, step).
 LIMITS = (
     ('mod_base_pct', 'over-modulation base', '%', 50, 150, 0.5),
     ('mod_per_sub', 'subcarrier allowance (x injection)', '', 0, 2, 0.05),
+    ('mod_min_subs', 'subcarriers on air for the allowance', '', 0, 3, 1),
     ('mod_max_pct', 'over-modulation maximum', '%', 50, 150, 0.5),
     ('pilot_min_pct', 'pilot minimum', '%', 0, 20, 0.1),
     ('pilot_max_pct', 'pilot maximum', '%', 0, 20, 0.1),
@@ -4948,10 +5056,14 @@ LIMITS = (
 )
 _COMMON = {'mod_base_pct': 100.0, 'mod_per_sub': 0.5, 'mod_max_pct': 110.0,
            'pilot_min_pct': 8.0, 'pilot_max_pct': 10.0, 'pilot_tol_hz': 2.0,
-           'sub_total_pct': 20.0, 'sub_mono_pct': 30.0, 'sub_high_pct': 10.0}
+           'sub_total_pct': 20.0, 'sub_high_pct': 10.0}
 RULES = {
-    'fcc': {'name': 'FCC (47 CFR 73)', 'limits': {**_COMMON, 'freq_tol_hz': 2000.0}},
-    'ised': {'name': 'ISED (BETS-6, BPR-3)', 'limits': {**_COMMON, 'freq_tol_hz': 1000.0}},
+    'fcc': {'name': 'FCC (47 CFR 73)',
+            'limits': {**_COMMON, 'mod_min_subs': 1.0, 'sub_mono_pct': 30.0, 'freq_tol_hz': 2000.0}},
+    # BPR-3 3.13.2: the allowance "when more than one subcarrier is used"; 20% "during
+    # stereophonic or monophonic program transmissions" (30% only with no programme)
+    'ised': {'name': 'ISED (BETS-6, BPR-3)',
+             'limits': {**_COMMON, 'mod_min_subs': 2.0, 'sub_mono_pct': 20.0, 'freq_tol_hz': 1000.0}},
 }
 
 
@@ -4976,6 +5088,7 @@ class ReceiverSettings:
     # the limits the alarms use with rules 'custom' (with a preset, the preset's)
     mod_base_pct: float = 100.0      # over-modulation above base + per_sub x subcarrier injection, at most max
     mod_per_sub: float = 0.5
+    mod_min_subs: float = 1.0        # ...the allowance only with this many subcarriers on air (RDS, SCA 67, SCA 92)
     mod_max_pct: float = 110.0
     pilot_min_pct: float = 8.0       # stereo pilot injection range...
     pilot_max_pct: float = 10.0
@@ -5133,9 +5246,17 @@ class DataServices:
         return sorted(self.steady - set(present))
 
 
-def limit_at(limits, inj):
-    """The peak modulation limit (%) with `limits` at subcarrier injection `inj` (%)."""
-    return min(limits['mod_base_pct'] + limits['mod_per_sub'] * inj, limits['mod_max_pct'])
+def limit_at(limits, inj, n=None):
+    """The peak modulation limit (%) with `limits` at subcarrier injection `inj` (%)
+    from `n` subcarriers on air (None: enough for the allowance)."""
+    allowance = n is None or n >= limits.get('mod_min_subs', 1)
+    return min(limits['mod_base_pct'] + (limits['mod_per_sub'] * inj if allowance else 0.0), limits['mod_max_pct'])
+
+
+def subcarriers_on_air(stats):
+    """How many subcarriers FmMeter finds on air: RDS, SCA 67 kHz, SCA 92 kHz."""
+    return (bool(stats.get('rds_pct')) + (stats.get('sca67_pct') is not None)
+            + (stats.get('sca92_pct') is not None))
 
 
 def exceed_khz(limit_pct):
@@ -5146,9 +5267,13 @@ def exceed_khz(limit_pct):
 def mod_limit(rules, limits, stats):
     """(limit %, how it was worked out) for peak modulation with `limits`."""
     inj = (stats.get('rds_pct') or 0.0) + sum(stats.get(f'sca{k}_pct') or 0.0 for k in (67, 92))
-    lim = limits
-    limit = limit_at(lim, inj)
+    lim, n = limits, subcarriers_on_air(stats)
+    limit = limit_at(lim, inj, n)
     name = RULES[rules]['name'] if rules in RULES else 'custom'
+    if n < lim.get('mod_min_subs', 1):
+        need = int(lim['mod_min_subs'])
+        return limit, (f'{name}: {lim["mod_base_pct"]:g}%, no subcarrier allowance (it needs {need} subcarrier'
+                       f'{"s" if need != 1 else ""} on air, {n} found), max {lim["mod_max_pct"]:g}%')
     return limit, (f'{name}: {lim["mod_base_pct"]:g}% + {lim["mod_per_sub"]:g} \u00d7 {inj:.1f}% subcarriers, '
                    f'max {lim["mod_max_pct"]:g}%')
 
@@ -5687,7 +5812,7 @@ class StationPanel(QtCore.QObject):
             self.values[name] = QtWidgets.QLabel('-')
 
         # every reading explains itself on a click; the graphs that open a larger view
-        # on a click have an ⓘ for that instead
+        # on a click have an (i) for that instead
         for name, w in (('+ peak', self.peak_tapes['pos']), ('− peak', self.peak_tapes['neg']),
                         ('Peak distribution', self.peak_hist), ('S/N', self.mpx_tapes['snr']),
                         ('Pilot', self.mpx_tapes['pilot']), ('Offset', self.mpx_tapes['offset']),
@@ -5804,11 +5929,7 @@ class StationPanel(QtCore.QObject):
         word = {'clear': 'clear', 'waiting': 'not judged yet', 'raised': 'RAISED', 'pending': 'pending',
                 'suppressed': 'not judged now', 'off': 'off'}[state]
         colour = {'raised': RED, 'pending': AMBER, 'suppressed': AMBER}.get(state, '#9aa0a6')
-        hold = self.settings.silence_s if name == 'SILENCE' else d.hold
-        when = ('It raises at once.' if not hold else
-                f'It raises once its condition has held {hold:g} s, and clears the same way.')
-        if d.clean_only:
-            when += f' Judged only on clean reception (AM / multipath under {CLEAN_AM_PCT:g}%).'
+        when = alarm_when(d, self.settings.silence_s if name == 'SILENCE' else d.hold)
         now = Annunciator.MEANS[state]
         now = now[0].upper() + now[1:] + '.'
         if self.annunciator.notes.get(name):
@@ -6205,6 +6326,9 @@ class StationPanel(QtCore.QObject):
 
         # RDS
         r['pi'] = f.get(0)
+        r['expected_pi'] = self.settings.expected_pi
+        if self.settings.expected_pi and r['pi'] and r['pi'].strip().upper() != self.settings.expected_pi:
+            lv['pi'] = 'alarm'
         r['pty'] = ((PTY_RDS if self.settings.pty_names == 'rds' else PTY_RBDS)[raw['pty']]
                     if raw['pty'] is not None else f.get(2))
         r['flags'] = rds_flags(f.get(3, ''))
@@ -6247,10 +6371,13 @@ class StationPanel(QtCore.QObject):
                 lv['valid_pct'] = 'warn'
             if s['snr_db'] < self.settings.min_snr_db:
                 lv['snr_db'] = 'alarm'
+            if s['rf_dbfs'] < -75:
+                lv['rf_dbfs'] = 'alarm'
+            r['am_max_pct'] = s['am_max_pct']
             # SM.1268 against this station's own limit (FCC / ISED: with its subcarrier allowance)
             # (each sample against the limit when it was taken: the injection can change)
             r['exceed_khz'] = exceed_khz(limit)
-            r['exceed_frac'] = exceed_fraction(s, lambda inj: exceed_khz(limit_at(lim, inj)))
+            r['exceed_frac'] = exceed_fraction(s, lambda inj, n=None: exceed_khz(limit_at(lim, inj, n)))
             r['exceed_valid_s'] = s['exceed_valid_s']
             if r['exceed_frac'] is not None and r['exceed_frac'] > EXCEED_FRACTION:
                 lv['exceed_frac'] = 'alarm' if s['exceed_valid_s'] >= EXCEED_MIN_S else 'warn'
@@ -6284,6 +6411,7 @@ class StationPanel(QtCore.QObject):
         self._measure_data_services(r, raw, sca_kinds, total)
         if r['data_lost']:
             lv['data_lost'] = 'alarm'
+        r['data_lost_names'] = [self._service_label(k) for k in r['data_lost']]
 
         # audio
         a = st.audio_meter.stats
@@ -6341,7 +6469,7 @@ class StationPanel(QtCore.QObject):
                 for t, name, text in r['rtplus']]
         self.rtplus.setText('   ·   '.join(tags) if tags else _flags_html(r['flags']) if r['flags'] else
                             f'<span style="color:{DIM}">no RDS</span>' if r['pi'] is None else '')
-        v['PI'].setText('-' if r['pi'] is None else r['pi'])
+        v['PI'].setText('-' if r['pi'] is None else _coloured(_html(r['pi']), lv.get('pi')))
         v['PTY'].setText('-' if r['pty'] is None else r['pty'])
         v['Flags'].setText(_flags_html(r['flags']))
         if r['clock']:  # RDS sends UTC and the local offset: show local time
@@ -6359,7 +6487,7 @@ class StationPanel(QtCore.QObject):
         v['Group types'].setText('  '.join(f'{k} {pct:.0f}%' for k, pct in r['group_types'][:5]) or '-')
 
         if r['has_signal']:
-            v['RF level'].setText(_num(r['rf_dbfs'], 'dBFS'))
+            v['RF level'].setText(_coloured(_num(r['rf_dbfs'], 'dBFS'), lv.get('rf_dbfs')))
             v['MPX S/N'].setText(_num(r['snr_db'], 'dB'))
             v['Carrier offset'].setText(_coloured(f"{r['offset_hz']:+.0f} Hz", lv.get('offset_hz')))
             am_text = f"{r['am_pct']:.1f}%"
@@ -6631,7 +6759,7 @@ class StationPanel(QtCore.QObject):
             limit, _ = mod_limit(rules, lim, s)
             tol = lim['freq_tol_hz']
             subcarriers = (s['rds_pct'] or 0.0) + sum(s[f'sca{k}_pct'] or 0.0 for k in (67, 92))
-            sub_limit = lim['sub_total_pct'] if st.pilot else lim['sub_mono_pct']  # 73.319(d)(1)/(2)
+            sub_limit = lim['sub_total_pct'] if st.pilot else lim['sub_mono_pct']  # 73.319(d)(2)/(1)
             silent = not carrier and a['momentary'] < cfg.silence_lufs
             rds_lost, backup = rds_conditions(self.alarms.seen_rds, rate, carrier,
                                               st.pilot or not self.alarms.seen_pilot, silent,
@@ -6734,8 +6862,10 @@ class StationPanel(QtCore.QObject):
         if r.get('exceed_frac') is not None:
             notes['EXCEEDANCE'] = (f"{r['exceed_frac'] * 1e6:.2f} ppm of samples over {r['exceed_khz']:.1f} kHz; "
                                    f"{r['exceed_valid_s'] / 60:.0f} of {EXCEED_MIN_S / 60:.0f} min of valid time held")
-        if r['alarms'].get('OVERMOD') in ('raised', 'pending', 'clear'):
-            notes['OVERMOD'] = f"peak +{r['pos_pct']:.0f}% / \u2212{r['neg_pct']:.0f}%, limit {r['limit_pct']:.1f}%"
+        s = self.station.meter.stats or {}   # (the peaks the alarm judges: valid reception's)
+        if r['alarms'].get('OVERMOD') in ('raised', 'pending', 'clear') and s.get('valid_pos_pct') is not None:
+            notes['OVERMOD'] = (f"valid peak +{s['valid_pos_pct']:.0f}% / \u2212{s['valid_neg_pct']:.0f}%, "
+                                f"limit {r['limit_pct']:.1f}%")
         return notes
 
     def _service_label(self, key, html=False):
@@ -6760,7 +6890,7 @@ class StationPanel(QtCore.QObject):
                        f'(alarm below {cfg.silence_lufs:g} LUFS for {cfg.silence_s} s)',
             'OVERMOD': f'peak +{num(s["valid_pos_pct"])}% / -{num(s["valid_neg_pct"])}% (valid reception), '
                        f'limit {num(limit)}%',
-            'EXCEEDANCE': (f'{num((exceed_fraction(s, lambda inj: exceed_khz(limit_at(lim, inj))) or 0) * 1e6, ".2f")} '
+            'EXCEEDANCE': (f'{num((exceed_fraction(s, lambda inj, n=None: exceed_khz(limit_at(lim, inj, n))) or 0) * 1e6, ".2f")} '
                            f'ppm of samples over {num(exceed_khz(limit))} kHz in the last '
                            f'{EXCEED_MIN_S / 60:.0f} min of valid reception (limit {EXCEED_FRACTION * 1e6:g} ppm)'),
             'PILOT_SPEC': f'pilot {num(s["pilot_pct"])}%{pilot_hz} (allowed {lim["pilot_min_pct"]:g}-'
@@ -7434,8 +7564,8 @@ class ReceiverDialog(QtWidgets.QDialog):
 
         ls = self.limit_spins
         grid.addWidget(QtWidgets.QLabel('above'), row['OVERMOD'], 1)
-        grid.addLayout(line(ls['mod_base_pct'], '+', ls['mod_per_sub'], '\u00d7 subcarriers, max', ls['mod_max_pct']),
-                       row['OVERMOD'], 2)
+        grid.addLayout(line(ls['mod_base_pct'], '+', ls['mod_per_sub'], '\u00d7 subcarriers (with',
+                            ls['mod_min_subs'], 'or more on air), max', ls['mod_max_pct']), row['OVERMOD'], 2)
         grid.addWidget(QtWidgets.QLabel('outside'), row['PILOT_SPEC'], 1)
         grid.addLayout(line(ls['pilot_min_pct'], '\u2013', ls['pilot_max_pct'], 'or 19 kHz \u00b1', ls['pilot_tol_hz']),
                        row['PILOT_SPEC'], 2)

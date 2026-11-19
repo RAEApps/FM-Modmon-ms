@@ -66,13 +66,14 @@ cases = [
     ('subcarriers: SCA67 12% + SCA92 11% + RDS 4%', dict(left=[(997, 0.35)], right=[(997, 0.35)], pilot=0.09, rds=0.04,
                                                           sca=[(67, 0.12, 1000, 6000), (92, 0.11, 700, 6000)]),
      {'fcc': ['SUBCARRIERS'], 'ised': ['SUBCARRIERS']}),
-    # 73.319(d): 20% in stereo, 30% in mono (no pilot); 10% above 75 kHz either way
+    # 73.319(d): 20% in stereo, 30% in mono (no pilot); 10% above 75 kHz either way.
+    # BPR-3 3.13.2: 20% in stereo or mono while programme is on air
     ('subcarriers 25% in stereo', dict(left=[(997, 0.35)], right=[(997, 0.35)], pilot=0.09, rds=0.04,
                                        sca=[(67, 0.12, 1100, 6000), (92, 0.09, 700, 6000)]),
      {'fcc': ['SUBCARRIERS'], 'ised': ['SUBCARRIERS']}),
     ('subcarriers 25% in mono', dict(left=[(997, 0.35)], right=[(997, 0.35)], pilot=0.0, rds=0.04,
                                      sca=[(67, 0.12, 1100, 6000), (92, 0.09, 700, 6000)]),
-     {'fcc': [], 'ised': []}),
+     {'fcc': [], 'ised': ['SUBCARRIERS']}),
     ('carrier +1500 Hz', dict(left=[(997, 0.4)], right=[(1600, 0.4)], pilot=0.09, dc_hz=1500.0),
      {'fcc': [], 'ised': ['FREQUENCY']}),
 ]
@@ -307,6 +308,23 @@ stats = {'exceed_n': 1_000_000, 'exceed_hist': h0 + h20, 'exceed_by_inj': {0.0: 
 check('80 kHz samples taken without SCA count; those with SCA 20% do not',
       rm.exceed_fraction(stats, lambda inj: rm.exceed_khz(rm.limit_at(fcc, inj))), 100 / 1_000_000)
 check('...a single threshold (today\'s, SCA 20%) would miss them', rm.exceed_fraction(stats, rm.exceed_khz(rm.limit_at(fcc, 20.0))), 0.0)
+
+print('--- ISED: the modulation allowance only "when more than one subcarrier is used" (BPR-3 3.13.2)')
+ised = rm.RULES['ised']['limits']
+check('FCC, RDS 4% alone: 102%', rm.mod_limit('fcc', fcc, {'rds_pct': 4.0})[0], 102.0)
+check('ISED, RDS 4% alone: no allowance, 100%', rm.mod_limit('ised', ised, {'rds_pct': 4.0})[0], 100.0)
+check('ISED, RDS 4% + SCA 67 10%: 107%', rm.mod_limit('ised', ised, {'rds_pct': 4.0, 'sca67_pct': 10.0})[0], 107.0)
+check('ISED, no subcarriers: 100%', rm.mod_limit('ised', ised, {})[0], 100.0)
+# Samples at 78 kHz: taken with RDS 4% alone they count under ISED (100%: threshold 77 kHz)
+# but not FCC (102%: 78.5 kHz); with RDS 4% + SCA 10% (107%: 82.25 kHz) they never do.
+k78 = round((78.0 - rm.EXCEED_LO_KHZ) / rm.EXCEED_BIN_KHZ)
+h1, h2 = np.zeros(rm.EXCEED_BINS, np.int64), np.zeros(rm.EXCEED_BINS, np.int64)
+h1[k78] = h2[k78] = 100
+stats = {'exceed_n': 1_000_000, 'exceed_hist': h1 + h2, 'exceed_by_inj': {(4.0, 1): h1, (14.0, 2): h2}}
+check('ISED over-deviation: each sample against its own subcarrier count',
+      rm.exceed_fraction(stats, lambda inj, n=None: rm.exceed_khz(rm.limit_at(ised, inj, n))), 100 / 1_000_000)
+check('...FCC gives both the allowance: none count',
+      rm.exceed_fraction(stats, lambda inj, n=None: rm.exceed_khz(rm.limit_at(fcc, inj, n))), 0.0)
 
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
 sys.exit(1 if bad else 0)
