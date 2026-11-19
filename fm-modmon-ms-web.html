@@ -118,10 +118,11 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 .dhead .t { font-weight: 700; font-size: 14px; }
 .dhead .s { flex: 1; color: var(--dim); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dhead .f { color: var(--dim); }
-.lines { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; column-gap: 8px; row-gap: 3px; align-items: center; margin-bottom: 6px; }
-.lines .lbl { font-weight: bold; color: var(--muted); text-align: right; }
-.lines .line { color: #c4c7cc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.media { grid-row: 1 / span 4; width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; position: relative; }
+.lines { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; row-gap: 2px; margin-top: 2px; }
+.lines .lbl { color: var(--muted); white-space: nowrap; }
+.lines .line { color: #c4c7cc; min-width: 0; overflow-wrap: anywhere; }
+.lines .mediarow { grid-column: 1 / -1; display: flex; gap: 8px; margin-top: 4px; }
+.media { width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; position: relative; }
 .media img { max-width: 88px; max-height: 88px; border-radius: 4px; cursor: zoom-in; }
 .media a { position: absolute; right: 2px; bottom: 2px; padding: 0 4px; border-radius: 4px; background: rgba(0,0,0,.65); color: var(--accent); text-decoration: none; font-size: 12px; }
 .cards { display: grid; grid-template-columns: 24fr 26fr 24fr 22fr; gap: 8px; align-items: stretch; }
@@ -140,7 +141,8 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 [data-r] { cursor: help; }
 .kv .k[data-r]:hover, .kv .v[data-r]:hover, .tape[data-r]:hover { background: #2c2f36; border-radius: 3px; }
 .kv .k.surf::after { content: ' \25B2'; color: var(--amber); font-size: 10px; }
-.attn { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: 0 2px 6px; }
+.attn { display: flex; gap: 4px 12px; align-items: baseline; margin: 0 2px 6px; white-space: nowrap; overflow: hidden; }
+.attn .more { color: var(--dim); }
 .attn .lbl { color: var(--dim); font-size: 10.5px; letter-spacing: .1em; }
 .attn .pill { cursor: help; color: var(--amber); }
 .attn .pill.alarm { color: var(--red); }
@@ -264,8 +266,6 @@ canvas.mpx { cursor: pointer; }
   .cards { grid-template-columns: 1fr; }
   .kv { grid-template-columns: auto minmax(0, 1fr); }
   .kv .v { white-space: normal; }
-  .lines { grid-template-columns: auto minmax(0, 1fr); }
-  .lines .line { white-space: normal; }
   .media { display: none !important; }
   /* header: title with sign-in and help on one row, the chips as one sideways-scrolling
      strip, then the two action buttons side by side */
@@ -830,6 +830,21 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#explain').classList.remove('open'); });
 
+// The out-of-range line on one line: as many as fit, then how many more.
+function fitStrip(el) {
+  const pills = [...el.querySelectorAll('.pill')];
+  el.querySelector('.more')?.remove();
+  pills.forEach(x => x.style.display = '');
+  if (!el.offsetWidth || el.scrollWidth <= el.clientWidth) return;
+  const more = h('span', 'more');
+  el.append(more);
+  for (let n = pills.length - 1; n >= 1; n--) {
+    pills[n].style.display = 'none';
+    more.textContent = `+${pills.length - n} more`;
+    if (el.scrollWidth <= el.clientWidth) break;
+  }
+}
+
 // ---------------------------------------------------------------- one receiver: its row and its detail
 function kv(names, cols, wide = []) {
   const el = h('div', cols === 1 ? 'kv one' : 'kv'), vals = {};
@@ -912,23 +927,23 @@ function buildReceiver(r, alarmDefs) {
   p.lines = {}; p.ibocRows = [];
   ['IBOC', 'PSD', 'SIS', 'RadioDNS'].forEach((t, i) => {
     const l = h('div', 'lbl', t), v = h('div', 'line', '-');
-    l.style.gridRow = v.style.gridRow = String(i + 1); l.style.gridColumn = '1'; v.style.gridColumn = '2';
     lines.append(l, v); p.lines[t] = v;
     if (t === 'RadioDNS') p.rdnsRow = [l, v]; else p.ibocRows.push(l, v);
   });
+  const mediaRow = h('div', 'mediarow');
+  lines.append(mediaRow);
   for (const kind of ['logo', 'art']) {
-    const box = h('div', 'media'); box.style.gridColumn = kind === 'logo' ? '3' : '4';
+    const box = h('div', 'media');
     const img = h('img'); img.alt = kind === 'logo' ? 'Station logo' : 'Album art'; img.title = img.alt;
     img.onclick = () => { $('#zoom img').src = img.src; $('#zoom').style.display = 'flex'; };
-    box.append(img); box.style.display = 'none'; lines.append(box);
+    box.append(img); box.style.display = 'none'; mediaRow.append(box);
     p[kind] = {box, img, ver: null};
     if (kind === 'art') {  // a RadioDNS slide's click-through link
       const a = p.artLink = h('a', null, '↗'); a.target = '_blank'; a.rel = 'noopener noreferrer';
       a.style.display = 'none'; box.append(a);
     }
   }
-  p.linesBox = lines;
-  d.append(lines);
+  p.linesBox = lines;   // (in the RDS card)
   p.strip = h('div', 'attn');   // the readings out of range now
   d.append(p.strip);
   const cards = h('div', 'cards');
@@ -959,7 +974,7 @@ function buildReceiver(r, alarmDefs) {
   p.rdsSpark = readable(h('canvas', 'spark'), 'RDS rate');
   p.absRds = h('div', 'absent');
   rds.append(p.rdsSpark, add(kv(['PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'], 1,
-                                ['Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'])), p.absRds);
+                                ['Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'])), p.linesBox, p.absRds);
   // audio
   const reset = h('button', null, 'reset I'); reset.title = 'Start the integrated loudness again';
   reset.onclick = () => api('reset_integrated', {receiver: n});
@@ -1168,7 +1183,9 @@ function updateReceiver(p, r) {
     for (const x of pills) { const s = h('span', 'pill ' + x.level, x.name); s.dataset.r = x.name; s.append(h('b', null, x.text)); kids.push(s); }
     if (!pills.length) kids.push(h('span', 'dimt', 'none'));
     p.strip.replaceChildren(...kids);
+    p.strip.title = pills.length ? 'Out of range:\n' + pills.map(x => `${x.name} ${x.text}`).join('\n') + '\nClick one for what it means.' : '';
   }
+  fitStrip(p.strip);
   const iboc = r.source.startsWith('iboc');
   const fmts = playableFormats(p), can = fmts.length > 0 && !iboc;
   fillSelect(p.format, fmts.map(f => ({value: f.key, label: f.label, enabled: true})), p.audioFormat);

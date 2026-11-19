@@ -45,17 +45,17 @@ Under it, the Alarms tab lists each alarm once, with how long it lasted.
 
 Each card shows its essential readings; "All" shows the rest (remembered, the same for every
 receiver; the web page remembers its own choice per browser), and a hidden reading shows
-anyway, marked ▲, while it is out of range, with a line above the cards listing everything
-out of range. Click any reading, bar, graph's (i) or alarm lamp, a station row's bars or
+anyway, marked ▲, while it is out of range, with one line above the cards listing everything
+out of range (what doesn't fit is counted, "+n more"). Click any reading, bar, graph's (i) or alarm lamp, a station row's bars or
 peak trend, or a History strip's name, for what it is, how it's measured, what it means
 right now and the rule or standard behind it.
 
 ## Alarms
 
 Carrier low/lost, audio silence, over-modulation, over-deviation over 15 minutes (ITU-R
-SM.1268), pilot lost, RDS lost ("possibly on N+1"
-instead when the carrier, pilot and audio stay fine, as an N+1 backup transmitter without an
-RDS encoder would cause), wrong PI, emergency alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
+SM.1268), pilot lost, RDS lost ("possibly on AUX"
+instead when the carrier, pilot and audio stay fine, as the auxiliary/backup (AUX) transmitter
+without an RDS encoder would cause), wrong PI, emergency alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
 then unseen for 15 s, the alarm held 60 s; paging that only bursts during an alert never
 alarms), and the FM technical rules of a preset (pilot out of tolerance, subcarriers over
 the limit, carrier frequency out of tolerance), each limit adjustable per receiver:
