@@ -1,6 +1,7 @@
 # FM-Modmon-ms
 
 **Multi-station FM modulation monitor** for the SDRplay RSP1A, built on GNU Radio 3.10.
+It also runs on an SDRplay RSP1B, an RTL-SDR or an Ettus B210 (see [SDRs](#sdrs)).
 
 One RSP1A at 9.6 MS/s watches up to **four FM stations at once**: each gets its own
 channel filter, stereo demodulator, RDS decoder, measurement chain, alarms and panel,
@@ -84,7 +85,8 @@ stations' alarms are held until it clears).
   underneath: about 800 px tall with four receivers at 100% display scaling, so the whole
   window fits 1920 × 1080 without scrolling. Pop a receiver's detail out (or double-click
   its row) to watch several side by side on a larger screen.
-- **SDRplay RSP1A** and the [SDRplay API](https://www.sdrplay.com/api/) 3.x
+- **SDRplay RSP1A** (or RSP1B) and the [SDRplay API](https://www.sdrplay.com/api/) 3.x, or
+  another [supported SDR](#sdrs)
 - **[radioconda](https://github.com/ryanvolz/radioconda)** (GNU Radio 3.10 with gr-rds,
   SoapySDR, NumPy, SciPy, PyQt5)
 - **[SoapySDRPlay3](https://github.com/pothosware/SoapySDRPlay3)** built against radioconda's
@@ -145,11 +147,13 @@ C:\ProgramData\radioconda\python.exe fm-modmon-ms.py
 ```
 
 The first start opens a short **setup**: where the monitor is (ISED rules in Canada, FCC
-elsewhere), the web version and the password for its controls, email / webhook notifications
-and starting with Windows. Run it again from *Settings → Run setup again* or with `--setup`.
+elsewhere), which SDR it uses, the web version and the password for its controls, email /
+webhook notifications and starting with Windows. Run it again from *Settings → Run setup
+again* or with `--setup`.
 
-On start it scans 88–108 MHz, calibrates the RSP1A's gain for the stations found and opens a
-receiver on the strongest. *Add receiver* opens more (any that fit in the 7.2 MHz window).
+On start it scans 88–108 MHz, calibrates the SDR's gain for the stations found and opens a
+receiver on the strongest. *Add receiver* opens more (any that fit in the SDR's window: 7.2 MHz
+on the RSP1A).
 Useful options:
 
 ```bash
@@ -161,7 +165,9 @@ C:\ProgramData\radioconda\python.exe fm-modmon-ms.py --freqs 94.5 101.7 --countr
 | `--freqs MHZ …` | start on these stations instead of the saved ones |
 | `--setup` | open the setup before starting |
 | `--country CC` | ISO country (ISED rules for `CA`, FCC otherwise; RadioDNS) |
-| `--lna N --ifgr DB` | fixed gain instead of start-up calibration |
+| `--sdr NAME` | `rsp1a`, `rsp1b`, `rtlsdr` or `b210`, instead of the one chosen in setup |
+| `--lna N --ifgr DB` | SDRplay: fixed gain instead of start-up calibration |
+| `--gain DB` | RTL-SDR or B210: fixed gain instead of start-up calibration |
 | `--web-port N` | web version port (default 8765, `0` = off) |
 | `--web-bind ADDR` | `127.0.0.1` keeps the web version on this PC |
 | `--web-password PW` | web controls password, instead of the one set in setup |
@@ -192,6 +198,33 @@ Receivers and settings are saved to `fm-modmon-ms_config.json`; events are logge
 | `FM_MODMON_SMTP_PASSWORD` | SMTP password, instead of the one in Credential Manager |
 | `RADIODNS_CLIENT_ID` | RadioDNS client identifier, for providers that need one |
 | `SOAPY_SDR_PLUGIN_PATH` | where the SoapySDRPlay3 module is |
+
+## SDRs
+
+Choose the SDR in setup, or with `--sdr`. All the stations come from one SDR window, so the
+SDR's sample rate sets how far apart they can be. Every station is filtered down to the same
+384 kS/s, so the measurements are the same whichever SDR it is.
+
+| SDR | `--sdr` | Rate | Stations within | Gain | Needs |
+|---|---|---|---|---|---|
+| SDRplay RSP1A | `rsp1a` | 9.6 MS/s | 7.2 MHz | `--lna`, `--ifgr` | SDRplay API, SoapySDRPlay3 |
+| SDRplay RSP1B | `rsp1b` | 9.6 MS/s | 7.2 MHz | `--lna`, `--ifgr` | the same; SDRplay API 3.15 or later, and a SoapySDRPlay3 that knows the RSP1B |
+| RTL-SDR | `rtlsdr` | 2.304 MS/s | 1.4 MHz | `--gain` 0–49.6 dB | the WinUSB driver (install it with [Zadig](https://zadig.akeo.ie/)); radioconda has the SoapySDR module |
+| Ettus B210 (and clones) | `b210` | 30.72 MS/s | the whole band (88.1–107.9 MHz) | `--gain` 0–76 dB | a USB 3 port; the WinUSB driver ([Zadig](https://zadig.akeo.ie/): *WestBridge*, 2500 0020); UHD's FPGA images in `%LOCALAPPDATA%\uhd\images` (`uhd_images_downloader -t "b2xx_b210_fpga\|b2xx_common_fw" -i %LOCALAPPDATA%\uhd\images`, or set `UHD_IMAGES_DIR`); radioconda has UHD and the SoapySDR module |
+
+The B210 takes in the whole band at 30.72 MS/s: any four stations can be open at once,
+and the band scan is one capture. Its receivers' channel filters cost about three times
+an RSP1A's CPU (four receivers took 1.7 cores on a 20-thread PC). Put an **FM band-pass
+filter** (88–108 MHz) or a ~110 MHz low-pass in front of it: unlike the RSP1A, it has no
+filtering of its own ahead of the mixer, which also mixes on odd harmonics of its tuning.
+Centred on 98 MHz, a cellular carrier near 886 MHz (9 × 98 = 882 MHz) came in as a 4 MHz
+block of noise 16 dB above the floor across 102–105 MHz, and the scan listed every channel
+there as a station.
+
+An RTL-SDR's 8-bit ADC has much less headroom than the others, and its window takes only
+stations within 1.4 MHz of each other, often just one or two. Saved receivers that don't
+fit the window are left closed. On an RTL-SDR without a TCXO, the frequency error shows up
+as carrier offset.
 
 ## Web version
 
@@ -230,6 +263,8 @@ the web sign-in. `tests\radiovis_test.py` checks the RadioDNS slideshow (SSE, HT
 Stomp, SRV failover, trigger times, bad slides) against local fake servers.
 `tests\centre_test.py` checks where the RSP1A centres: no carrier on its DC offset or on
 another station's IQ image, and none past the IF filter's usable edge.
+`tests\sdr_test.py` checks each SDR's rate, window and scan, how `--sdr` and the setup
+pick it, and a synthetic station through a receiver at each SDR's sample rate.
 
 ## CPU profile
 

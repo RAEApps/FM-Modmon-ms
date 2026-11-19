@@ -292,7 +292,7 @@ canvas.mpx { cursor: pointer; }
     <span id="signin"><input type="password" placeholder="password" autocomplete="current-password"><button class="primary">Sign in</button><span class="err"></span></span>
   </span>
   <button id="help-btn" title="Help: using this page, the guide and the command-line options">?</button>
-  <button id="cal" disabled title="Set the RSP1A gain for the stations being received now (takes a few seconds; the meters restart afterwards)">&#x27F2;&nbsp; Recalibrate gain</button>
+  <button id="cal" disabled title="Set the SDR gain for the stations being received now (takes a few seconds; the meters restart afterwards)">&#x27F2;&nbsp; Recalibrate gain</button>
   <button id="add" class="primary" disabled>+&nbsp; Add receiver</button>
 </header>
 <div class="colhead"><span>Station</span><span>Text · RT+ · flags</span><span>Now · peak hold · limit ▼</span><span>Trend · 5 min</span><span>Alarms</span><span></span></div>
@@ -1475,7 +1475,7 @@ $('#help-btn').onclick = async () => {
   } catch (e) { $('#help-body').textContent = 'FM-Modmon-ms is not answering'; }
 };
 $('#help-close').onclick = () => $('#helpdlg').close();
-$('#cal').onclick = () => confirm('Recalibrate the RSP1A gain now? Every receiver hears gain steps for a few seconds, and the meters restart.') && api('recalibrate');
+$('#cal').onclick = () => confirm('Recalibrate the SDR gain now? Every receiver hears gain steps for a few seconds, and the meters restart.') && api('recalibrate');
 $('#zoom').onclick = () => $('#zoom').style.display = 'none';
 // 10 updates a second while the page is visible (as the app), one a second in the background
 // (browsers slow a background tab's timers to about once a second, so go by elapsed time)
