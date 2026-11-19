@@ -755,7 +755,7 @@ $('#stereo').addEventListener('close', () => { stereo.p = null; stereo.frames = 
 // A click on a reading, bar, graph's (i) or alarm lamp says what it is, how it is measured,
 // what it means right now and the rule or standard behind it (as the app).
 let info = null, READ = {};
-const GRAPHS = new Set(['MPX spectrum', 'Stereo image', 'Peak distribution', 'RDS rate', 'Loudness trend']);
+const GRAPHS = new Set(['MPX spectrum', 'Stereo image', 'Peak distribution', 'RDS rate', 'Loudness trend', 'Peak trend']);
 const detailAll = (() => { try { return new Set(JSON.parse(localStorage.getItem('fm-modmon-ms-all') || '[]')); } catch (e) { return new Set(); } })();
 async function loadInfo() {
   info = await (await fetch('readouts.json', {cache: 'no-store'})).json();
@@ -783,7 +783,8 @@ function readoutNow(d, level) {
 function readoutLevel(rd, name) {
   const lv = rd.levels || {}, d = READ[name];
   let level = d.levels.map(k => lv[k]).find(Boolean) || null;
-  if (level === 'alarm' && (name === '+ peak' || name === '− peak') && rd.valid === false) level = 'warn';
+  if (name === 'Peak modulation') level = rd.pos_pct >= rd.neg_pct ? lv.pos_pct : lv.neg_pct;   // as the row's tape
+  if (level === 'alarm' && (name === '+ peak' || name === '− peak' || name === 'Peak modulation') && rd.valid === false) level = 'warn';
   return level;
 }
 function readoutText(p, name) {
@@ -860,7 +861,12 @@ function buildReceiver(r, alarmDefs) {
   const n = r.receiver, p = {n, vals: {}, allBtns: {}, tapeOf: {}};
   // ---- the row
   const row = p.row = h('div', 'row');
-  row.onclick = e => { if (!e.target.closest('select, button')) select(n); };
+  row.onclick = e => {
+    if (e.target.closest('select, button')) return;
+    select(n);
+    const el = e.target.closest('[data-r]');   // a tape or the trend: what it means too
+    if (el && p.r) explain(p, el.dataset.r, el);
+  };
   const stn = h('div', 'stn');
   const freq = h('span', 'freq'); p.freqText = h('span', null, '-');
   p.station = h('select'); p.station.title = 'Station: choose another to retune this receiver';
@@ -876,12 +882,13 @@ function buildReceiver(r, alarmDefs) {
   const tapes = h('div', 'tapes');
   p.tapes = {mod: makeTape('MOD', 0, 130, {band: [85, 100], hold: true}), rf: makeTape('RF', -90, -10, {band: [-60, -10]}),
              am: makeTape('AM', 0, 40, {band: [0, state.clean[0]]})};
-  p.tapes.mod.el.title = 'Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force (red notch); the grey band is the normal range';
-  p.tapes.am.el.title = 'AM on the carrier: multipath or a transmitter fault';
+  p.tapes.mod.el.title = 'Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force (red notch); the grey band is the normal range. Click for details.';
+  p.tapes.rf.el.title = 'RF level at the SDR. Click for details.';
+  p.tapes.am.el.title = 'AM on the carrier: multipath or a transmitter fault. Click for details.';
   for (const t of Object.values(p.tapes)) tapes.append(t.el);
   const trend = h('div', 'trend');
   p.trendNote = h('div', 'note'); p.spark = h('canvas', 'spark');
-  p.spark.title = 'Peak modulation, the last 5 minutes (each point: its highest); red: over the limit in force';
+  p.spark.title = 'Peak modulation, the last 5 minutes (each point: its highest); red: over the limit in force. Click for details.';
   trend.append(p.trendNote, p.spark);
   const ann = h('div', 'ann'); p.lamps = {};
   for (const [name, desc, short] of alarmDefs) {
@@ -972,6 +979,10 @@ function buildReceiver(r, alarmDefs) {
   p.tapeOf = {'+ peak': p.peak.pos, '− peak': p.peak.neg, 'S/N': p.mpxT.snr, 'Pilot': p.mpxT.pilot,
               'Offset': p.mpxT.offset, 'Phase': p.phase};
   for (const [name, t] of Object.entries(p.tapeOf)) readable(t.el, name);
+  // the row's tapes and trend (their own tooltips)
+  for (const [name, el] of [['Peak modulation', p.tapes.mod.el], ['RF level', p.tapes.rf.el],
+                            ['AM / multipath', p.tapes.am.el], ['Peak trend', p.spark]]) el.dataset.r = name;
+  p.tapeOf['Peak modulation'] = p.tapes.mod;
   d.addEventListener('click', e => {
     const el = e.target.closest('[data-r]');
     if (el && p.r) explain(p, el.dataset.r, el);
@@ -1073,7 +1084,7 @@ function updateReceiver(p, r) {
     p.tapes.mod.set(peak, `+${fx(rd.pos_pct, 0)} / −${fx(rd.neg_pct, 0)}%`, ms, limit, [85, limit]);
     p.tapes.rf.set(rd.rf_dbfs, num(rd.rf_dbfs, 'dBFS', 0), rd.rf_dbfs < -75 ? 'alarm' : null);
     p.tapes.am.set(rd.am_pct, fx(rd.am_pct) + '%', lv.am_pct);
-    p.tapes.rf.el.title = `RF level ${num(rd.rf_dbfs, 'dBFS')}, MPX S/N ${num(rd.snr_db, 'dB')}`;
+    p.tapes.rf.el.title = `RF level ${num(rd.rf_dbfs, 'dBFS')}, MPX S/N ${num(rd.snr_db, 'dB')}. Click for details.`;
     for (const k of ['pos', 'neg']) {
       const v = rd[k + '_pct']; let s = lv[k + '_pct'];
       if (s === 'alarm' && rd.valid === false) s = 'warn';

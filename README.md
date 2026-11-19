@@ -46,8 +46,9 @@ Under it, the Alarms tab lists each alarm once, with how long it lasted.
 Each card shows its essential readings; "All" shows the rest (remembered, the same for every
 receiver; the web page remembers its own choice per browser), and a hidden reading shows
 anyway, marked ▲, while it is out of range, with a line above the cards listing everything
-out of range. Click any reading, bar, graph's (i) or alarm lamp for what it is, how it's
-measured, what it means right now and the rule or standard behind it.
+out of range. Click any reading, bar, graph's (i) or alarm lamp, a station row's bars or
+peak trend, or a History strip's name, for what it is, how it's measured, what it means
+right now and the rule or standard behind it.
 
 ## Alarms
 

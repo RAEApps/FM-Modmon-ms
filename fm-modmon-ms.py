@@ -59,7 +59,8 @@ the rest (remembered, and the same for every receiver; the web page remembers it
 own choice, per browser), and a reading beyond the
 essentials shows anyway, marked with a triangle, while it is out of range. The
 line above the cards lists every reading out of range. Click any reading, bar,
-graph's (i) or alarm lamp for what it is, how it is measured, what it means
+graph's (i) or alarm lamp (or a station row's bars and trend, or a History
+strip's name) for what it is, how it is measured, what it means
 right now, and the rule or standard behind it (clicking the MPX spectrum or the
 stereo image itself still opens its larger view).
 
@@ -4089,7 +4090,25 @@ READOUTS = (
     ReadoutDef('Correlation', 'aud', False, ('correlation',), 'above 0', "The Phase meter's value: +1 mono, 0 wide "
                'stereo, below 0 out of phase.', '300 ms window; red below 0.'),
 )
-READOUT = {d.name: d for d in READOUTS}
+# Readings shown outside the cards (the station row, the History tab): explained on a
+# click as the cards' are, but on no card.
+OTHER_READOUTS = (
+    ReadoutDef('Peak modulation', '', False, ('pos_pct', 'neg_pct'), 'up to 100% (red over the limit)',
+               'The higher of + peak and − peak in the last second, against the limit in force; the text gives '
+               'both.',
+               'The + / − peak detector (+ peak on the Modulation card says how). White tick: the highest of the '
+               'last 2 s; red notch: the limit; grey band: 85% to the limit. Amber over 100%, red over the limit '
+               "(amber while reception isn't valid). In History, each point is the highest of its time.",
+               'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
+    ReadoutDef('Peak trend', '', False, (), '',
+               'Peak modulation over the last 5 minutes; the note above it counts the bursts over 100% in the '
+               'last minute.',
+               'Each point is the highest 1 s peak of its time, valid or not; red over the limit (amber while the '
+               'over-modulation alarm is not judged). The note turns amber at any burst (Over 100% on the '
+               'Modulation card: valid time only).',
+               'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
+)
+READOUT = {d.name: d for d in READOUTS + OTHER_READOUTS}
 
 
 def readout_now(name, r):
@@ -4114,6 +4133,9 @@ def readout_now(name, r):
         return f'Not judged: AM / multipath has reached {PEAK_AM_PCT:g}% in the last 10 s.'
     if name == 'Data services' and r.get('data_lost'):
         return 'Lost: ' + ', '.join(r.get('data_lost_names') or r['data_lost']) + '.'
+    if name == 'Peak trend' and r.get('over100_min') is not None:
+        n = r['over100_min']
+        return f"{n} burst{'' if n == 1 else 's'} over 100% in the last minute."
     if name == 'PI' and level:
         return f"Not the expected PI ({r.get('expected_pi')})."
     return readout_plain_now(d, level)
@@ -4131,7 +4153,7 @@ def readout_plain_now(d, level):
 
 # what the web page explains on a click, fetched once: the readings and the alarms
 READOUTS_JSON = json.dumps({
-    'cards': CARDS, 'readouts': [d._asdict() for d in READOUTS],
+    'cards': CARDS, 'readouts': [d._asdict() for d in READOUTS + OTHER_READOUTS],
     'alarms': {d.name: {'what': d.what, 'source': d.source, 'hold': d.hold, 'clean_only': d.clean_only}
                for d in ALARM_DEFS},
     'judged': ALARM_JUDGED}).encode()
@@ -4498,6 +4520,7 @@ class HistoryStrips(QtWidgets.QWidget):
               ('Loudness S', 'LUFS', ('short_term',), -40, 0, False, -23),
               ('MPX power', 'dBr', ('mpx_dbr',), -12, 6, False, 0))
     STRIP_H, LABEL_W, ALARM_H = 34, 150, 22
+    READOUT_OF = {'MPX S/N': 'S/N', 'RDS groups': 'Groups/s', 'Loudness S': 'Short-term'}   # (else its title)
 
     def __init__(self, panel):
         super().__init__()
@@ -4532,6 +4555,33 @@ class HistoryStrips(QtWidgets.QWidget):
     def leaveEvent(self, event):
         self.cursor_x = None
         self.update()
+
+    def _strip_at(self, pos):
+        """(reading, its label's rect) for a strip's label under `pos`, else None."""
+        k = pos.y() // self.STRIP_H
+        if pos.x() >= self.LABEL_W or not 0 <= k < len(self.STRIPS):
+            return None
+        title = self.STRIPS[k][0]
+        return self.READOUT_OF.get(title, title), QtCore.QRect(0, k * self.STRIP_H, self.LABEL_W, self.STRIP_H)
+
+    def event(self, event):
+        """A strip's label: what it is on hover, its explanation on a click."""
+        if event.type() == QtCore.QEvent.ToolTip:
+            hit = self._strip_at(event.pos())
+            if hit:
+                QtWidgets.QToolTip.showText(event.globalPos(), f'{READOUT[hit[0]].what} Click for details.',
+                                            self, hit[1])
+            else:
+                QtWidgets.QToolTip.hideText()
+            return True
+        if event.type() == QtCore.QEvent.MouseMove:
+            self.setCursor(QtCore.Qt.WhatsThisCursor if self._strip_at(event.pos()) else QtCore.Qt.ArrowCursor)
+        return super().event(event)
+
+    def mouseReleaseEvent(self, event):
+        hit = self._strip_at(event.pos()) if event.button() == QtCore.Qt.LeftButton else None
+        if hit:
+            self.panel.explain(hit[0], self, QtCore.QRect(self.mapToGlobal(hit[1].topLeft()), hit[1].size()))
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
@@ -5532,11 +5582,11 @@ class StationPanel(QtCore.QObject):
             'am': Tape('AM', 0, 40, band=(0, PEAK_AM_PCT)),
         }
         self.tapes['mod'].setToolTip('Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force '
-                                     '(red notch); the grey band is the normal range')
-        self.tapes['rf'].setToolTip('RF level at the SDR')
+                                     '(red notch); the grey band is the normal range. Click for details.')
+        self.tapes['rf'].setToolTip('RF level at the SDR. Click for details.')
         self.tapes['am'].setToolTip('AM on the carrier: multipath or a transmitter fault. Over-modulation is '
                                     f'not judged above {PEAK_AM_PCT:g}%, the other technical rules above '
-                                    f'{CLEAN_AM_PCT:g}%')
+                                    f'{CLEAN_AM_PCT:g}%. Click for details.')
         tapes = QtWidgets.QWidget()
         tapes.setFixedWidth(widths['tapes'])
         tb = QtWidgets.QVBoxLayout(tapes)
@@ -5552,7 +5602,7 @@ class StationPanel(QtCore.QObject):
         self.trend_note.setTextFormat(QtCore.Qt.RichText)
         self.spark = Spark(70, 125, limit=100)
         self.spark.setToolTip('Peak modulation, the last 5 minutes (each point: its highest); '
-                              'red: over the limit in force')
+                              'red: over the limit in force. Click for details.')
         trend = QtWidgets.QWidget()
         trend.setFixedWidth(widths['trend'])
         tr = QtWidgets.QVBoxLayout(trend)
@@ -5825,6 +5875,10 @@ class StationPanel(QtCore.QObject):
         self._info_badge('MPX spectrum', self.mpx)
         self._info_badge('Stereo image', self.gonio)
         self.annunciator.on_click = self._explain_alarm
+        # the station row (the press still selects the receiver)
+        for name, w in (('Peak modulation', self.tapes['mod']), ('RF level', self.tapes['rf']),
+                        ('AM / multipath', self.tapes['am']), ('Peak trend', self.spark)):
+            self._clickable(name, w, tip=False)
         self._collapse({})
 
     def _card_head(self, key, extra):
@@ -5863,11 +5917,13 @@ class StationPanel(QtCore.QObject):
             self._label_all(key)
         self._collapse(self.readings)
 
-    def _clickable(self, name, *widgets):
+    def _clickable(self, name, *widgets, tip=True):
+        """tip: False keeps the widgets' own tooltips (they end 'Click for details.')."""
         for w in widgets:
             w.setProperty('readout', name)
             w.setCursor(QtCore.Qt.WhatsThisCursor)
-            w.setToolTip(f'{READOUT[name].what} Click for details.')
+            if tip:
+                w.setToolTip(f'{READOUT[name].what} Click for details.')
             w.installEventFilter(self)
         self.readout_widgets.setdefault(name, widgets[-1])
 
@@ -5908,17 +5964,20 @@ class StationPanel(QtCore.QObject):
         level = next((lv[k] for k in READOUT[name].levels if lv.get(k)), None)
         if name in ('+ peak', '− peak'):     # not judged while reception isn't valid: amber
             level = self._peak_state(r, 'pos_pct' if name == '+ peak' else 'neg_pct')
+        elif name == 'Peak modulation':      # the higher of the two, as the row's tape
+            level = self._peak_state(r, 'pos_pct' if r['pos_pct'] >= r['neg_pct'] else 'neg_pct')
         return level
 
-    def explain(self, name, anchor):
-        """Show what a reading means beside `anchor`, the widget clicked."""
+    def explain(self, name, anchor, rect=None):
+        """Show what a reading means beside `anchor`, the widget clicked (or `rect`, the
+        part of it clicked, in global coordinates)."""
         d, r = READOUT[name], self.readings
         text = self._readout_text(name)
         level = self._readout_level(name, r) if r else None
         shown = text not in ('', '-') or name not in self.values and not isinstance(
             self.readout_widgets.get(name), (Tape, Meter))
         now = readout_now(name, r) if r and shown else ''
-        rect = QtCore.QRect(anchor.mapToGlobal(QtCore.QPoint(0, 0)), anchor.size())
+        rect = rect or QtCore.QRect(anchor.mapToGlobal(QtCore.QPoint(0, 0)), anchor.size())
         self.info.show_at(rect, name, _coloured(_html(text), level),
                           (('What it is', _html(d.what)), ("How it's measured", _html(d.how)),
                            ('Right now', _coloured(_html(now), level))), d.source)
@@ -6609,10 +6668,11 @@ class StationPanel(QtCore.QObject):
                                     limit=r['limit_pct'], band=(85, r['limit_pct']))
         self.tapes['mod'].setToolTip(f"Peak modulation +{r['pos_pct']:.0f}% / −{r['neg_pct']:.0f}% "
                                      f"({r['dev_khz']:.1f} kHz); limit {r['limit_pct']:.1f}% ({r['limit_why']}). "
-                                     'Tick: 2 s peak hold; grey band: the normal range')
+                                     'Tick: 2 s peak hold; grey band: the normal range. Click for details.')
         self.tapes['rf'].set_value(r['rf_dbfs'], _num(r['rf_dbfs'], 'dBFS', '.0f'),
                                    'alarm' if r['rf_dbfs'] < -75 else None)
-        self.tapes['rf'].setToolTip(f"RF level {_num(r['rf_dbfs'], 'dBFS')}, MPX S/N {_num(r['snr_db'], 'dB')}")
+        self.tapes['rf'].setToolTip(f"RF level {_num(r['rf_dbfs'], 'dBFS')}, MPX S/N {_num(r['snr_db'], 'dB')}. "
+                                    'Click for details.')
         self.tapes['am'].set_value(r['am_pct'], f"{r['am_pct']:.1f}%", lv.get('am_pct'))
 
     def _show_detail_tapes(self, r):
@@ -6967,7 +7027,7 @@ class StationPanel(QtCore.QObject):
         r, out = self.readings, {}
         if not r:
             return out
-        for d in READOUTS:
+        for d in READOUTS + OTHER_READOUTS:
             now = readout_now(d.name, r)
             if now != readout_plain_now(d, next((r['levels'][k] for k in d.levels if r['levels'].get(k)), None)):
                 out[d.name] = now
