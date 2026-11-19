@@ -345,7 +345,7 @@ for khz in (77.0, 80.0, 85.0):
 check(S, 'valid time held = all of the run, s', s['valid_window_s'] * s['valid_pct'] / 100, s['exceed_valid_s'], 0.01, 's')
 frac = rm.exceed_fraction(s, 77.0)
 check(S, 'SM.1268 (text; ISED limit 100% + 2 kHz)', f'{frac * 1e6:.2f} ppm of samples over 77.0 kHz (limit 1 ppm; '
-      f'0 of 15 min valid)', plain(panel_for(st).values['SM.1268']))
+      f'0 of 15 min valid)', plain(panel_for(st).values['Over-deviation (15 min)']))
 
 # ================================================================ S12: secondary quality checks (noise >100 kHz, pilot AM)
 S = 'S12 quality'

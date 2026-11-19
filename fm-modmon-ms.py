@@ -54,6 +54,14 @@ when no IBOC logo is on air. Some providers need a client identifier: set
 RADIODNS_CLIENT_ID (or --radiodns-client-id). Images and service information
 are cached for the session only (a %TEMP% folder deleted on exit).
 
+The detail cards show each card's essential readings; "All (+n)" on a card shows
+the rest (remembered, and the same for every receiver), and a reading beyond the
+essentials shows anyway, marked with a triangle, while it is out of range. The
+line above the cards lists every reading out of range. Click any reading, bar,
+graph's (i) or alarm lamp for what it is, how it is measured, what it means
+right now, and the rule or standard behind it (clicking the MPX spectrum or the
+stereo image itself still opens its larger view).
+
 Each receiver has a settings button (name, de-emphasis, stereo/mono, play
 volume, PTY names, expected PI, RDS feed, alarms and their thresholds). The
 open receivers, their stations and settings are saved to fm-modmon-ms_config.json
@@ -197,8 +205,8 @@ Measurements (refreshed 10x per second):
                     in valid time; repeats within 5 ms are one burst (the
                     FCC-era convention of FCC 93-370, at most 10 a minute:
                     industry practice, not a rule)
-    SM.1268         the fraction of samples whose deviation exceeds the
-                    station's limit + 2 kHz over the last 15 min of valid
+    Over-deviation  the fraction of samples whose deviation exceeds the
+      (15 min)      station's limit + 2 kHz over the last 15 min of valid
                     time (ITU-R SM.1268, ERC/REC 54-01: a violation above
                     1e-6, 1 ppm, ~346 samples; the limit is 75 kHz + 2 there).
                     Its alarm is judged once 15 min of valid time is held
@@ -3761,24 +3769,278 @@ class AlarmDef(NamedTuple):
     desc: str
     hold: int
     clean_only: bool = False
+    what: str = ''       # what raises it, in a sentence (its explanation, on a click)
+    source: str = ''     # the rule or standard behind it
 
 
+_FCC_ISED_MOD = 'FCC 47 CFR 73.1570(b)(2); ISED BETS-6 A.2.2.4.4, BPR-3 3.13.2.'
+_FCC_ISED_PILOT = 'FCC 47 CFR 73.322; ISED BETS-6 A.2.2.2.'
+_FCC_ISED_SUBS = 'FCC 47 CFR 73.319(d); ISED BETS-6 A.2.2.4.3, BPR-3 3.13.2.'
+_FCC_ISED_FREQ = 'ISED BETS-6 7.2.3 (transmitter stability); FCC 47 CFR 73.1545(b).'
+_SM1268 = 'ITU-R SM.1268 and ERC/REC 54-01 (European practice, where the limit is 75 kHz + 2 kHz).'
 ALARM_DEFS = (
-    AlarmDef('CARRIER', 'CARR', 'carrier low or lost', 5),
-    AlarmDef('SILENCE', 'SIL', 'audio silence', 10),
-    AlarmDef('OVERMOD', 'OVMD', 'over-modulation', 3, clean_only=True),
-    AlarmDef('EXCEEDANCE', 'SM1268',
-             'over-deviation over 15 min (ITU-R SM.1268: over 1e-6 of samples above the limit + 2 kHz)', 10),
-    AlarmDef('PILOT', 'PILOT', 'stereo pilot lost', 5),
-    AlarmDef('PILOT_SPEC', 'P.SPEC', 'stereo pilot out of tolerance', 10, clean_only=True),
-    AlarmDef('SUBCARRIERS', 'SUBS', 'subcarrier injection over the limit', 10, clean_only=True),
-    AlarmDef('FREQUENCY', 'FREQ', 'carrier frequency out of tolerance', 30, clean_only=True),
-    AlarmDef('RDS', 'RDS', 'RDS lost', 10),
-    AlarmDef('BACKUP', 'N+1', 'possibly on a backup transmitter without RDS (N+1)', 10),
-    AlarmDef('PI', 'PI', 'wrong station (PI differs from expected)', 5),
-    AlarmDef('ALERT', 'ALERT', 'emergency alert (IBOC or RT+ Alarm)', 0),  # IBOC: only while an IBOC programme is playing
-    AlarmDef('DATA', 'DATA', 'data service lost (paging, EWS, ODA or SCA data)', 60),
+    AlarmDef('CARRIER', 'CARR', 'carrier low or lost', 5,
+             what='The carrier is gone, or the MPX S/N is below the setting for this receiver.'),
+    AlarmDef('SILENCE', 'SIL', 'audio silence', 10,
+             what='The audio stays below the silence level for the time set for this receiver.'),
+    AlarmDef('OVERMOD', 'OVMD', 'over-modulation', 3, clean_only=True,
+             what='Peak modulation over the limit in force, judged on valid reception only.', source=_FCC_ISED_MOD),
+    AlarmDef('EXCEEDANCE', 'OVDEV', 'over-deviation over 15 min', 10,
+             what='More than one in a million samples over the limit + 2 kHz, over the last 15 minutes of '
+                  'valid reception. Judged once 15 minutes of valid time is held.', source=_SM1268),
+    AlarmDef('PILOT', 'PILOT', 'stereo pilot lost', 5, what='The 19 kHz stereo pilot has gone.'),
+    AlarmDef('PILOT_SPEC', 'P.SPEC', 'stereo pilot out of tolerance', 10, clean_only=True,
+             what='The pilot is outside its injection range or more than its tolerance off 19 kHz.',
+             source=_FCC_ISED_PILOT),
+    AlarmDef('SUBCARRIERS', 'SUBS', 'subcarrier injection over the limit', 10, clean_only=True,
+             what='Subcarrier injection (RDS + SCA) over the total allowed in stereo or mono, or too much '
+                  'above 75 kHz.', source=_FCC_ISED_SUBS),
+    AlarmDef('FREQUENCY', 'FREQ', 'carrier frequency out of tolerance', 30, clean_only=True,
+             what="The carrier is further off its frequency than the tolerance. The reading includes the "
+                  "SDR's own tuning error.", source=_FCC_ISED_FREQ),
+    AlarmDef('RDS', 'RDS', 'RDS lost', 10, what='No RDS groups are decoded.'),
+    AlarmDef('BACKUP', 'N+1', 'possibly on a backup transmitter without RDS (N+1)', 10,
+             what='RDS has gone while the carrier, pilot and audio stay fine, as when a backup transmitter '
+                  'without an RDS encoder is on air. Switch it off and it is plain RDS lost.'),
+    AlarmDef('PI', 'PI', 'wrong station (PI differs from expected)', 5,
+             what='The PI decoded is not the expected one: another station, or the wrong feed.'),
+    AlarmDef('ALERT', 'ALERT', 'emergency alert (IBOC or RT+ Alarm)', 0,  # IBOC: only while an IBOC programme is playing
+             what='An IBOC emergency alert while an IBOC programme plays, or an RT+ Alarm tag.',
+             source='NRSC-G300 7.2 (RT+ Alarm).'),
+    AlarmDef('DATA', 'DATA', 'data service lost (paging, EWS, ODA or SCA data)', 60,
+             what='A data service on air for 5 minutes unbroken is no longer seen (about 75 s after it stops).'),
 )
+
+
+# Each reading on the detail cards: what the panel and the web page say about it
+# when it is clicked. The cards show the essential ones; the others under "All",
+# or whenever one is out of range. Rules and standards are named only in
+# `source`, so the cards themselves stay plain.
+class ReadoutDef(NamedTuple):
+    name: str           # its label (and its key in StationPanel.values)
+    card: str           # 'mod' | 'mpx' | 'rds' | 'aud'
+    essential: bool     # shown without "All"
+    levels: tuple       # its _measure() level keys: out of range while any is set
+    normal: str         # its normal range, short ('' if it has none)
+    what: str
+    how: str
+    source: str = ''
+
+
+CARDS = (('mod', 'Modulation'), ('mpx', 'Multiplex'), ('rds', 'RDS'), ('aud', 'Audio'))
+_RULES_SET = " The rule set is the receiver's (Settings)."
+READOUTS = (
+    # Modulation
+    ReadoutDef('+ peak', 'mod', True, ('pos_pct',), 'up to the limit',
+               'The highest positive swing of the composite (MPX) signal in the last second, as a percentage '
+               'of 75 kHz deviation.',
+               'The level the MPX exceeds for 17 µs in each 100 ms, so one noise sample doesn\'t count, read '
+               'through a filter that undoes the demodulator\'s roll-off (L−R, RDS and SCA peaks would read up to '
+               '3% low without it). White tick: 2 s peak hold; red notch: the limit in force.',
+               'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
+    ReadoutDef('− peak', 'mod', True, ('neg_pct',), 'up to the limit',
+               'The deepest negative swing of the composite signal in the last second, as a percentage of 75 kHz.',
+               'The same detector as + peak, on the negative side.', 'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
+    ReadoutDef('Limit', 'mod', True, (), '',
+               'The over-modulation limit this station is judged against.',
+               '100%, plus 0.5% for each 1% of subcarrier injection (RDS and SCA), never above 110%. Every limit '
+               'can be changed per receiver; the rules then become custom.', _FCC_ISED_MOD + _RULES_SET),
+    ReadoutDef('Peak distribution', 'mod', False, (), '',
+               'How the peak modulation has spread over the last 5 minutes: the share of updates at each level.',
+               'Log height. Red: over the limit in force; amber: over 100%.'),
+    ReadoutDef('Peak deviation', 'mod', False, (), 'up to the limit',
+               'The 1 s peak of either polarity, in kHz.', 'The same detector as + / − peak.'),
+    ReadoutDef('MPX power', 'mod', False, (), 'information only here',
+               'The average power of the whole composite over 60 s, against a ±19 kHz sine (0 dBr).',
+               'Integrated over 60 s (the time so far while it fills).',
+               'ITU-R BS.412: a European limit (+0 dBr), not an FCC or ISED rule.'),
+    ReadoutDef('Over 100%', 'mod', False, (), 'up to 10 a minute',
+               'Bursts above 100% in the last minute.',
+               'Counted in valid time only; repeats within 5 ms are one burst.',
+               'The FCC 93-370-era convention: industry practice, not a rule.'),
+    ReadoutDef('Over 110%', 'mod', False, (), '0',
+               'Bursts above 110% in the last minute.', 'As Over 100%.',
+               'The FCC 93-370-era convention: industry practice, not a rule.'),
+    ReadoutDef('Peak balance', 'mod', False, ('asym_pct',), f'within ±{ASYM_WARN_PCT:g}%',
+               'How much higher the positive peaks run than the negative ones.',
+               'Over 10 s. Programme audio is symmetric, so a lasting difference means something adds to one '
+               'side: a station 200 kHz above pulls the positive peaks up (below: the negative).'),
+    ReadoutDef('L / R', 'mod', False, ('mod_l', 'mod_r'), 'up to 100%',
+               'The peak modulation of the left and right channels, 1 s, as transmitted.', 'Decoded from the MPX.'),
+    ReadoutDef('L+R / L−R', 'mod', False, ('mod_m', 'mod_s'), 'up to 100%',
+               'The peak modulation of the mono sum and the stereo difference, 1 s, as transmitted.',
+               'Decoded from the MPX.'),
+    ReadoutDef('Valid time', 'mod', False, ('valid_pct',), f'{VALID_WARN_PCT:g}% or more',
+               'How much of the last 15 minutes had reception clean enough to trust the peak readings.',
+               f'Each 100 ms is valid or not: not while AM / multipath has been {PEAK_AM_PCT:g}% or more in the '
+               'last 10 s, nor while Noise >100 kHz is high, nor for 1 s after a 3 dB RF level step, nor for 60 s '
+               "after another station's PI is decoded. The over-modulation alarms judge valid time only. A station "
+               'seldom valid says more about the antenna than the transmitter.',
+               'The site practice of ITU-R SM.1268.'),
+    ReadoutDef('Over-deviation (15 min)', 'mod', False, ('exceed_frac',), 'under 1 ppm',
+               'The share of samples over the limit + 2 kHz in the last 15 minutes of valid reception.',
+               'Every sample counts; more than one in a million (1 ppm) is a violation. Its alarm is judged once '
+               '15 minutes of valid time is held.', _SM1268),
+    # Multiplex
+    ReadoutDef('MPX spectrum', 'mpx', True, (), '',
+               'The spectrum of the composite signal, 0–100 kHz: programme (L+R) to 15 kHz, the 19 kHz pilot, '
+               'stereo (L−R) 23–53 kHz, RDS at 57 kHz, and any SCA at 67 / 92 kHz.',
+               'dB against 100% modulation, 500 Hz bins. Click the graph for a larger view.'),
+    ReadoutDef('S/N', 'mpx', True, ('snr_db',), "above the carrier alarm's setting",
+               'Signal-to-noise of the received composite: a 100% tone against the receiver noise in 0–15 kHz.',
+               'Unweighted, no de-emphasis. The noise is estimated from the empty 16–18.3 kHz guard band, '
+               "allowing for FM noise rising with frequency. Below the carrier alarm's setting is carrier low; "
+               'the grey band (30 dB and up) is good reception.'),
+    ReadoutDef('Pilot', 'mpx', True, ('pilot_pct',), 'the grey band',
+               'The level of the 19 kHz stereo pilot, as a percentage of 75 kHz.',
+               'Stereo from 3% until it falls below 2%. The grey band is the range the rules allow.',
+               _FCC_ISED_PILOT + _RULES_SET),
+    ReadoutDef('Offset', 'mpx', True, ('offset_hz',), 'the grey band',
+               'How far the carrier is from its frequency.',
+               "The DC level of the demodulated signal. It includes the SDR's own tuning error, so recalibrate "
+               'before trusting a small offset. The grey band is the tolerance.', _FCC_ISED_FREQ + _RULES_SET),
+    ReadoutDef('RF level', 'mpx', True, (), '',
+               'The channel power at the SDR.',
+               'In dBFS, uncalibrated: it depends on the gain. Compare it with itself over time, not with a '
+               'field-strength meter.'),
+    ReadoutDef('RDS injection', 'mpx', True, (), 'typically 2–5%',
+               'The peak deviation of the 57 kHz RDS subcarrier, as a percentage of 75 kHz.',
+               'As encoders are set (2 kHz = 2.7%), with the receiver noise removed. It counts toward the '
+               'subcarrier total and raises the modulation limit.', 'The subcarrier total: ' + _FCC_ISED_SUBS),
+    ReadoutDef('AM / multipath', 'mpx', False, ('am_pct',), f'under {PEAK_AM_PCT:g}%',
+               'Amplitude ripple on the carrier: echoes on the path, or a transmitter fault. 0% is clean reception.',
+               f'RMS envelope ripple as a percentage of 100% AM (10% sine AM reads 10%). Peaks are judged only '
+               f'while it stays under {PEAK_AM_PCT:g}%; the other rules while under {CLEAN_AM_PCT:g}%.',
+               f'The {PEAK_AM_PCT:g}% threshold follows ITU-R SM.1268 (echoes 26 dB down).'),
+    ReadoutDef('Pilot freq', 'mpx', False, ('pilot_hz',), '19 kHz ± the tolerance',
+               'The frequency of the 19 kHz pilot.', 'From the stereo PLL.', _FCC_ISED_PILOT + _RULES_SET),
+    ReadoutDef('Pilot AM', 'mpx', False, ('pilot_am_pct',), f'under {PILOT_AM_WARN_PCT:g}%',
+               "Ripple in the pilot's level.",
+               "RMS × √2. An echo modulates it as the carrier sweeps the channel's notches, so it confirms "
+               'multipath; noise and composite clipping raise it too, plain AM doesn\'t.',
+               "Inovonics' multipath indication."),
+    ReadoutDef('RDS phase', 'mpx', False, ('rds_phase_deg',), '0° or ±90°, within ±10°',
+               "The phase of the RDS subcarrier against the pilot's third harmonic, over 5 s.",
+               'In phase (0°) or quadrature (±90°) are both correct. Drifting means the RDS encoder isn\'t '
+               'locked to the pilot: late RadioText, skipped PS.', 'IEC 62106.'),
+    ReadoutDef('Sync AM', 'mpx', False, ('sync_am_pct',), '−35 dB or better',
+               'Amplitude ripple that follows the modulation, as the AM depth it reaches at ±75 kHz.',
+               'A mistuned transmitter, filter, combiner or antenna match causes it, but a short echo on the path '
+               "reads the same, so it is a figure for this receiving site: the transmitter's share is at most "
+               f'this. Judged only while AM / multipath stays under {PEAK_AM_PCT:g}%.',
+               "Orban's transmitter guidance (−35 dB, −40 dB preferred)."),
+    ReadoutDef('Noise >100 kHz', 'mpx', False, ('hf_noise_db',), 'low',
+               'Noise in 105–145 kHz of the composite, where nothing but noise and interference belongs.',
+               'dB against a 100% sine; in brackets, the noise it leaves on the peak readings. While it is amber '
+               'reception isn\'t valid.', "Pira's quality metric."),
+    ReadoutDef('SCA 67 kHz', 'mpx', False, (), 'within the subcarrier total',
+               'Subcarrier injection at 67 kHz, and what it carries.',
+               'Shown when it stands 10 dB above the empty 77–82 kHz gap. Its content is classed as audio, data, '
+               'tone or idle: identified, never decoded.',
+               _FCC_ISED_SUBS + ' Not decoded: Radiocommunication Act s. 9(2).'),
+    ReadoutDef('SCA 92 kHz', 'mpx', False, (), 'within the subcarrier total',
+               'Subcarrier injection at 92 kHz, and what it carries.', 'As SCA 67 kHz.',
+               _FCC_ISED_SUBS + ' Not decoded: Radiocommunication Act s. 9(2).'),
+    ReadoutDef('IBOC signal', 'mpx', False, (), '',
+               'The HD Radio sidebands the start-up scan found.', 'In dBc, against the analog carrier.', 'NRSC-5.'),
+    # RDS
+    ReadoutDef('RDS rate', 'rds', True, (), '11.4 groups/s',
+               'RDS groups decoded each second, over the last 5 minutes.', '11.4 a second is every group sent.'),
+    ReadoutDef('PI', 'rds', True, (), 'the expected PI',
+               "Programme Identification: the station's RDS code.",
+               'The wrong-station alarm compares it with the expected PI (Settings).', 'IEC 62106; NRSC-4-B (RBDS).'),
+    ReadoutDef('PTY', 'rds', True, (), '',
+               'The programme type the station sends.', 'Named from the RBDS or the RDS list (Settings).',
+               'NRSC-4-B (North America); IEC 62106.'),
+    ReadoutDef('Groups/s', 'rds', True, (), '11.4',
+               'RDS groups decoded each second.', 'Over the last 3 s; 11.4 a second is every group the encoder sends.'),
+    ReadoutDef('Group loss', 'rds', True, (), 'under about 5%',
+               "The share of RDS groups that didn't decode.", 'The decode rate against 11.4 a second.'),
+    ReadoutDef('PTYN', 'rds', False, (), '', 'A free-text programme type name.', 'Group 10A.', 'IEC 62106.'),
+    ReadoutDef('ECC', 'rds', False, (), '', 'The extended country code: with the PI, it identifies the country.',
+               'Group 1A.', 'IEC 62106.'),
+    ReadoutDef('Flags', 'rds', False, (), '', 'Traffic programme and announcement, music / speech, and the '
+               'decoder identification flags.', 'Groups 0A and 15B; lit when set.', 'IEC 62106.'),
+    ReadoutDef('ODA', 'rds', False, (), '', 'The open data applications announced (RT+, TMC, ...).', 'Group 3A.',
+               'IEC 62106.'),
+    ReadoutDef('Alt. freqs', 'rds', False, (), '', 'The alternative frequencies the station lists.', 'Group 0A.',
+               'IEC 62106.'),
+    ReadoutDef('Clock', 'rds', False, (), 'within seconds of the time', "The station's clock, in local time.",
+               'Group 4A, sent as UTC with the local offset.', 'IEC 62106.'),
+    ReadoutDef('Group types', 'rds', False, (), '', 'The share of each RDS group type received.', 'Since tuning.'),
+    ReadoutDef('Data services', 'rds', False, ('data_lost',), '',
+               'Paging, TMC, EWS, other ODAs and SCA data: present or lost, with their share of the groups.',
+               'Identified, never decoded. A service on air 5 minutes unbroken counts as lost once it is unseen.',
+               'Not decoded: Radiocommunication Act s. 9(2).'),
+    # Audio
+    ReadoutDef('Momentary', 'aud', False, (), '', 'Loudness over the last 400 ms.',
+               'K-weighted, from the de-emphasised L/R; 0 dBFS = 75 kHz deviation.', 'ITU-R BS.1770; EBU R128.'),
+    ReadoutDef('Short-term', 'aud', True, (), '', 'Loudness over the last 3 s.',
+               'As Momentary. FM sets no loudness limit; the trend\'s dotted line is the EBU reference, −23 LUFS.',
+               'ITU-R BS.1770; EBU R128.'),
+    ReadoutDef('Integrated', 'aud', True, (), '', 'Loudness since start, or since reset I.',
+               'Gated, as EBU R128 specifies.', 'ITU-R BS.1770; EBU R128.'),
+    ReadoutDef('True peak L/R', 'aud', True, (), 'below 0 dBTP', 'The true peak of each channel.',
+               '4× oversampled, 1 s hold.', 'ITU-R BS.1770.'),
+    ReadoutDef('Loudness trend', 'aud', True, (), '', 'Short-term loudness over the last 5 minutes.',
+               'Dotted: −23 LUFS, the EBU reference.'),
+    ReadoutDef('Stereo image', 'aud', True, (), 'taller than wide',
+               'A goniometer: L against R, turned 45° so mono is a vertical line and out-of-phase audio a '
+               'horizontal one.', 'From the de-emphasised L/R, 300 ms. Click it for a larger view.'),
+    ReadoutDef('Phase', 'aud', True, ('correlation',), 'above 0',
+               'How alike L and R are: +1 mono, 0 wide stereo, below 0 out of phase (it cancels in mono).',
+               '300 ms window.'),
+    ReadoutDef('Balance', 'aud', False, (), 'near centre', 'The level difference between L and R.', 'RMS, 300 ms.'),
+    ReadoutDef('Width (S/M)', 'aud', False, (), '', 'Side energy against mid energy: how wide the stereo is.',
+               '300 ms; mono below −40 dB.'),
+    ReadoutDef('Level L/R', 'aud', False, (), '', 'The RMS level of each channel.', '300 ms, dBFS.'),
+    ReadoutDef('Correlation', 'aud', False, (), 'above 0', "The Phase meter's value: +1 mono, 0 wide stereo, "
+               'below 0 out of phase.', '300 ms window.'),
+)
+READOUT = {d.name: d for d in READOUTS}
+
+
+def readout_now(name, r):
+    """What a reading means right now, in a sentence ('' when there is nothing to
+    say): its readings `r` (StationPanel._measure()) against its normal range."""
+    d, lv = READOUT[name], r.get('levels', {})
+    if name == 'Limit' and r.get('limit_why'):
+        return f"{r['limit_pct']:.1f}% for this station: {r['limit_why']}."
+    if name == 'Valid time' and r.get('invalid_why'):
+        return f"Not valid now: {r['invalid_why']}."
+    level = next((lv[k] for k in d.levels if lv.get(k)), None)
+    if name == 'AM / multipath' and level:
+        return (f'Over {CLEAN_AM_PCT:g}%: no technical rule is judged now.' if level == 'alarm' else
+                f'Over {PEAK_AM_PCT:g}%: the peaks are not judged now; the other rules still are.')
+    if name == 'Sync AM' and r.get('sync_am_multipath'):
+        return f'Not judged: AM / multipath has been over {PEAK_AM_PCT:g}% in the last 10 s.'
+    if name == 'Data services' and r.get('data_lost'):
+        return 'Lost: ' + ', '.join(r['data_lost']) + '.'
+    return readout_plain_now(d, level)
+
+
+def readout_plain_now(d, level):
+    """readout_now() for a reading with nothing particular to say: in or out of its
+    range. (The web page words it the same way: readoutNow().)"""
+    if level:
+        return 'Out of its normal range' + (f' ({d.normal}).' if d.normal else '.')
+    if d.levels:
+        return 'In its normal range' + (f': {d.normal}.' if d.normal else '.')
+    return f'Normal: {d.normal}.' if d.normal else ''
+
+
+# what the web page explains on a click, fetched once: the readings and the alarms
+READOUTS_JSON = json.dumps({
+    'cards': CARDS, 'readouts': [d._asdict() for d in READOUTS],
+    'alarms': {d.name: {'what': d.what, 'source': d.source, 'hold': d.hold, 'clean_only': d.clean_only}
+               for d in ALARM_DEFS},
+    'clean_am_pct': CLEAN_AM_PCT}).encode()
+
+
+def out_of_range(r):
+    """The readings out of their normal range now, in card order."""
+    lv = r.get('levels', {})
+    return [d.name for d in READOUTS if any(lv.get(k) for k in d.levels)]
 
 
 class Annunciator(QtWidgets.QWidget):
@@ -3803,6 +4065,7 @@ class Annunciator(QtWidgets.QWidget):
         super().__init__()
         self.states = {}
         self.notes = {}
+        self.on_click = None    # on_click(alarm name, its lamp's rect in global coordinates)
         self.setMinimumHeight(50)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.setMouseTracking(True)
@@ -3856,11 +4119,87 @@ class Annunciator(QtWidgets.QWidget):
                     tip = f'<b>{self.SHORT[name]}</b>: {desc}<br>{self.MEANS[state]}'
                     if self.notes.get(name):
                         tip += f'<br>{_html(self.notes[name])}'
-                    QtWidgets.QToolTip.showText(event.globalPos(), tip, self, rect.toRect())
+                    QtWidgets.QToolTip.showText(event.globalPos(), tip + '<br><i>Click for details</i>', self,
+                                                rect.toRect())
                     return True
             QtWidgets.QToolTip.hideText()
             return True
         return super().event(event)
+
+    def mouseReleaseEvent(self, event):
+        # (the press goes on to the row, which selects the receiver)
+        if event.button() == QtCore.Qt.LeftButton and self.on_click:
+            for name, _, rect in self._cells():
+                if rect.contains(QtCore.QPointF(event.pos())):
+                    r = rect.toRect()
+                    self.on_click(name, QtCore.QRect(self.mapToGlobal(r.topLeft()), r.size()))
+                    return
+        super().mouseReleaseEvent(event)
+
+
+class ReadoutInfo(QtWidgets.QFrame):
+    """What a reading or an alarm means, shown on a click beside it: what it is,
+    how it is measured, what it means right now, and (folded away) the rule or
+    standard behind it. A popup: a click anywhere else closes it."""
+    WIDTH = 380
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Popup)
+        self.setObjectName('readoutInfo')
+        self.setStyleSheet('#readoutInfo { background: #24262b; border: 1px solid #6f747c; border-radius: 8px; }'
+                           'QLabel { background: transparent; }')
+        self.setFixedWidth(self.WIDTH)
+        box = QtWidgets.QVBoxLayout(self)
+        box.setContentsMargins(12, 10, 12, 10)
+        box.setSpacing(6)
+        self.body = QtWidgets.QLabel()
+        self.body.setTextFormat(QtCore.Qt.RichText)
+        self.body.setWordWrap(True)
+        self.source_btn = QtWidgets.QToolButton()
+        self.source_btn.setStyleSheet('QToolButton { border: none; color: #8ab4f8; padding: 0; }')
+        self.source_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.source_btn.clicked.connect(self._toggle_source)
+        self.source = QtWidgets.QLabel()
+        self.source.setWordWrap(True)
+        self.source.setStyleSheet('color: #9aa0a6;')
+        self.source.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        box.addWidget(self.body)
+        box.addWidget(self.source_btn, 0, QtCore.Qt.AlignLeft)
+        box.addWidget(self.source)
+
+    def _fit(self):
+        """Its height for its (fixed) width: the wrapped text decides it."""
+        self.layout().activate()
+        self.resize(self.WIDTH, self.layout().totalHeightForWidth(self.WIDTH))
+
+    def _toggle_source(self):
+        self.source.setVisible(self.source.isHidden())
+        self.source_btn.setText(('▾' if self.source.isVisible() else '▸') + '  Source && rules')
+        self._fit()
+
+    def show_at(self, anchor, title, value_html, sections, source=''):
+        """anchor: the clicked thing's rect in global coordinates; sections: [(heading, text)],
+        empty texts left out; value_html: the reading as the panel shows it."""
+        head = (f'<table width="100%" cellspacing="0" cellpadding="0"><tr><td><b style="font-size:11pt;'
+                f'color:#e3e4e6">{_html(title)}</b></td><td align="right"><b>{value_html}</b></td></tr></table>')
+        parts = [head] + [f'<p style="margin:8px 0 0 0"><span style="color:#8c9197;font-size:7.5pt;'
+                          f'letter-spacing:1px">{_html(h.upper())}</span><br><span style="color:#c4c7cc">'
+                          f'{text}</span></p>' for h, text in sections if text]
+        self.body.setText(''.join(parts))
+        self.source.setText(_html(source))
+        self.source.hide()
+        self.source_btn.setVisible(bool(source))
+        self.source_btn.setText('▸  Source && rules')
+        self._fit()
+        screen = QtWidgets.QApplication.screenAt(anchor.center()) or QtWidgets.QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = min(max(anchor.left(), area.left() + 4), area.right() - self.width() - 4)
+        y = anchor.bottom() + 6
+        if y + self.height() > area.bottom():
+            y = max(area.top() + 4, anchor.top() - self.height() - 6)
+        self.move(x, y)
+        self.show()
+        self.raise_()
 
 
 def bucket(t, v, span, n, peak=True, end=None):
@@ -4748,7 +5087,7 @@ class StationAlarms:
         changes = []
         if now - self._t0 < ALARM_GRACE_S:
             return changes
-        for name, _, desc, hold, _ in ALARM_DEFS:
+        for name, _, desc, hold, *_ in ALARM_DEFS:
             hold = (holds or {}).get(name, hold)
             want = bool(conditions.get(name))
             if want == (name in self.active):
@@ -5216,6 +5555,18 @@ class StationPanel(QtCore.QObject):
         self.values = {}
         self._kv_rows = {}      # readout: its (label, value), to hide when it isn't on air
         self.absent = {}        # card: its 'not on air' line
+        self.readout_widgets = {}   # reading (READOUTS): the widget showing it (value label, tape, meter, graph)
+        self.detail_all = set()     # the cards showing all their readings, not just the essential ones
+        self.on_detail_all = None   # on_detail_all(cards): set by the window, which shares it across receivers
+        self._all_btns = {}         # card: its All / Essentials button
+        self._extra = {}            # reading: more widgets shown only under All (besides the label/value rows)
+        self.info = ReadoutInfo(self.detail)
+        # the readings out of range now, each a link to its explanation (shown whatever the cards show)
+        self.strip = QtWidgets.QLabel()
+        self.strip.setTextFormat(QtCore.Qt.RichText)
+        self.strip.setWordWrap(True)
+        self.strip.linkActivated.connect(lambda name: self.explain(name, self.strip))
+        ov.addWidget(self.strip)
         cards = QtWidgets.QGridLayout()
         cards.setSpacing(8)
         ov.addLayout(cards)
@@ -5227,24 +5578,24 @@ class StationPanel(QtCore.QObject):
 
         # modulation: peak tapes against the limit in force, then the counts and channels
         self.limit_note = dim_label()
-        mod, box = card('Modulation', self.limit_note)
+        mod, box = card('Modulation', self._card_head('mod', self.limit_note))
         self.peak_tapes = {key: Tape(name, 0, 130, band=(85, 100), hold=True, name_w=50, val_w=110)
                            for key, name in (('pos', '+ peak'), ('neg', '− peak'))}
         for t in self.peak_tapes.values():
             box.addWidget(t)
         self.peak_hist = PeakHistogram()
-        self.peak_hist.setToolTip('How peak modulation spreads: the share of updates at each peak level over the '
-                                  'last 5 minutes (log height). Red: over the limit in force; amber: over 100%')
-        box.addWidget(dim_label('Peak distribution \u00b7 last 5 min'))
+        hist_cap = dim_label('Peak distribution \u00b7 last 5 min')
+        self._extra['Peak distribution'] = (hist_cap, self.peak_hist)
+        box.addWidget(hist_cap)
         box.addWidget(self.peak_hist)
-        box.addLayout(self._kv(('Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R',
-                                'L+R / L−R', 'Valid time', 'Limit', 'SM.1268'), 1,
-                               wide=('Valid time', 'Limit', 'SM.1268')))
+        box.addLayout(self._kv(('Limit', 'Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance',
+                                'L / R', 'L+R / L−R', 'Valid time', 'Over-deviation (15 min)'), 1,
+                               wide=('Valid time', 'Over-deviation (15 min)')))
         box.addStretch(1)
         cards.addWidget(mod, 0, 0)
 
         # multiplex: spectrum, S/N, pilot and carrier tapes, the subcarriers
-        mpx_card, box = card('Multiplex', dim_label('0–100 kHz'))
+        mpx_card, box = card('Multiplex', self._card_head('mpx', dim_label('0–100 kHz')))
         self.mpx = MpxSpectrum()
         self.mpx.setMinimumHeight(140)
         self.mpx.setCursor(QtCore.Qt.PointingHandCursor)
@@ -5256,9 +5607,6 @@ class StationPanel(QtCore.QObject):
             'pilot': Tape('Pilot', 6, 12, band=(8, 10), name_w=50, val_w=110),
             'offset': Tape('Offset', -3000, 3000, origin=0, band=(-1000, 1000), name_w=50, val_w=110),
         }
-        self.mpx_tapes['snr'].setToolTip('MPX S/N, unweighted 15 kHz; below the carrier alarm\'s setting is carrier low')
-        self.mpx_tapes['pilot'].setToolTip('Pilot injection; the grey band is the range the rules allow')
-        self.mpx_tapes['offset'].setToolTip('Carrier offset; the grey band is the tolerance (includes the SDR\'s own error)')
         for t in self.mpx_tapes.values():
             box.addWidget(t)
         box.addLayout(self._kv(('RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase',
@@ -5272,9 +5620,8 @@ class StationPanel(QtCore.QObject):
 
         # RDS
         self.rds_note = dim_label()
-        rds, box = card('RDS', self.rds_note)
+        rds, box = card('RDS', self._card_head('rds', self.rds_note))
         self.rds_spark = Spark(0, 12)
-        self.rds_spark.setToolTip('RDS groups per second, the last 5 minutes (11.4/s is every group)')
         box.addWidget(self.rds_spark)
         box.addLayout(self._kv(('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs',
                                 'Clock', 'Group types', 'Data services'), 1,
@@ -5291,10 +5638,9 @@ class StationPanel(QtCore.QObject):
         reset.setToolTip('Start the integrated loudness again')
         reset.setStyleSheet('padding: 0 6px;')
         reset.clicked.connect(station.audio_meter.reset_integrated)
-        audio, box = card('Audio', reset)
+        audio, box = card('Audio', self._card_head('aud', reset))
         box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 1))
         self.lufs_spark = Spark(-40, 0, ref=-23)
-        self.lufs_spark.setToolTip('Short-term loudness, the last 5 minutes (dotted: -23 LUFS)')
         box.addWidget(self.lufs_spark)
         self.gonio = Goniometer(size=104)
         self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
@@ -5340,6 +5686,137 @@ class StationPanel(QtCore.QObject):
         for name in ('Peak + / −', 'MPX S/N', 'Carrier offset', 'Pilot (19 kHz)'):
             self.values[name] = QtWidgets.QLabel('-')
 
+        # every reading explains itself on a click; the graphs that open a larger view
+        # on a click have an ⓘ for that instead
+        for name, w in (('+ peak', self.peak_tapes['pos']), ('− peak', self.peak_tapes['neg']),
+                        ('Peak distribution', self.peak_hist), ('S/N', self.mpx_tapes['snr']),
+                        ('Pilot', self.mpx_tapes['pilot']), ('Offset', self.mpx_tapes['offset']),
+                        ('RDS rate', self.rds_spark), ('Loudness trend', self.lufs_spark),
+                        ('Phase', self.meters['corr'])):
+            self._clickable(name, w)
+        for name, (label, value) in self._kv_rows.items():
+            self._clickable(name, label, value)
+        self._clickable('Limit', self.limit_note)   # (its value label stays the one quoted)
+        self._info_badge('MPX spectrum', self.mpx)
+        self._info_badge('Stereo image', self.gonio)
+        self.annunciator.on_click = self._explain_alarm
+        self._collapse({})
+
+    def _card_head(self, key, extra):
+        """A card's head: its own note or button, then its All / Essentials button."""
+        btn = QtWidgets.QToolButton()
+        btn.setStyleSheet('padding: 0 6px;')
+        btn.more = sum(1 for d in READOUTS if d.card == key and not d.essential)
+        btn.clicked.connect(lambda: self._toggle_all(key))
+        self._all_btns[key] = btn
+        box = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        if extra:
+            row.addWidget(extra)
+        row.addWidget(btn)
+        self._label_all(key)
+        return box
+
+    def _label_all(self, key):
+        btn = self._all_btns[key]
+        if key in self.detail_all:
+            btn.setText('Essentials')
+            btn.setToolTip('Show only the essential readings (any out of range still show)')
+        else:
+            btn.setText(f'All (+{btn.more})')
+            btn.setToolTip(f'Show all the readings of this card: {btn.more} more')
+
+    def _toggle_all(self, key):
+        (self.on_detail_all or self.set_detail_all)(self.detail_all ^ {key})
+
+    def set_detail_all(self, cards):
+        """Show every reading of these cards (keys of CARDS); the others show their essential ones."""
+        self.detail_all = {c for c in cards if c in dict(CARDS)}
+        for key in self._all_btns:
+            self._label_all(key)
+        self._collapse(self.readings)
+
+    def _clickable(self, name, *widgets):
+        for w in widgets:
+            w.setProperty('readout', name)
+            w.setCursor(QtCore.Qt.WhatsThisCursor)
+            w.setToolTip(f'{READOUT[name].what} Click for details.')
+            w.installEventFilter(self)
+        self.readout_widgets.setdefault(name, widgets[-1])
+
+    def _info_badge(self, name, graph):
+        badge = QtWidgets.QToolButton(graph)
+        badge.setText('i')
+        badge.setFixedSize(18, 18)
+        badge.setStyleSheet('QToolButton { border: none; border-radius: 9px; background: rgba(23, 24, 27, 210);'
+                            ' color: #9aa0a6; font-weight: 700; }'
+                            'QToolButton:hover { background: #33363c; color: #e3e4e6; }')
+        badge.setCursor(QtCore.Qt.WhatsThisCursor)
+        badge.setToolTip(f'{READOUT[name].what} Click for details.')
+        badge.clicked.connect(lambda: self.explain(name, badge))
+        graph.info_badge = badge
+        graph.installEventFilter(self)
+        self.readout_widgets[name] = graph
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.MouseButtonRelease and event.button() == QtCore.Qt.LeftButton:
+            name = obj.property('readout')
+            if name:
+                self.explain(name, obj)
+                return True
+        elif event.type() == QtCore.QEvent.Resize and hasattr(obj, 'info_badge'):
+            obj.info_badge.move(obj.width() - obj.info_badge.width() - 3, 3)
+        return False
+
+    def _readout_text(self, name):
+        """A reading as the panel shows it, as plain text ('' for a graph)."""
+        w = self.readout_widgets.get(name)
+        if isinstance(w, QtWidgets.QLabel):
+            return QtGui.QTextDocumentFragment.fromHtml(w.text()).toPlainText().strip()
+        return w.text if isinstance(w, (Tape, Meter)) else ''
+
+    def _readout_level(self, name, r):
+        """'warn' | 'alarm' | None: a reading's state, as the panel colours it."""
+        lv = r.get('levels', {})
+        level = next((lv[k] for k in READOUT[name].levels if lv.get(k)), None)
+        if name in ('+ peak', '− peak'):     # not judged while reception isn't valid: amber
+            level = self._peak_state(r, 'pos_pct' if name == '+ peak' else 'neg_pct')
+        return level
+
+    def explain(self, name, anchor):
+        """Show what a reading means beside `anchor`, the widget clicked."""
+        d, r = READOUT[name], self.readings
+        text = self._readout_text(name)
+        level = self._readout_level(name, r) if r else None
+        shown = text not in ('', '-') or name not in self.values and not isinstance(
+            self.readout_widgets.get(name), (Tape, Meter))
+        now = readout_now(name, r) if r and shown else ''
+        rect = QtCore.QRect(anchor.mapToGlobal(QtCore.QPoint(0, 0)), anchor.size())
+        self.info.show_at(rect, name, _coloured(_html(text), level),
+                          (('What it is', _html(d.what)), ("How it's measured", _html(d.how)),
+                           ('Right now', _coloured(_html(now), level))), d.source)
+
+    def _explain_alarm(self, name, rect):
+        d = next(a for a in ALARM_DEFS if a.name == name)
+        state = self.annunciator.states.get(name, 'waiting')
+        word = {'clear': 'clear', 'waiting': 'not judged yet', 'raised': 'RAISED', 'pending': 'pending',
+                'suppressed': 'not judged now', 'off': 'off'}[state]
+        colour = {'raised': RED, 'pending': AMBER, 'suppressed': AMBER}.get(state, '#9aa0a6')
+        hold = self.settings.silence_s if name == 'SILENCE' else d.hold
+        when = ('It raises at once.' if not hold else
+                f'It raises once its condition has held {hold:g} s, and clears the same way.')
+        if d.clean_only:
+            when += f' Judged only on clean reception (AM / multipath under {CLEAN_AM_PCT:g}%).'
+        now = Annunciator.MEANS[state]
+        now = now[0].upper() + now[1:] + '.'
+        if self.annunciator.notes.get(name):
+            now += ' ' + self.annunciator.notes[name]
+        self.info.show_at(rect, d.desc[0].upper() + d.desc[1:], f'<span style="color:{colour}">{word}</span>',
+                          (('What raises it', _html(d.what)), ('When', _html(when)), ('Right now', _html(now))),
+                          d.source)
+
     def _kv(self, names, cols, wide=()):
         """Label/value pairs in `cols` columns; readouts in `wide` get a full-width
         row each at the end. Long values are cut at the card edge, never widening it."""
@@ -5353,7 +5830,8 @@ class StationPanel(QtCore.QObject):
                 row, col, span = i // cols, i % cols, 1
             else:
                 row, col, span = rows + i - len(normal), 0, cols * 2 - 1
-            label = QtWidgets.QLabel(name)
+            label = QtWidgets.QLabel(_html(name))
+            label.setTextFormat(QtCore.Qt.RichText)
             label.setStyleSheet('color: #9aa0a6;')
             value = QtWidgets.QLabel('-')
             value.setTextFormat(QtCore.Qt.RichText)
@@ -5565,6 +6043,8 @@ class StationPanel(QtCore.QObject):
         self._rt_alarm = ''
         self._reset_identity()
         self.readings = {}
+        self._show_strip({})
+        self._collapse({})
         self.history.reset()
         for m in self.meters.values():
             m.set_value(None, '-')
@@ -5765,6 +6245,8 @@ class StationPanel(QtCore.QObject):
                 lv['pilot_am_pct'] = 'warn'
             if s['valid_pct'] is not None and s['valid_pct'] < VALID_WARN_PCT:
                 lv['valid_pct'] = 'warn'
+            if s['snr_db'] < self.settings.min_snr_db:
+                lv['snr_db'] = 'alarm'
             # SM.1268 against this station's own limit (FCC / ISED: with its subcarrier allowance)
             # (each sample against the limit when it was taken: the injection can change)
             r['exceed_khz'] = exceed_khz(limit)
@@ -5800,6 +6282,8 @@ class StationPanel(QtCore.QObject):
                 r[f'sca{khz}_kind'] = kind
                 r[f'sca{khz}_baud'] = (st.sca_meter.kinds[khz] or (None, None))[1]
         self._measure_data_services(r, raw, sca_kinds, total)
+        if r['data_lost']:
+            lv['data_lost'] = 'alarm'
 
         # audio
         a = st.audio_meter.stats
@@ -5915,20 +6399,19 @@ class StationPanel(QtCore.QObject):
                                     f" / −{_pct_html(r['neg_pct'], lv.get('neg_pct'))}" + asym)
             v['Peak balance'].setText('-' if r['asym_pct'] is None else asym.strip() if asym else
                                       f"even ({r['asym_pct']:+.1f}%)")
-            v['Limit'].setText(f"{r['limit_pct']:.1f}%  <span style=\"color:{DIM}\">({_html(r['limit_why'])})</span>")
+            v['Limit'].setText(f"{r['limit_pct']:.1f}%")
             v['Peak deviation'].setText(f"{r['dev_khz']:.1f} kHz  ({r['dev_khz'] / 0.75:.0f}%)")
             v['Over 100%'].setText(f"{r['over100_min']} /min")
             v['Over 110%'].setText(f"{r['over110_min']} /min")
             v['Valid time'].setText(_valid_html(r['valid_pct'], r['valid_window_s'], r['invalid_why'],
                                                 lv.get('valid_pct')))
-            v['SM.1268'].setText(_exceed_html(r['exceed_frac'], r['exceed_khz'], r['exceed_valid_s'],
+            v['Over-deviation (15 min)'].setText(_exceed_html(r['exceed_frac'], r['exceed_khz'], r['exceed_valid_s'],
                                               lv.get('exceed_frac')))
             window = '' if r['mpx_window_s'] >= MPX_POWER_S else f"  ({r['mpx_window_s']:.0f} s)"
             v['MPX power'].setText(_num(r['mpx_dbr'], 'dBr', '+.1f') + window)
             self.mpx.set_data(r['mpx_db'])
             self._show_tapes(r)
             self._show_detail_tapes(r)
-            self.values['Limit'].setToolTip(r['limit_why'])
         self._collapse(r)
         rate = r['rds_rate']
         self.rds_note.setText('' if r['pi'] is None else f'{rate:.1f}/s' + (
@@ -5967,6 +6450,20 @@ class StationPanel(QtCore.QObject):
             self._stereo.follow(self)
         if self._mpx_win and self._mpx_win.isVisible():
             self._mpx_win.follow(self)
+        self._show_strip(r)
+
+    def _show_strip(self, r):
+        """The readings out of range now, above the cards, each a link to its explanation."""
+        pills = []
+        for name in out_of_range(r):
+            text = 'lost' if name == 'Data services' else self._readout_text(name).split('  ')[0]
+            colour = LEVEL_COLOURS.get(self._readout_level(name, r), AMBER)
+            pills.append(f'<a href="{_html(name)}" style="color:{colour}; text-decoration: none">'
+                         f'{_html(name)} <b>{_html(text)}</b></a>')
+        label = f'<span style="color:{DIM}; font-size: 8pt; letter-spacing: 1px">OUT OF RANGE</span>&nbsp;&nbsp; '
+        text = label + ('&nbsp;&nbsp;·&nbsp;&nbsp;'.join(pills) if pills else f'<span style="color:{DIM}">none</span>')
+        if self.strip.text() != text:
+            self.strip.setText(text)
 
     @staticmethod
     def _peak_state(r, key):
@@ -5997,8 +6494,7 @@ class StationPanel(QtCore.QObject):
             pct = r[f'{key}_pct']
             self.peak_tapes[key].set_value(pct, f"{pct:.0f}%  {pct * 0.75:.1f} kHz", self._peak_state(r, f'{key}_pct'),
                                            limit=limit_pct, band=(85, limit_pct))
-        self.limit_note.setText(f'limit {limit_pct:.1f}% \u24d8')
-        self.limit_note.setToolTip(f"Over-modulation limit in force: {r['limit_why']}")
+        self.limit_note.setText(f'limit {limit_pct:.1f}%')
         snr = r['snr_db']
         self.mpx_tapes['snr'].set_value(snr, _num(snr, 'dB'), 'alarm' if snr < self.settings.min_snr_db else None)
         limits = r['limits']
@@ -6013,8 +6509,22 @@ class StationPanel(QtCore.QObject):
         off.set_value(r['offset_hz'], f"{r['offset_hz']:+.0f} Hz", lv.get('offset_hz'), band=(-tol, tol))
 
     def _collapse(self, r):
-        """Hide the readouts a station doesn't carry, listing them once instead."""
+        """Hide the readouts a station doesn't carry, listing them once instead, and
+        the ones beyond a card's essentials unless it shows All or they are out of
+        range (marked ▲ then). r: the readings, {} before the first."""
         rds, mpx = [], []
+        out = set(out_of_range(r)) if r else set()
+        for name, widgets in self._extra.items():
+            show = READOUT[name].card in self.detail_all
+            for w in widgets:
+                if w.isHidden() == show:
+                    w.setVisible(show)
+        if not r:
+            for name, (label, value) in self._kv_rows.items():
+                d = READOUT[name]
+                for w in (label, value):
+                    w.setVisible(d.essential or d.card in self.detail_all)
+            return
         if r['pi'] is None:
             rds = ['PI', 'PTY', 'PTYN', 'ECC', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types',
                    'Data services']
@@ -6029,10 +6539,18 @@ class StationPanel(QtCore.QObject):
                                      ('SCA 67 kHz', r['sca67_pct'] is None), ('SCA 92 kHz', r['sca92_pct'] is None),
                                      ('IBOC signal', r['iboc_found'] != 'detected')) if gone]
         hidden = set(rds) | set(mpx)
-        for name, widgets in self._kv_rows.items():
-            for w in widgets:
-                if w.isHidden() != (name in hidden):
-                    w.setVisible(name not in hidden)
+        for name, (label, value) in self._kv_rows.items():
+            d = READOUT[name]
+            surfaced = not d.essential and d.card not in self.detail_all and name in out
+            show = name not in hidden and (d.essential or d.card in self.detail_all or surfaced)
+            for w in (label, value):
+                if w.isHidden() == show:
+                    w.setVisible(show)
+            text = _html(name) + (f' <span style="color:{AMBER}">▲</span>' if surfaced else '')
+            if label.text() != text:
+                label.setText(text)
+                label.setToolTip(f'{d.what} ' + ('Shown because it is out of range. ' if surfaced else '')
+                                 + 'Click for details.')
         short = {'SCA 67 kHz': 'SCA 67', 'SCA 92 kHz': 'SCA 92', 'IBOC signal': 'IBOC', 'RDS injection': 'RDS',
                  'Pilot freq': 'pilot', 'Pilot AM': 'pilot AM', 'RDS phase': 'RDS phase', 'Sync AM': 'sync AM'}
         on_air = [short[n] for n in mpx if n in ('SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal', 'RDS injection')]
@@ -6309,7 +6827,21 @@ class StationPanel(QtCore.QObject):
                        for kind, label in (('logo', self.logo_img), ('art', self.art_img))},
             'art_link': self.art_img.link if not self.art_img.isHidden() else None,
             'listeners': listeners,
+            'out_of_range': out_of_range(self.readings),
+            'now': self._web_now(),
         }
+
+    def _web_now(self):
+        """readout_now() of the readings with something particular to say (the
+        page words the rest itself, from their levels)."""
+        r, out = self.readings, {}
+        if not r:
+            return out
+        for d in READOUTS:
+            now = readout_now(d.name, r)
+            if now != readout_plain_now(d, next((r['levels'][k] for k in d.levels if r['levels'].get(k)), None)):
+                out[d.name] = now
+        return out
 
 
 class NotifyForm(QtWidgets.QWidget):
@@ -7118,6 +7650,7 @@ class AppConfig:
     web_port: int = WEB_PORT           # 0 = no web version
     web_bind: str = '0.0.0.0'          # '127.0.0.1' = this PC only
     web_password_hash: str = ''        # hash_password(); '' = controls only in a browser on this PC
+    detail_all: list = field(default_factory=list)  # detail cards showing all their readings (CARDS keys)
 
     @classmethod
     def from_dict(cls, d):
@@ -7135,6 +7668,8 @@ class AppConfig:
             out.web_port = WEB_PORT
         out.web_bind = str(out.web_bind or '0.0.0.0')
         out.web_password_hash = str(out.web_password_hash or '')
+        cards = out.detail_all if isinstance(out.detail_all, list) else []
+        out.detail_all = sorted({c for c in cards if isinstance(c, str) and c in dict(CARDS)})
         return out
 
     def to_dict(self):
@@ -7605,6 +8140,8 @@ class WebView:
                     self._send(200, b'{"access": ' + access.encode() + b', ' + view.state[1:], 'application/json')
                 elif path == '/help.json':
                     self._send(200, view.help, 'application/json')
+                elif path == '/readouts.json':
+                    self._send(200, READOUTS_JSON, 'application/json')
                 elif path == '/events.json':
                     self._send(200, view.events, 'application/json')
                 elif path == '/favicon.ico':
@@ -7815,6 +8352,7 @@ class MainWindow(QtWidgets.QWidget):
         self.nrsc5 = nrsc5              # path to nrsc5.exe, or None: no IBOC playout
         self.config_path = config_path  # None: don't save
         self.app_config = None          # AppConfig (set by main); None: the file's is kept
+        self._detail_all = []           # the cards showing all their readings, while app_config is None
         self.stations = stations
         self.gain_info = gain_info
         self.iboc_scan = iboc_scan
@@ -7944,6 +8482,8 @@ class MainWindow(QtWidgets.QWidget):
                              self.radiodns, self.country, on_focus=self.focus, on_pop=self.pop_out)
         panel.slot = slot
         panel.settings = settings or ReceiverSettings()
+        panel.on_detail_all = self._set_detail_all
+        panel.set_detail_all(self.app_config.detail_all if self.app_config else self._detail_all)
         panel.set_source(panel.settings.audio_source)
         st.audio_source = panel.settings.audio_source
         st.apply_settings(panel.settings)
@@ -8016,6 +8556,15 @@ class MainWindow(QtWidgets.QWidget):
     def save(self):
         if self.config_path:
             save_config(self.config_path, self.panels, self.notify_settings, self.app_config)
+
+    def _set_detail_all(self, cards):
+        """The cards showing all their readings, the same for every receiver, and remembered."""
+        self._detail_all = sorted(cards)
+        for p in self.panels:
+            p.set_detail_all(cards)
+        if self.app_config:
+            self.app_config.detail_all = self._detail_all
+            self.save()
 
     # ------------------------------------------------------------ notifications
     def _where(self):

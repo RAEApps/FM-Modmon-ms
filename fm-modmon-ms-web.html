@@ -135,6 +135,31 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 .kv .k { color: var(--muted); white-space: nowrap; }
 .kv .v { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .kv .v.wide { grid-column: 2 / -1; white-space: normal; }   /* long readouts wrap, not cut */
+/* essentials / all, the out-of-range line, and what a reading means (on a click, as the app) */
+.card-head .allbtn { padding: 0 8px; font-size: 11.5px; }
+[data-r] { cursor: help; }
+.kv .k[data-r]:hover, .kv .v[data-r]:hover, .tape[data-r]:hover { background: #2c2f36; border-radius: 3px; }
+.kv .k.surf::after { content: ' \25B2'; color: var(--amber); font-size: 10px; }
+.attn { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: 0 2px 6px; }
+.attn .lbl { color: var(--dim); font-size: 10.5px; letter-spacing: .1em; }
+.attn .pill { cursor: help; color: var(--amber); }
+.attn .pill.alarm { color: var(--red); }
+.attn .pill b { margin-left: 4px; }
+.graph { position: relative; }
+.graph .info { position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; line-height: 18px; text-align: center;
+               border-radius: 50%; background: rgba(23,24,27,.82); color: var(--muted); font-weight: 700; font-size: 12px; }
+.graph .info:hover { background: var(--btn-h); color: var(--bright); }
+#explain { position: fixed; z-index: 30; width: min(380px, calc(100vw - 16px)); display: none; background: #24262b;
+           border: 1px solid var(--btn-b); border-radius: 8px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+#explain.open { display: block; }
+#explain .ex-head { display: flex; gap: 8px; align-items: baseline; }
+#explain .ex-head b { flex: 1; font-size: 14px; color: var(--bright); }
+#explain .ex-head span { font-weight: 700; }
+#explain h4 { margin: 8px 0 2px; font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+#explain p { margin: 0; line-height: 1.4; color: #c4c7cc; }
+#explain details { margin-top: 8px; }
+#explain summary { color: var(--accent); cursor: pointer; font-size: 12px; }
+#explain details p { margin-top: 4px; font-size: 12px; color: var(--muted); }
 .absent { color: var(--dim); font-size: 11px; }
 .absent:empty { display: none; }
 .cap { color: var(--dim); font-size: 11px; }
@@ -321,6 +346,7 @@ canvas.mpx { cursor: pointer; }
   <div id="help-toc"></div>
   <div id="help-body">loading&hellip;</div>
 </dialog>
+<div id="explain"></div>
 <div id="toast"></div>
 <div id="zoom"><img alt=""></div>
 
@@ -449,12 +475,12 @@ function readouts(r) {
     o['Peak deviation'] = `${fx(r.dev_khz)} kHz (${fx(r.dev_khz / 0.75, 0)}%)`;
     o['Over 100%'] = `${r.over100_min} /min`; o['Over 110%'] = `${r.over110_min} /min`;
     o['MPX power'] = `${sgn(r.mpx_dbr)} dBr` + (r.mpx_window_s >= 60 ? '' : `  (${fx(r.mpx_window_s, 0)} s)`);
-    o['Limit'] = [`${fx(r.limit_pct)}%  `, [`(${r.limit_why})`, 'dimt']];
+    o['Limit'] = `${fx(r.limit_pct)}%`;
     const span = r.valid_window_s >= 60 ? `${(r.valid_window_s / 60).toFixed(0)} min` : `${fx(r.valid_window_s, 0)} s`;
     o['Valid time'] = r.valid_pct == null ? '-' : [[`${fx(r.valid_pct, 0)}% of ${span}`, L('valid_pct')],
                                                     ...(r.invalid_why ? [[`  now: ${r.invalid_why}`, 'dimt']] : [])];
     const held = r.exceed_valid_s < 900 ? `${(r.exceed_valid_s / 60).toFixed(0)} of 15 min valid` : 'last 15 min valid';
-    o['SM.1268'] = r.exceed_frac == null ? '-' : [[`${(r.exceed_frac * 1e6).toFixed(2)} ppm of samples over ${fx(r.exceed_khz)} kHz`,
+    o['Over-deviation (15 min)'] = r.exceed_frac == null ? '-' : [[`${(r.exceed_frac * 1e6).toFixed(2)} ppm of samples over ${fx(r.exceed_khz)} kHz`,
                                                    L('exceed_frac')], [`  (limit 1 ppm; ${held})`, 'dimt']];
     o['Peak balance'] = r.asym_pct == null ? '-' : L('asym_pct')
       ? [[`${r.asym_pct > 0 ? '+' : '−'} ${Math.abs(r.asym_pct).toFixed(0)}% higher: a station ${r.asym_pct > 0 ? 'above' : 'below'}?`, 'warn']]
@@ -530,6 +556,7 @@ function makeTape(name, lo, hi, opts = {}) {
   if (opts.hold) { t.holdEl = h('div', 'hold'); tr.append(t.holdEl); }
   t.limEl = h('div', 'lim'); t.limEl.style.display = 'none'; tr.append(t.limEl);
   el.append(h('span', 'n', name), tr, v);
+  t.v = v;
   if (opts.nameW) el.style.setProperty('--tn', opts.nameW + 'px');
   if (opts.valW) el.style.setProperty('--tv', opts.valW + 'px');
   const pos = x => 100 * (Math.min(Math.max(x, t.lo), t.hi) - t.lo) / (t.hi - t.lo);
@@ -722,25 +749,113 @@ $('#mpxwin').addEventListener('close', () => { mpxv.p = null; mpxv.hold = null; 
 $('#stereo-close').onclick = () => $('#stereo').close();
 $('#stereo').addEventListener('close', () => { stereo.p = null; stereo.frames = []; });
 
+// ---------------------------------------------------------------- what each reading means (readouts.json)
+// The cards show each card's essential readings; "All" shows the rest (remembered in this
+// browser), and one beyond the essentials shows anyway, marked, while it is out of range.
+// A click on a reading, bar, graph's (i) or alarm lamp says what it is, how it is measured,
+// what it means right now and the rule or standard behind it (as the app).
+let info = null, READ = {};
+const GRAPHS = new Set(['MPX spectrum', 'Stereo image', 'Peak distribution', 'RDS rate', 'Loudness trend']);
+const detailAll = (() => { try { return new Set(JSON.parse(localStorage.getItem('fm-modmon-ms-all') || '[]')); } catch (e) { return new Set(); } })();
+async function loadInfo() {
+  info = await (await fetch('readouts.json', {cache: 'no-store'})).json();
+  READ = Object.fromEntries(info.readouts.map(d => [d.name, d]));
+}
+function toggleAll(key) {
+  detailAll.has(key) ? detailAll.delete(key) : detailAll.add(key);
+  try { localStorage.setItem('fm-modmon-ms-all', JSON.stringify([...detailAll])); } catch (e) {}
+  for (const q of recv.values()) { labelAll(q); if (q.r) updateReceiver(q, q.r); }
+}
+function labelAll(p) {
+  for (const [key, b] of Object.entries(p.allBtns)) {
+    const more = info.readouts.filter(d => d.card === key && !d.essential).length;
+    setText(b, detailAll.has(key) ? 'Essentials' : `All (+${more})`);
+    b.title = detailAll.has(key) ? 'Show only the essential readings (any out of range still show)'
+                                 : `Show all the readings of this card: ${more} more`;
+  }
+}
+// readout_plain_now() in the app: a reading with nothing particular to say
+function readoutNow(d, level) {
+  if (level) return 'Out of its normal range' + (d.normal ? ` (${d.normal}).` : '.');
+  if (d.levels.length) return 'In its normal range' + (d.normal ? `: ${d.normal}.` : '.');
+  return d.normal ? `Normal: ${d.normal}.` : '';
+}
+function readoutLevel(rd, name) {
+  const lv = rd.levels || {}, d = READ[name];
+  let level = d.levels.map(k => lv[k]).find(Boolean) || null;
+  if (level === 'alarm' && (name === '+ peak' || name === '− peak') && rd.valid === false) level = 'warn';
+  return level;
+}
+function readoutText(p, name) {
+  if (p.vals[name]) return p.vals[name].v.textContent.trim();
+  const t = p.tapeOf[name];
+  return t ? t.v.textContent.trim() : '';
+}
+function showExplain(anchor, title, value, level, sections, source) {
+  const ex = $('#explain'), head = h('div', 'ex-head');
+  head.append(h('b', null, title), h('span', level || null, value || ''));
+  const parts = [head];
+  for (const [hd, text] of sections) if (text) parts.push(h('h4', null, hd), h('p', null, text));
+  if (sections[2] && sections[2][1] && level) parts[parts.length - 1].className = level;
+  if (source) { const det = h('details'); det.append(h('summary', null, 'Source & rules'), h('p', null, source)); parts.push(det); }
+  ex.replaceChildren(...parts);
+  ex.classList.add('open');
+  const b = anchor.getBoundingClientRect(), w = ex.offsetWidth, hgt = ex.offsetHeight;
+  ex.style.left = Math.max(8, Math.min(b.left, innerWidth - w - 8)) + 'px';
+  ex.style.top = (b.bottom + 6 + hgt < innerHeight ? b.bottom + 6 : Math.max(8, b.top - hgt - 6)) + 'px';
+}
+function explain(p, name, anchor) {
+  const d = READ[name], rd = p.r.readings, text = readoutText(p, name), level = readoutLevel(rd, name);
+  const shown = GRAPHS.has(name) || (text && text !== '-');
+  const now = !shown ? '' : (p.r.now || {})[name] ?? readoutNow(d, level);
+  showExplain(anchor, name, text, level, [['What it is', d.what], ["How it's measured", d.how], ['Right now', now]], d.source);
+}
+function explainAlarm(p, name, anchor) {
+  const a = info.alarms[name], s = anchor.dataset.s || 'waiting', desc = anchor.dataset.desc;
+  const hold = name === 'SILENCE' ? p.r.settings.silence_s : a.hold;
+  let when = hold ? `It raises once its condition has held ${hold} s, and clears the same way.` : 'It raises at once.';
+  if (a.clean_only) when += ` Judged only on clean reception (AM / multipath under ${info.clean_am_pct}%).`;
+  const means = state.alarm_means[s], note = (p.r.notes || {})[name];
+  const word = {clear: 'clear', waiting: 'not judged yet', raised: 'RAISED', pending: 'pending', suppressed: 'not judged now', off: 'off'}[s];
+  showExplain(anchor, desc[0].toUpperCase() + desc.slice(1), word, {raised: 'alarm', pending: 'warn', suppressed: 'warn'}[s],
+              [['What raises it', a.what], ['When', when], ['Right now', means[0].toUpperCase() + means.slice(1) + '.' + (note ? ' ' + note : '')]],
+              a.source);
+}
+document.addEventListener('click', e => {
+  const ex = $('#explain');
+  if (ex.classList.contains('open') && !ex.contains(e.target) && !e.target.closest('[data-r], .lamp')) ex.classList.remove('open');
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#explain').classList.remove('open'); });
+
 // ---------------------------------------------------------------- one receiver: its row and its detail
 function kv(names, cols, wide = []) {
   const el = h('div', cols === 1 ? 'kv one' : 'kv'), vals = {};
   for (const n of [...names.filter(n => !wide.includes(n)), ...names.filter(n => wide.includes(n))]) {
     const k = h('span', 'k', n), v = h('span', 'v', '-');
     if (wide.includes(n)) { k.style.gridColumn = '1'; v.classList.add('wide'); }
+    k.dataset.r = v.dataset.r = n; k.title = READ[n].what + ' Click for details.';
     el.append(k, v); vals[n] = {k, v};
   }
   return {el, vals};
 }
-function card(title, extra) {
+function card(title, extra, key, p) {
   const el = h('div', 'card'), head = h('div', 'card-head');
   head.append(h('span', 'card-title', title));
   if (extra) head.append(extra);
+  if (key) { const b = h('button', 'allbtn'); b.onclick = () => toggleAll(key); p.allBtns[key] = b; head.append(b); }
   el.append(head);
   return el;
 }
+// a graph whose click opens its larger view: an (i) in its corner for what it means
+function graph(el, name) {
+  const box = h('div', 'graph'), i = h('span', 'info', 'i');
+  i.dataset.r = name; i.title = READ[name].what + ' Click for details.';
+  box.append(el, i);
+  return box;
+}
+function readable(el, name) { el.dataset.r = name; el.title = READ[name].what + ' Click for details.'; return el; }
 function buildReceiver(r, alarmDefs) {
-  const n = r.receiver, p = {n, vals: {}};
+  const n = r.receiver, p = {n, vals: {}, allBtns: {}, tapeOf: {}};
   // ---- the row
   const row = p.row = h('div', 'row');
   row.onclick = e => { if (!e.target.closest('select, button')) select(n); };
@@ -767,7 +882,10 @@ function buildReceiver(r, alarmDefs) {
   p.spark.title = 'Peak modulation, the last 5 minutes (each point: its highest); red: over the limit in force';
   trend.append(p.trendNote, p.spark);
   const ann = h('div', 'ann'); p.lamps = {};
-  for (const [name, desc, short] of alarmDefs) { const l = h('div', 'lamp', short); l.dataset.desc = desc; p.lamps[name] = l; ann.append(l); }
+  for (const [name, desc, short] of alarmDefs) {
+    const l = h('div', 'lamp', short); l.dataset.desc = desc; p.lamps[name] = l; ann.append(l);
+    l.onclick = () => explainAlarm(p, name, l);   // (the row selects the receiver too)
+  }
   const btns = h('div', 'rbtn');
   p.gear = h('button', null, '⚙'); p.gear.title = 'Settings for this receiver'; p.gear.onclick = () => openSettings(n);
   p.remove = h('button', null, '✕'); p.remove.title = 'Remove this receiver';
@@ -802,50 +920,61 @@ function buildReceiver(r, alarmDefs) {
   }
   p.linesBox = lines;
   d.append(lines);
+  p.strip = h('div', 'attn');   // the readings out of range now
+  d.append(p.strip);
   const cards = h('div', 'cards');
   const add = ({el, vals}) => { Object.assign(p.vals, vals); return el; };
   // modulation
-  p.limitNote = h('span', 'x');
-  const mod = card('Modulation', p.limitNote);
+  p.limitNote = readable(h('span', 'x'), 'Limit');
+  const mod = card('Modulation', p.limitNote, 'mod', p);
   p.peak = {pos: makeTape('+ peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110}),
             neg: makeTape('− peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110})};
-  p.hist = h('canvas', 'hist');
-  p.hist.title = 'How peak modulation spreads: the share of updates at each peak level over the last 5 minutes (log height). Red: over the limit in force; amber: over 100%';
-  mod.append(p.peak.pos.el, p.peak.neg.el, h('div', 'cap', 'Peak distribution · last 5 min'), p.hist,
-             add(kv(['Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
-                       'Valid time', 'Limit', 'SM.1268'], 1, ['Valid time', 'Limit', 'SM.1268'])));
+  p.hist = readable(h('canvas', 'hist'), 'Peak distribution');
+  p.histCap = h('div', 'cap', 'Peak distribution · last 5 min');
+  mod.append(p.peak.pos.el, p.peak.neg.el, p.histCap, p.hist,
+             add(kv(['Limit', 'Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
+                       'Valid time', 'Over-deviation (15 min)'], 1, ['Valid time', 'Over-deviation (15 min)'])));
   // multiplex
-  const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'));
+  const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'), 'mpx', p);
   p.mpx = h('canvas', 'mpx'); p.mpx.title = 'Click for a larger view'; p.mpx.onclick = () => openMpx(p);
   p.mpxT = {snr: makeTape('S/N', 0, 70, {band: [30, 70], nameW: 50, valW: 110}), pilot: makeTape('Pilot', 6, 12, {band: [8, 10], nameW: 50, valW: 110}),
             offset: makeTape('Offset', -3000, 3000, {origin: 0, band: [-1000, 1000], nameW: 50, valW: 110})};
   p.absMpx = h('div', 'absent');
-  mpx.append(p.mpx, p.mpxT.snr.el, p.mpxT.pilot.el, p.mpxT.offset.el,
+  mpx.append(graph(p.mpx, 'MPX spectrum'), p.mpxT.snr.el, p.mpxT.pilot.el, p.mpxT.offset.el,
              add(kv(['RF level', 'AM / multipath', 'Pilot freq', 'RDS injection', 'Pilot AM', 'RDS phase', 'Sync AM', 'Noise >100 kHz',
                      'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'], 1,
                     ['RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'])), p.absMpx);
   // RDS
   p.rdsNote = h('span', 'x');
-  const rds = card('RDS', p.rdsNote);
-  p.rdsSpark = h('canvas', 'spark'); p.rdsSpark.title = 'RDS groups per second, the last 5 minutes (11.4/s is every group)';
+  const rds = card('RDS', p.rdsNote, 'rds', p);
+  p.rdsSpark = readable(h('canvas', 'spark'), 'RDS rate');
   p.absRds = h('div', 'absent');
   rds.append(p.rdsSpark, add(kv(['PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'], 1,
                                 ['Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'])), p.absRds);
   // audio
   const reset = h('button', null, 'reset I'); reset.title = 'Start the integrated loudness again';
   reset.onclick = () => api('reset_integrated', {receiver: n});
-  const audio = card('Audio', reset);
-  p.lufsSpark = h('canvas', 'spark'); p.lufsSpark.title = 'Short-term loudness, the last 5 minutes (dotted: -23 LUFS)';
+  const audio = card('Audio', reset, 'aud', p);
+  p.lufsSpark = readable(h('canvas', 'spark'), 'Loudness trend');
   const st = h('div', 'stereo'), side = h('div');
   p.gonio = h('canvas', 'gonio'); p.gonio.title = 'Click for a larger view'; p.gonio.onclick = () => openStereo(p);
   p.phase = makeTape('Phase', -1, 1, {origin: 0, nameW: 40, valW: 44});
   side.append(p.phase.el);
-  st.append(p.gonio, side);
+  const gbox = graph(p.gonio, 'Stereo image'); gbox.style.flex = 'none';
+  st.append(gbox, side);
   // the stereo readouts under the goniometer, the card's full width (as the app)
   audio.append(add(kv(['Momentary', 'Short-term', 'Integrated', 'True peak L/R'], 1)), p.lufsSpark, st,
                add(kv(['Balance', 'Width (S/M)', 'Level L/R', 'Correlation'], 1)), buildAudio(p));
   cards.append(mod, mpx, rds, audio);
   d.append(cards);
+  p.tapeOf = {'+ peak': p.peak.pos, '− peak': p.peak.neg, 'S/N': p.mpxT.snr, 'Pilot': p.mpxT.pilot,
+              'Offset': p.mpxT.offset, 'Phase': p.phase};
+  for (const [name, t] of Object.entries(p.tapeOf)) readable(t.el, name);
+  d.addEventListener('click', e => {
+    const el = e.target.closest('[data-r]');
+    if (el && p.r) explain(p, el.dataset.r, el);
+  });
+  labelAll(p);
   p.ctrl = [p.station, p.gear, p.remove, p.source, reset];
   return p;
 }
@@ -948,7 +1077,7 @@ function updateReceiver(p, r) {
       if (s === 'alarm' && rd.valid === false) s = 'warn';
       p.peak[k].set(v, `${fx(v, 0)}%  ${fx(v * 0.75)} kHz`, s, limit, [85, limit]);
     }
-    setText(p.limitNote, `limit ${fx(limit)}% ⓘ`); p.limitNote.title = 'Over-modulation limit in force: ' + rd.limit_why;
+    setText(p.limitNote, `limit ${fx(limit)}%`);
     p.mpxT.snr.set(rd.snr_db, num(rd.snr_db, 'dB'), rd.snr_db < r.settings.min_snr_db ? 'alarm' : null);
     if (rd.stereo_mode === 'mono') p.mpxT.pilot.set(null, 'none (mono)');
     else p.mpxT.pilot.set(rd.pilot_pct, `${fx(rd.pilot_pct)}%  ${rd.stereo_mode}`, lv.pilot_pct, null,
@@ -993,13 +1122,15 @@ function updateReceiver(p, r) {
     p.artLink.href = link; p.artLink.title = 'Open ' + link;
     p.artLink.style.display = link ? '' : 'none';
   }
-  const col = collapse(rd);
+  const col = collapse(rd), out = new Set(r.out_of_range || []);
   for (const [name, {k, v}] of Object.entries(p.vals)) {
     setParts(v, o[name] ?? '-');
-    const show = col.hidden.has(name) ? 'none' : '';
+    const d = READ[name], all = detailAll.has(d.card), surf = !d.essential && !all && out.has(name);
+    const show = col.hidden.has(name) || !(d.essential || all || surf) ? 'none' : '';
     if (k.style.display !== show) k.style.display = v.style.display = show;
+    k.classList.toggle('surf', surf);
   }
-  if (rd.has_signal) p.vals['Limit'].v.title = rd.limit_why;
+  p.histCap.style.display = p.hist.style.display = detailAll.has('mod') ? '' : 'none';
   setText(p.absMpx, col.mpx); setText(p.absRds, col.rds);
   setText(p.rdsNote, rd.pi == null ? '' : `${fx(rd.rds_rate)}/s` + (rd.rds_loss_pct != null ? ` · loss ${fx(rd.rds_loss_pct, 0)}%` : ''));
   drawHist(p.hist, tr.hist, state.peak_hist, limit);
@@ -1009,6 +1140,19 @@ function updateReceiver(p, r) {
   drawGonio(p.gonio, r.gonio);
   const corr = rd.correlation;
   p.phase.set(corr, fin(corr) ? sgn(corr, 2) : '-', lv.correlation);
+  // the readings out of range (after the tapes are set, which some of them quote)
+  const pills = (r.out_of_range || []).map(name => {
+    const text = name === 'Data services' ? 'lost' : readoutText(p, name).split('  ')[0];
+    return {name, text, level: readoutLevel(rd, name) || 'warn'};
+  });
+  const sig = JSON.stringify(pills);
+  if (p.strip._sig !== sig) {
+    p.strip._sig = sig;
+    const kids = [h('span', 'lbl', 'OUT OF RANGE')];
+    for (const x of pills) { const s = h('span', 'pill ' + x.level, x.name); s.dataset.r = x.name; s.append(h('b', null, x.text)); kids.push(s); }
+    if (!pills.length) kids.push(h('span', 'dimt', 'none'));
+    p.strip.replaceChildren(...kids);
+  }
   const iboc = r.source.startsWith('iboc');
   const fmts = playableFormats(p), can = fmts.length > 0 && !iboc;
   fillSelect(p.format, fmts.map(f => ({value: f.key, label: f.label, enabled: true})), p.audioFormat);
@@ -1264,6 +1408,7 @@ async function poll(now) {
     const sent = session.token;
     const r = await fetch('state.json', {cache: 'no-store', headers: {'X-FM-Modmon-Session': sent}});
     const s = await r.json();
+    if (!info) await loadInfo();
     failures = 0; setText($('#conn'), '');
     document.body.style.opacity = '';
     // An answer to a request sent before signing in or out says nothing about

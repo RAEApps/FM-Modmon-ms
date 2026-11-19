@@ -41,6 +41,10 @@ annunciator with every alarm in a fixed place (raised, holding off, not judged, 
 The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
 Audio cards, listing what a station doesn't carry once instead of as dashes, and a History
 tab: the readings as stacked strips over 1 minute to 1 hour with one cursor across them.
+Each card shows its essential readings; "All" shows the rest (remembered), and a hidden
+reading shows anyway, marked ▲, while it is out of range, with a line above the cards
+listing everything out of range. Click any reading, bar, graph's (i) or alarm lamp for
+what it is, how it's measured, what it means right now and the rule or standard behind it.
 Under it, the Alarms tab lists each alarm once, with how long it lasted.
 
 ## Alarms
