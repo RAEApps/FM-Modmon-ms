@@ -1098,7 +1098,8 @@ function openSettings(n) {
     SILENCE: ['below', [...field('silence_lufs', -70, -10, 'any', 'LUFS'), ' for ', ...field('silence_s', 2, 300, 1, 's')]],
     OVERMOD: ['above', [...limit('mod_base_pct'), ' + ', ...limit('mod_per_sub'), ' \u00d7 subcarriers, max ', ...limit('mod_max_pct')]],
     PILOT_SPEC: ['outside', [...limit('pilot_min_pct'), ' \u2013 ', ...limit('pilot_max_pct'), ' or 19 kHz \u00b1 ', ...limit('pilot_tol_hz')]],
-    SUBCARRIERS: ['above', [...limit('sub_total_pct'), ' total, or ', ...limit('sub_high_pct'), ' above 75 kHz']],
+    SUBCARRIERS: ['above', [...limit('sub_total_pct'), ' total in stereo, ', ...limit('sub_mono_pct'), ' in mono, or ',
+                            ...limit('sub_high_pct'), ' above 75 kHz']],
     FREQUENCY: ['beyond', ['\u00b1 ', ...limit('freq_tol_hz')]],
   };
   for (const [name, desc] of state.alarm_defs) {

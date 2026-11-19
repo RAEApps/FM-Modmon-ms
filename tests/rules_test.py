@@ -66,6 +66,13 @@ cases = [
     ('subcarriers: SCA67 12% + SCA92 11% + RDS 4%', dict(left=[(997, 0.35)], right=[(997, 0.35)], pilot=0.09, rds=0.04,
                                                           sca=[(67, 0.12, 1000, 6000), (92, 0.11, 700, 6000)]),
      {'fcc': ['SUBCARRIERS'], 'ised': ['SUBCARRIERS']}),
+    # 73.319(d): 20% in stereo, 30% in mono (no pilot); 10% above 75 kHz either way
+    ('subcarriers 25% in stereo', dict(left=[(997, 0.35)], right=[(997, 0.35)], pilot=0.09, rds=0.04,
+                                       sca=[(67, 0.12, 1100, 6000), (92, 0.09, 700, 6000)]),
+     {'fcc': ['SUBCARRIERS'], 'ised': ['SUBCARRIERS']}),
+    ('subcarriers 25% in mono', dict(left=[(997, 0.35)], right=[(997, 0.35)], pilot=0.0, rds=0.04,
+                                     sca=[(67, 0.12, 1100, 6000), (92, 0.09, 700, 6000)]),
+     {'fcc': [], 'ised': []}),
     ('carrier +1500 Hz', dict(left=[(997, 0.4)], right=[(1600, 0.4)], pilot=0.09, dc_hz=1500.0),
      {'fcc': [], 'ised': ['FREQUENCY']}),
 ]
@@ -288,6 +295,18 @@ try:
     check('burst service never alarms', 'EWS (9A)' in ds.steady, False)
 finally:
     rm.time = real_time
+
+print('--- SM.1268: each sample against the limit when it was taken')
+# Half the window with no subcarriers (limit 100%: threshold 77 kHz), half with SCA 20%
+# (limit 110%: 84.5 kHz); 100 samples at 80 kHz in each half. Only the first half's are over.
+fcc = rm.RULES['fcc']['limits']
+h0, h20 = np.zeros(rm.EXCEED_BINS, np.int64), np.zeros(rm.EXCEED_BINS, np.int64)
+k80 = round((80.0 - rm.EXCEED_LO_KHZ) / rm.EXCEED_BIN_KHZ)
+h0[k80] = h20[k80] = 100
+stats = {'exceed_n': 1_000_000, 'exceed_hist': h0 + h20, 'exceed_by_inj': {0.0: h0, 20.0: h20}}
+check('80 kHz samples taken without SCA count; those with SCA 20% do not',
+      rm.exceed_fraction(stats, lambda inj: rm.exceed_khz(fcc, inj)), 100 / 1_000_000)
+check('...a single threshold (today\'s, SCA 20%) would miss them', rm.exceed_fraction(stats, rm.exceed_khz(fcc, 20.0)), 0.0)
 
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
 sys.exit(1 if bad else 0)

@@ -60,8 +60,9 @@ open receivers, their stations and settings are saved to fm-modmon-ms_config.jso
 whenever they change, and restored at the next start (--freqs overrides).
 
 The web version of the app is served on http://<this-pc>:8765/ (unless
---web-port 0): the same receiver panels, drawn in the browser and updated 10x
-per second, with the same controls, and each receiver's audio as a stream
+--web-port 0): the same receiver panels (without the History tab), drawn in
+the browser and updated 10x per second, with the same controls, and each
+receiver's audio as a stream
 in the listener's choice of MP3, AAC, Opus or FLAC (/audio/1.mp3, .aac,
 .opus, .flac ... /audio/4.*; encoded by ffmpeg, --ffmpeg and --web-audio)
 for the page's player or any media player. Anyone who can reach the port
@@ -123,7 +124,8 @@ Measurements (refreshed 10x per second):
                                     (addressed, often encrypted, and not to be
                                     divulged: Radiocommunication Act s. 9(2)).
                                     Paging shows its 1A fields (paging codes,
-                                    operator code, paging ID); no field names
+                                    operator code, paging ID) and 13A enhanced
+                                    paging; no field names
                                     the provider, so each receiver can name its
                                     services (e.g. 7A=Alert FM)
   Signal (each receiver passes +/-150 kHz of the FM signal, as a modulation
@@ -136,7 +138,8 @@ Measurements (refreshed 10x per second):
     AM / multipath  envelope ripple of the carrier, RMS, as % of 100% AM
                     (10% sine AM reads 10%; 0% = clean reception). Peaks
                     are judged only while it stays under 5% (ITU-R SM.1268:
-                    echoes 26 dB down); the other rules under 15%
+                    echoes 26 dB down); the other rules under 15% (and
+                    with MPX S/N above 25 dB)
     Sync AM         synchronous AM: the envelope ripple that follows the
                     modulation, as the AM depth it reaches at +/-75 kHz, in %
                     and dB. A mistuned transmitter, filter, combiner or
@@ -160,7 +163,8 @@ Measurements (refreshed 10x per second):
                     (Inovonics' multipath sign). Amber from 1%. A confirmation
                     of AM / multipath, not a gate: noise and composite
                     clipping raise it too, and plain AM doesn't
-    Pilot           19 kHz injection, % of 75 kHz (>3% = stereo), and its
+    Pilot           19 kHz injection, % of 75 kHz (stereo above 3%, until it
+                    falls below 2%), and its
                     frequency from the stereo PLL (spec 19 kHz +/- 2 Hz)
     RDS injection   57 kHz subcarrier peak deviation, % of 75 kHz (as
                     encoders are set: 2 kHz = 2.7%), noise removed
@@ -218,14 +222,15 @@ Measurements (refreshed 10x per second):
   Stereo image (300 ms window)
     L/R RMS level, balance, correlation (+1 mono, 0 wide, <0 out of phase),
     width (side/mid energy ratio), goniometer
-  Alarms (raise/clear after holding 3-30 s)
+  Alarms (raise/clear after holding 3-30 s; emergency alert at once, data
+  service lost after 60 s, silence after its own time, 10 s by default)
     carrier low/lost, audio silence, over-modulation, over-deviation over
     15 min (ITU-R SM.1268, against the limit below + 2 kHz), pilot lost, RDS
     lost (but "possibly on N+1" when the carrier, pilot and audio stay
     fine: the N+1 backup transmitter has no RDS encoder; switch that alarm
     off and it is plain RDS lost), wrong PI, emergency alert (IBOC while it plays, or an RT+
-    Alarm tag), data service lost (a service on air 5+ min unbroken,
-    then gone; 60 s hold), and the
+    Alarm tag), data service lost (a service on air 5+ min unbroken, then
+    unseen for 15 s and the alarm held 60 s: about 75 s), and the
     technical rules of the receiver's rule set (ISED for --country CA,
     else FCC), every limit adjustable per receiver (changing one makes
     the receiver's rules custom):
@@ -234,8 +239,9 @@ Measurements (refreshed 10x per second):
                        73.1570(b)(2); ISED BETS-6 A.2.2.4.4, BPR-3 3.13.2)
       pilot            stereo pilot outside 8-10% or 19 kHz +/-2 Hz
                        (FCC 73.322; ISED BETS-6 A.2.2.2)
-      subcarriers      total injection over 20%, or over 10% above 75/76 kHz
-                       (FCC 73.319(d)(2); ISED BETS-6 A.2.2.4.3, BPR-3 3.13.2)
+      subcarriers      total injection over 20% in stereo or 30% in mono, or
+                       over 10% above 75/76 kHz (FCC 73.319(d); ISED BETS-6
+                       A.2.2.4.3, BPR-3 3.13.2)
       carrier freq.    off by more than 2 kHz (FCC 73.1545(b)) / 1 kHz (ISED
                        BETS-6 7.2.3, the transmitter stability standard);
                        the reading includes the SDR's own tuning error
@@ -378,13 +384,14 @@ EXCEED_MIN_S = 900         # ...judged once this much valid time is held
 EXCEED_LO_KHZ = 60.0       # samples' deviation kept as a histogram from here
 EXCEED_BIN_KHZ = 0.5       # ...in bins this wide
 EXCEED_BINS = 120          # ...to 120 kHz (the last bin holds everything above)
+EXCEED_INJ_STEP = 0.5      # ...kept per subcarrier injection, to this many % (its limit moves with it)
 PEAK_PASS_HZ = 100e3       # peak path: the MPX to here (programme, RDS and SCA end by 99 kHz), the
 PEAK_STOP_HZ = 120e3       # ...demodulator's sinc roll-off undone; stopped from here (only noise above)
 PEAK_TAPS_N = 63           # ...in this many taps: flat to +/-0.1% (ripple reads as false peak)
 MPX_POWER_S = 60           # ITU-R BS.412 MPX power integration time
 PEAK_AM_PCT = 5.0          # over-modulation is judged only while AM / multipath has stayed
-PEAK_AM_S = 10             # ...under this for this long (ITU-R SM.1268: echoes 26 dB down,
-                           # AM averaged over 10 s); echoes or noise above it inflate peaks
+PEAK_AM_S = 10             # ...under this for this long: its maximum over the last 10 s (5% AM
+                           # ~ echoes 26 dB down); echoes or noise above it inflate peaks
 CLEAN_AM_PCT = 15.0        # the other technical rules are judged under this
 # Validity (research report item 2; Pira P275's practice, ITU-R SM.1268's site rules): each
 # update (100 ms) is valid for peak statistics, or not, as a whole. Not per sample: masking
@@ -863,11 +870,19 @@ def _percentiles(x, qs):
 
 def exceed_fraction(stats, khz):
     """The fraction of valid samples whose deviation exceeds `khz` (to the
-    nearest EXCEED_BIN_KHZ), from FmMeter's SM.1268 histogram; None without samples."""
+    nearest EXCEED_BIN_KHZ), from FmMeter's SM.1268 histogram; None without samples.
+    `khz` may be a function of the subcarrier injection (%) at the time: each
+    sample is then judged against the limit that held when it was taken."""
     if not stats.get('exceed_n'):
         return None
-    k = min(max(round((khz - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ), 0), EXCEED_BINS - 1)
-    return float(np.sum(stats['exceed_hist'][k:])) / stats['exceed_n']
+
+    def over(hist, threshold):
+        k = min(max(round((threshold - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ), 0), EXCEED_BINS - 1)
+        return float(np.sum(hist[k:]))
+
+    if not callable(khz):
+        return over(stats['exceed_hist'], khz) / stats['exceed_n']
+    return sum(over(hist, khz(inj)) for inj, hist in stats['exceed_by_inj'].items()) / stats['exceed_n']
 
 
 def peak_taps(n=PEAK_TAPS_N, fpass=PEAK_PASS_HZ, fstop=PEAK_STOP_HZ, fs=QUAD_RATE):
@@ -924,6 +939,8 @@ class FmMeter(gr.sync_block):
         self._exceed = deque()                             # per valid update: (histogram, samples), EXCEED_MIN_S
         self._exceed_hist = np.zeros(EXCEED_BINS, np.int64)  # ...their sum
         self._exceed_n = 0
+        self._exceed_by_inj = {}                           # ...and summed by injection (%, EXCEED_INJ_STEP)
+        self._inj = 0.0                                    # subcarrier injection at the last update, %
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
         self._am = None
         self._am_hist = deque(maxlen=PEAK_AM_S * UPDATE_HZ)  # AM per update, for the peak gate
@@ -977,6 +994,8 @@ class FmMeter(gr.sync_block):
             self._over_last = [-10 ** 9] * 2
             self._exceed_hist[:] = 0
             self._exceed_n = 0
+            self._exceed_by_inj.clear()
+            self._inj = 0.0
             self._settle = SETTLE_UPDATES
             self.stats = None
         self._iq_energy += float(np.vdot(iq, iq).real)
@@ -1158,12 +1177,21 @@ class FmMeter(gr.sync_block):
         k = np.minimum(((hi * (MAX_DEV / 1e3) - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ).astype(np.int64), EXCEED_BINS - 1)
         h = np.bincount(k, minlength=EXCEED_BINS).astype(np.uint16)  # (an update is < 65536 samples)
         if len(self._exceed) >= EXCEED_MIN_S * UPDATE_HZ:
-            old, n = self._exceed.popleft()
+            old, n, inj = self._exceed.popleft()
             self._exceed_hist -= old
             self._exceed_n -= n
-        self._exceed.append((h, len(ax)))
+            self._exceed_by_inj[inj] -= old
+            if not self._exceed_by_inj[inj].any():
+                del self._exceed_by_inj[inj]
+        # The limit depends on the injection (RDS + SCA), which can change within
+        # the window: keep the injection each update was taken at.
+        inj = round(self._inj / EXCEED_INJ_STEP) * EXCEED_INJ_STEP
+        self._exceed.append((h, len(ax), inj))
         self._exceed_hist += h
         self._exceed_n += len(ax)
+        if inj not in self._exceed_by_inj:
+            self._exceed_by_inj[inj] = np.zeros(EXCEED_BINS, np.int64)
+        self._exceed_by_inj[inj] += h
 
     def _invalid(self, settling, iq_power):
         """Why this update's peaks can't be trusted, or None (valid).
@@ -1296,7 +1324,7 @@ class FmMeter(gr.sync_block):
             zs = complex(np.sum(self._rds_z))
             rds_lock = abs(zs) / len(self._rds_z)
             rds_phase = math.degrees(np.angle(zs)) / 2  # (-90, 90]: 0 = in phase, +/-90 = quadrature
-        return {
+        stats = {
             'rf_dbfs': _db(self._rf),
             'snr_db': _db(0.5 / (noise_per_hz * GUARD_TO_AUDIO)),
             'offset_hz': self._offset * MAX_DEV,
@@ -1316,6 +1344,7 @@ class FmMeter(gr.sync_block):
             # SM.1268: histogram of |deviation| over the last EXCEED_MIN_S of valid time (exceed_fraction())
             'exceed_hist': self._exceed_hist.copy(),
             'exceed_n': self._exceed_n,
+            'exceed_by_inj': {inj: h.copy() for inj, h in self._exceed_by_inj.items()},
             'exceed_valid_s': len(self._exceed) / UPDATE_HZ,
             # BS.412: 0 dBr = power of a sine at +/-19 kHz deviation.
             'mpx_dbr': _db(np.mean(self._mpx_ms) * MAX_DEV ** 2 / (19e3 ** 2 / 2)) if self._mpx_ms else -math.inf,
@@ -1341,6 +1370,8 @@ class FmMeter(gr.sync_block):
             # mid-bucket), in dB re a 100% (75 kHz) sine: 9% pilot reads -21 dB.
             'mpx_db': 10 * np.log10(np.add.reduceat(self._psd[:2005], range(5, 2005, 10)) / 0.5 + 1e-12),
         }
+        self._inj = rds_pct + (stats['sca67_pct'] or 0.0) + (stats['sca92_pct'] or 0.0)
+        return stats
 
 
 # ITU-R BS.1770 K-weighting at 48 kHz: high shelf, then high-pass.
@@ -4519,7 +4550,7 @@ ALARM_DEFS = (
 )
 
 # FM technical rules the alarms check, per rule set. FCC: 47 CFR 73.1570(b)(2)
-# (modulation), 73.322 (pilot), 73.319(d)(2) (subcarriers), 73.1545(b) (frequency).
+# (modulation), 73.322 (pilot), 73.319(d) (subcarriers), 73.1545(b) (frequency).
 # ISED: BETS-6 issue 3 A.2.2.2, A.2.2.4, 7.2.3 and BPR-3 issue 7 3.13.2 (the
 # modulation, pilot and subcarrier limits match the FCC's; BPR-1 sets no
 # numeric in-service frequency tolerance, so BETS-6's transmitter stability is used).
@@ -4531,13 +4562,14 @@ LIMITS = (
     ('pilot_min_pct', 'pilot minimum', '%', 0, 20, 0.1),
     ('pilot_max_pct', 'pilot maximum', '%', 0, 20, 0.1),
     ('pilot_tol_hz', 'pilot frequency tolerance', 'Hz', 0.1, 50, 0.1),
-    ('sub_total_pct', 'subcarrier total', '%', 0, 50, 0.5),
+    ('sub_total_pct', 'subcarrier total in stereo', '%', 0, 50, 0.5),
+    ('sub_mono_pct', 'subcarrier total in mono', '%', 0, 50, 0.5),
     ('sub_high_pct', 'subcarriers above 75 kHz', '%', 0, 50, 0.5),
     ('freq_tol_hz', 'carrier frequency tolerance', 'Hz', 100, 10000, 100),
 )
 _COMMON = {'mod_base_pct': 100.0, 'mod_per_sub': 0.5, 'mod_max_pct': 110.0,
            'pilot_min_pct': 8.0, 'pilot_max_pct': 10.0, 'pilot_tol_hz': 2.0,
-           'sub_total_pct': 20.0, 'sub_high_pct': 10.0}
+           'sub_total_pct': 20.0, 'sub_mono_pct': 30.0, 'sub_high_pct': 10.0}
 RULES = {
     'fcc': {'name': 'FCC (47 CFR 73)', 'limits': {**_COMMON, 'freq_tol_hz': 2000.0}},
     'ised': {'name': 'ISED (BETS-6, BPR-3)', 'limits': {**_COMMON, 'freq_tol_hz': 1000.0}},
@@ -4569,7 +4601,8 @@ class ReceiverSettings:
     pilot_min_pct: float = 8.0       # stereo pilot injection range...
     pilot_max_pct: float = 10.0
     pilot_tol_hz: float = 2.0        # ...and frequency tolerance around 19 kHz
-    sub_total_pct: float = 20.0      # all subcarriers together
+    sub_total_pct: float = 20.0      # all subcarriers together, in stereo...
+    sub_mono_pct: float = 30.0       # ...and in mono (no pilot)
     sub_high_pct: float = 10.0       # subcarriers above 75 kHz
     freq_tol_hz: float = 2000.0      # carrier frequency
 
@@ -4721,11 +4754,21 @@ class DataServices:
         return sorted(self.steady - set(present))
 
 
+def limit_at(limits, inj):
+    """The peak modulation limit (%) with `limits` at subcarrier injection `inj` (%)."""
+    return min(limits['mod_base_pct'] + limits['mod_per_sub'] * inj, limits['mod_max_pct'])
+
+
+def exceed_khz(limits, inj):
+    """The SM.1268 threshold (kHz): the limit at injection `inj` (%), plus EXCEED_MARGIN_KHZ."""
+    return limit_at(limits, inj) * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ
+
+
 def mod_limit(rules, limits, stats):
     """(limit %, how it was worked out) for peak modulation with `limits`."""
     inj = (stats.get('rds_pct') or 0.0) + sum(stats.get(f'sca{k}_pct') or 0.0 for k in (67, 92))
     lim = limits
-    limit = min(lim['mod_base_pct'] + lim['mod_per_sub'] * inj, lim['mod_max_pct'])
+    limit = limit_at(lim, inj)
     name = RULES[rules]['name'] if rules in RULES else 'custom'
     return limit, (f'{name}: {lim["mod_base_pct"]:g}% + {lim["mod_per_sub"]:g} \u00d7 {inj:.1f}% subcarriers, '
                    f'max {lim["mod_max_pct"]:g}%')
@@ -5678,8 +5721,9 @@ class StationPanel(QtCore.QObject):
             if s['valid_pct'] is not None and s['valid_pct'] < VALID_WARN_PCT:
                 lv['valid_pct'] = 'warn'
             # SM.1268 against this station's own limit (FCC / ISED: with its subcarrier allowance)
+            # (each sample against the limit when it was taken: the injection can change)
             r['exceed_khz'] = limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ
-            r['exceed_frac'] = exceed_fraction(s, r['exceed_khz'])
+            r['exceed_frac'] = exceed_fraction(s, lambda inj: exceed_khz(lim, inj))
             r['exceed_valid_s'] = s['exceed_valid_s']
             if r['exceed_frac'] is not None and r['exceed_frac'] > EXCEED_FRACTION:
                 lv['exceed_frac'] = 'alarm' if s['exceed_valid_s'] >= EXCEED_MIN_S else 'warn'
@@ -6021,6 +6065,7 @@ class StationPanel(QtCore.QObject):
             limit, _ = mod_limit(rules, lim, s)
             tol = lim['freq_tol_hz']
             subcarriers = (s['rds_pct'] or 0.0) + sum(s[f'sca{k}_pct'] or 0.0 for k in (67, 92))
+            sub_limit = lim['sub_total_pct'] if st.pilot else lim['sub_mono_pct']  # 73.319(d)(1)/(2)
             silent = not carrier and a['momentary'] < cfg.silence_lufs
             rds_lost, backup = rds_conditions(self.alarms.seen_rds, rate, carrier,
                                               st.pilot or not self.alarms.seen_pilot, silent,
@@ -6033,7 +6078,7 @@ class StationPanel(QtCore.QObject):
                 'PILOT_SPEC': (clean and st.pilot and (not lim['pilot_min_pct'] <= s['pilot_pct'] <= lim['pilot_max_pct']
                                                        or (st.pilot_hz is not None
                                                            and abs(st.pilot_hz - 19000) > lim['pilot_tol_hz']))),
-                'SUBCARRIERS': (clean and (subcarriers > lim['sub_total_pct']
+                'SUBCARRIERS': (clean and (subcarriers > sub_limit
                                            or (s['sca92_pct'] or 0.0) > lim['sub_high_pct'])),
                 'FREQUENCY': bool(clean and tol and abs(s['offset_hz']) > tol),
                 'PILOT': self.alarms.seen_pilot and not st.pilot,
@@ -6140,6 +6185,8 @@ class StationPanel(QtCore.QObject):
         num = lambda v, fmt='.1f': format(v, fmt) if v is not None and math.isfinite(v) else '-'  # noqa: E731
         pilot_hz = f' at {num(st.pilot_hz)} Hz' if st.pilot_hz is not None else ''
         sca = ', '.join(f'SCA {k} {num(s[f"sca{k}_pct"])}%' for k in (67, 92) if s[f'sca{k}_pct'])
+        stereo = st.pilot
+        sub_limit = lim['sub_total_pct'] if stereo else lim['sub_mono_pct']
         return {
             'CARRIER': f'RF {num(s["rf_dbfs"])} dBFS, S/N {num(s["snr_db"])} dB '
                        f'(alarm below {cfg.min_snr_db:g} dB S/N or -75 dBFS)',
@@ -6147,13 +6194,14 @@ class StationPanel(QtCore.QObject):
                        f'(alarm below {cfg.silence_lufs:g} LUFS for {cfg.silence_s} s)',
             'OVERMOD': f'peak +{num(s["valid_pos_pct"])}% / -{num(s["valid_neg_pct"])}% (valid reception), '
                        f'limit {num(limit)}%',
-            'EXCEEDANCE': (f'{num((exceed_fraction(s, limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ) or 0) * 1e6, ".2f")} '
+            'EXCEEDANCE': (f'{num((exceed_fraction(s, lambda inj: exceed_khz(lim, inj)) or 0) * 1e6, ".2f")} '
                            f'ppm of samples over {num(limit * MAX_DEV / 1e5 + EXCEED_MARGIN_KHZ)} kHz in the last '
                            f'{EXCEED_MIN_S / 60:.0f} min of valid reception (limit {EXCEED_FRACTION * 1e6:g} ppm)'),
             'PILOT_SPEC': f'pilot {num(s["pilot_pct"])}%{pilot_hz} (allowed {lim["pilot_min_pct"]:g}-'
                           f'{lim["pilot_max_pct"]:g}%, 19000 +/- {lim["pilot_tol_hz"]:g} Hz)',
             'SUBCARRIERS': f'subcarriers {num(subcarriers)}% total (RDS {num(s["rds_pct"])}%'
-                           + (f', {sca}' if sca else '') + f'; limits {lim["sub_total_pct"]:g}% total, '
+                           + (f', {sca}' if sca else '') + f'; limits {sub_limit:g}% total in '
+                           f'{"stereo" if stereo else "mono"}, '
                            f'{lim["sub_high_pct"]:g}% above 75 kHz)',
             'FREQUENCY': f'carrier offset {num(s["offset_hz"], "+.0f")} Hz (tolerance +/- {lim["freq_tol_hz"]:g} Hz, '
                          'includes the tuning error of the SDR)',
@@ -6812,7 +6860,8 @@ class ReceiverDialog(QtWidgets.QDialog):
         grid.addLayout(line(ls['pilot_min_pct'], '\u2013', ls['pilot_max_pct'], 'or 19 kHz \u00b1', ls['pilot_tol_hz']),
                        row['PILOT_SPEC'], 2)
         grid.addWidget(QtWidgets.QLabel('above'), row['SUBCARRIERS'], 1)
-        grid.addLayout(line(ls['sub_total_pct'], 'total, or', ls['sub_high_pct'], 'above 75 kHz'), row['SUBCARRIERS'], 2)
+        grid.addLayout(line(ls['sub_total_pct'], 'total in stereo,', ls['sub_mono_pct'], 'in mono, or',
+                            ls['sub_high_pct'], 'above 75 kHz'), row['SUBCARRIERS'], 2)
         grid.addWidget(QtWidgets.QLabel('beyond'), row['FREQUENCY'], 1)
         grid.addLayout(line('\u00b1', ls['freq_tol_hz']), row['FREQUENCY'], 2)
         form.addRow('Rules:', self.rules)
