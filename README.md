@@ -10,10 +10,14 @@ in a PyQt5 window and an identical web page with live audio.
 
 Per station, refreshed 10× a second:
 
-- **Modulation** – peak +/−, peak deviation, over-100% / over-110% counts, L, R, L+R, L−R,
-  ITU-R BS.412 MPX power, and an MPX spectrum to 100 kHz
-- **Signal** – RF level, MPX S/N, carrier offset, AM / multipath, pilot level and frequency,
-  RDS injection, SCA 67 / 92 kHz injection (and whether an SCA carries audio, data, a tone or nothing)
+- **Modulation** – peak +/− (flagged when lopsided), peak deviation, over-100% / over-110%
+  counts, the ITU-R SM.1268 over-deviation share over 15 minutes, the share of time
+  reception was valid for peak readings, L, R, L+R, L−R, ITU-R BS.412 MPX power, and an
+  MPX spectrum to 100 kHz
+- **Signal** – RF level, MPX S/N, carrier offset, AM / multipath, synchronous AM, noise
+  above 100 kHz, pilot level, frequency and AM, RDS injection and its phase against the
+  pilot, SCA 67 / 92 kHz injection (and whether an SCA carries audio, data, a tone or
+  nothing), and IBOC sideband level
 - **Loudness** – ITU-R BS.1770 / EBU R128 momentary, short-term, integrated and true peak
 - **Stereo image** – levels, balance, correlation, width and a goniometer
 - **RDS** – PI, PS, RT, RT+ (Alarm tags in red), PTY / PTYN, flags, AF, ECC, ODA, CT,
@@ -41,17 +45,19 @@ Under it, the Alarms tab lists each alarm once, with how long it lasted.
 
 ## Alarms
 
-Carrier low/lost, audio silence, over-modulation, pilot lost, RDS lost ("possibly on N+1"
+Carrier low/lost, audio silence, over-modulation, over-deviation over 15 minutes (ITU-R
+SM.1268), pilot lost, RDS lost ("possibly on N+1"
 instead when the carrier, pilot and audio stay fine, as an N+1 backup transmitter without an
 RDS encoder would cause), wrong PI, emergency alert (IBOC, or an RT+ Alarm tag), data service lost (a service on air for 5 minutes unbroken,
-then gone for 60 s; paging that only bursts during an alert never alarms), and the FM
-technical rules of a preset, each limit adjustable per receiver:
+then unseen for 15 s, the alarm held 60 s; paging that only bursts during an alert never
+alarms), and the FM technical rules of a preset (pilot out of tolerance, subcarriers over
+the limit, carrier frequency out of tolerance), each limit adjustable per receiver:
 
 | Check | FCC (47 CFR 73) | ISED (BETS-6, BPR-3) |
 |---|---|---|
 | Modulation | 100% + 0.5% per 1% subcarrier injection, max 110% | same |
 | Pilot | 8–10%, 19 kHz ± 2 Hz | same |
-| Subcarriers | ≤ 20% total, ≤ 10% above 75 kHz | same |
+| Subcarriers | ≤ 20% total in stereo, 30% in mono; ≤ 10% above 75 kHz | same |
 | Carrier frequency | ± 2000 Hz | ± 1000 Hz |
 
 Alarms go to the event log and optionally to email (SMTP) and webhooks (JSON, Slack,
