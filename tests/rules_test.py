@@ -39,7 +39,7 @@ def judge(st, rules, country='CA', keep=(), rds_seen=False, **settings):
     finally:
         rm.time = real_time
     s = st.meter.stats
-    plain = QtGui.QTextDocumentFragment.fromHtml(p.values['Limit'].text()).toPlainText()
+    plain = f"{QtGui.QTextDocumentFragment.fromHtml(p.values['Limit'].text()).toPlainText()} ({p.readings.get('limit_why')})"
     return sorted(p.alarms.active - ({'RDS', 'PILOT', 'SILENCE'} - set(keep))), s, p, plain
 
 
