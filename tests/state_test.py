@@ -159,5 +159,24 @@ check('IBOC line from readings', '(MPS)' in line and 'synchronized' in line and 
 check('PSD and SIS lines from readings', psd == 'A – B  ·  Rock' and sis == 'TESTFM', f'{psd!r} {sis!r}')
 check('no IBOC: dashes', rm.StationPanel._iboc_line_text(None) == '-' and rm.StationPanel._psd_sis_text(None) == ('-', '-'))
 
+# ---- the station's title (event log, notifications): never a frame of a scrolling PS
+p, st = panel(pilot=0.09, rds=0.04)
+snap = st.rds.snapshot
+
+
+def ps_on_air(ps, dynamic, age=60.0):
+    st.rds.snapshot = lambda: {**snap(), 'ps': ps, 'ps_dynamic': dynamic, 'ps_age': age}
+
+
+ps_on_air('TESTFM  ', False)
+check('static PS: the title names it', p.title == '101.0 TESTFM', p.title)
+ps_on_air('LIKE:   ', True)
+check('scrolling PS: no word of it in the title', p.title == '101.0', p.title)
+p.settings = rm.ReceiverSettings.from_dict({'name': 'Hits FM'})
+check("scrolling PS: the receiver's own name instead", p.title == '101.0 Hits FM', p.title)
+ps_on_air('TES     ', False, age=1.0)
+check('PS not yet held long enough: not used either', p.title == '101.0 Hits FM', p.title)
+st.rds.snapshot = snap
+
 print('\nall state checks passed' if not failed else f'\n{len(failed)} FAILED: {failed}')
 sys.exit(1 if failed else 0)
