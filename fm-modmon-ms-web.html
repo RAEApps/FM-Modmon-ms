@@ -36,6 +36,7 @@ button.primary { background: #2f6db5; border-color: #3d7fd0; color: #fff; font-w
 button.primary:hover:not(:disabled) { background: #3a7cc6; }
 button.primary:disabled { background: #25272b; border-color: #3a3d44; color: var(--disabled); font-weight: normal; }
 select { background: var(--btn); border: 1px solid var(--btn-b); border-radius: 6px; padding: 4px 8px; }
+option.dim { color: var(--dim); }
 select:hover:not(:disabled), input:hover:not(:disabled) { border-color: var(--btn-bh); }
 input { background: var(--field); border: 1px solid var(--btn-b); border-radius: 5px; padding: 4px 6px; }
 input[type=checkbox] { width: 16px; height: 16px; margin: 0 4px 0 0; vertical-align: -3px; cursor: pointer; }
@@ -404,7 +405,9 @@ function fillSelect(sel, items, value) {
   if (sel._sig !== sig && document.activeElement !== sel) {
     sel._sig = sig;
     sel.replaceChildren(...items.map(it => { const o = h('option', null, it.label); o.value = JSON.stringify(it.value);
-                                             o.disabled = !it.enabled; o.title = it.tip || ''; return o; }));
+                                             o.disabled = !it.enabled; o.title = it.tip || '';
+                                             if (it.dim) o.className = 'dim';   // not on this station (still selectable)
+                                             return o; }));
   }
   if (document.activeElement !== sel) sel.value = JSON.stringify(value);
 }

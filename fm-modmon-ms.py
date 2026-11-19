@@ -6075,19 +6075,32 @@ class StationPanel(QtCore.QObject):
         self.source.setCurrentIndex(self.source.findData(key))
 
     def set_sources(self, nrsc5):
-        """Grey out IBOC where it can't play (no nrsc5). A station the start-up scan
-        saw no IBOC on can still be tried: the scan's quarter-second look can miss
-        weak sidebands (an HD station seen at -14 dBc in one scan was missed in the next)."""
-        scan = self.iboc_scan.get(self.station.freq_hz, 'unknown')
+        """IBOC can't play without nrsc5: disabled. A station the start-up scan saw no
+        IBOC on shows it greyed, "(none seen)", as an SCA that isn't there, but it can
+        still be tried: the scan's quarter-second look can miss weak sidebands (an HD
+        station seen at -14 dBc in one scan was missed in the next)."""
+        none = self.iboc_scan.get(self.station.freq_hz, 'unknown') is None
         why = 'nrsc5 not found (see --nrsc5)' if not nrsc5 else ''
-        tip = why or ('The start-up scan saw no IBOC on this station; it may still have it' if scan is None else '')
-        for i, (key, _) in enumerate(AUDIO_SOURCES):
+        tip = why or ('The start-up scan saw no IBOC on this station; it may still have it' if none else '')
+        for i, (key, label) in enumerate(AUDIO_SOURCES):
             if key.startswith('iboc'):
                 item = self.source.model().item(i)
                 item.setEnabled(not why)
                 item.setToolTip(tip)
+                self._dim_source(i, f'{label} (none seen)' if none and not why else label, none and not why)
         self._web_lists = None
         return not why
+
+    def _dim_source(self, i, text, dim):
+        """An audio source's label, greyed (`dim`) when the station doesn't seem to carry
+        it: still selectable, its tooltip says why."""
+        if self.source.itemText(i) != text:
+            self.source.setItemText(i, text)
+            self._web_lists = None
+        brush = QtGui.QBrush(QtGui.QColor(DIM)) if dim else None
+        if (self.source.itemData(i, QtCore.Qt.ForegroundRole) is not None) != dim:
+            self.source.setItemData(i, brush, QtCore.Qt.ForegroundRole)
+            self._web_lists = None
 
     IBOC_TEXT = ('artist', 'title', 'album', 'genre', 'comment', 'name', 'slogan', 'message', 'alert')
 
@@ -6321,9 +6334,8 @@ class StationPanel(QtCore.QObject):
             elif kind == 'idle':
                 text, tip = f'{label} (idle)', 'This subcarrier is on but carries nothing'
             if self.source.itemText(i) != text:
-                self.source.setItemText(i, text)
                 self.source.setItemData(i, tip, QtCore.Qt.ToolTipRole)
-                self._web_lists = None
+            self._dim_source(i, text, kind in (None, 'data', 'idle'))   # nothing to listen to
 
     def _open_mpx(self):
         if self._mpx_win is None:
@@ -7022,6 +7034,7 @@ class StationPanel(QtCore.QObject):
         def items(combo):
             return [{'value': combo.itemData(i), 'label': combo.itemText(i),
                      'enabled': combo.model().item(i).isEnabled(),
+                     'dim': combo.itemData(i, QtCore.Qt.ForegroundRole) is not None,
                      'tip': combo.itemData(i, QtCore.Qt.ToolTipRole) or combo.model().item(i).toolTip() or ''}
                     for i in range(combo.count())]
 
