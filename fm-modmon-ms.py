@@ -23,6 +23,11 @@ channel filter, stereo WBFM demodulator, RDS decoder and measurement blocks,
 and its own "radio" panel. Each panel has a Play button; one station plays
 at a time (stereo, 75 us de-emphasis; falls back to mono without a pilot).
 
+Other SDRs (--sdr, or chosen in Setup; SDRS): the RSP1B, as the RSP1A; an
+RTL-SDR at 2.304 MS/s (stations within 1.4 MHz; --gain in dB); an Ettus B210
+at 30.72 MS/s (the whole band at once; --gain in dB). Every station is
+decimated to the same 384 kS/s, so the measurements don't depend on the SDR.
+
 Run with radioconda's Python:
     C:\\ProgramData\\radioconda\\python.exe fm-modmon-ms.py
     C:\\ProgramData\\radioconda\\python.exe fm-modmon-ms.py --lna 2 --ifgr 35
@@ -318,16 +323,14 @@ from gnuradio.filter import firdes
 import rds  # gr-rds (radioconda package gnuradio-rds)
 
 DEFAULT_FREQS_MHZ = (94.5, 100.9, 101.7)
-SAMP_RATE = 9.6e6          # RSP1A rate; 8 MHz IF filter covers +/-3.7 MHz cleanly
-CHAN_DECIM = 25            # 9.6 MS/s -> 384 kS/s per station: room for the
-QUAD_RATE = SAMP_RATE / CHAN_DECIM  # +/-150 kHz an FM signal with SCA occupies
+QUAD_RATE = 384e3          # each station's rate: room for the +/-150 kHz an FM signal with SCA occupies
+# SAMP_RATE, CHAN_DECIM (SAMP_RATE -> QUAD_RATE), MAX_SPAN, EDGE_HZ, SRC_BUFFER, IBOC_DECIM
+# and SCAN_CENTERS / SCAN_HALF_WIDTH come from the SDR in use: see SDRS and use_sdr().
 AUDIO_DECIM = 8            # 384 kS/s -> 48 kS/s
 CHAN_PASS_HZ = 150e3       # channel filter: flat to +/-150 kHz, stop by +/-185 kHz
 AUDIO_RATE = int(QUAD_RATE / AUDIO_DECIM)
 MAX_DEV = 75e3             # FM broadcast 100% deviation
-MAX_SPAN = 7.2e6           # widest station spread that fits the 8 MHz IF filter
-EDGE_HZ = MAX_SPAN / 2 + 150e3  # a station at most this far from the SDR centre (room to move off the midpoint)
-DC_CLEAR_HZ = 250e3        # SDR centre this far from every carrier: the RSP1A's DC offset stays out of the channel
+DC_CLEAR_HZ = 250e3        # SDR centre this far from every carrier: the SDR's DC offset stays out of the channel
 IMAGE_CLEAR_HZ = 300e3     # each station's IQ image (mirrored about the centre) this far from every other carrier
 PLAY_GAIN = 0.7
 UPDATE_HZ = 10             # measurement and display rate
@@ -337,9 +340,10 @@ MAX_RECEIVERS = 4          # receivers the app runs at once
 FM_BATCH = 2048            # Python meters get samples in batches (~8.5 ms),
 AUDIO_BATCH = 512          # so they are called ~100x/s, not ~900x/s; powers
                            # of two keep GNU Radio buffers aligned
-SRC_BUFFER = 1 << 18       # SDR output buffer, samples (~27 ms). GNU Radio's default
-                           # (4096) makes every block downstream run on ~100-sample
-                           # scraps thousands of times a second: 4x the CPU.
+                           # SRC_BUFFER (set by use_sdr): the SDR output buffer, at least 2^18
+                           # samples (~27 ms at 9.6 MS/s). GNU Radio's default (4096) makes
+                           # every block downstream run on ~100-sample scraps thousands of
+                           # times a second: 4x the CPU.
 CHAN_CHUNK = 8192          # channel filters wait for this many outputs (~21 ms), so the
                            # whole station runs in chunks of this size whatever the
                            # SDR delivers per read. Each station is ~50 blocks, one
@@ -368,8 +372,8 @@ STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows'
 CAL_PEAK_DBFS = -10.0      # gain calibration: ADC peaks (99.99th percentile) held here
 CAL_TOLERANCE_DB = 1.5     # ...the least gain whose stations' S/N is this close to the best
 CAL_CLIP = 0.9            # ...and any sample at this fraction of full scale means overload
-CAL_LNA_STATES = range(9, -1, -1)  # tried from least gain to most
-CAL_DEFAULT = (4, 40)      # LNA state, IF gain reduction when not calibrated
+CAL_LNA_STATES = range(9, -1, -1)  # SDRplay: tried from least gain to most
+CAL_STEP_DB = 3.0          # one gain stage (RTL-SDR, B210): raised this much at a time
 IQ_TAP_BATCH = 65536       # live calibration reads the SDR in batches this big
 ADC_BATCH = 16384          # the wideband peak meter reads the SDR in batches this big
 ADC_OVERLOAD_N = 3         # ADC overload: raised once this many of the last...
@@ -461,7 +465,6 @@ NRSC5_PATH = (shutil.which('nrsc5') or next(iter(sorted(glob.glob(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'nrsc5*', 'build', 'src',
     'nrsc5.exe' if os.name == 'nt' else 'nrsc5')))), 'nrsc5'))
 IBOC_RATE = 744187.5       # nrsc5's cs16 input rate (NRSC5_SAMPLE_RATE_NATIVE_FM)
-IBOC_DECIM = 8             # 9.6 MS/s -> 1.2 MS/s before the fractional resampler
 IBOC_BATCH = 16384         # shorts per write to nrsc5 (~11 ms)
 MIME_PRIMARY_IMAGE = 0xBE4B7536   # nrsc5: LOT component carrying album art
 MIME_STATION_LOGO = 0xD9C72536    # nrsc5: LOT component carrying the station logo
@@ -519,8 +522,6 @@ def parse_service_names(text):
 
 # Band scan: North American 200 kHz raster (88.1 ... 107.9 MHz), in tenths of MHz.
 CHANNELS_MHZ10 = range(881, 1080, 2)
-SCAN_CENTERS = (91.0e6, 97.0e6, 103.0e6, 109.0e6)  # even tenths: DC never on a channel
-SCAN_HALF_WIDTH = 3.0e6    # use only the flat middle of each 8 MHz window
 SCAN_MIN_SNR = 10.0        # dB above the window's noise floor
 SCAN_SPLATTER_DB = 20.0    # ignore channels this far below a 200 kHz neighbour
 SCAN_HEADROOM_DB = 3.0     # a scan window's ADC peaks at most this far above CAL_PEAK_DBFS...
@@ -531,11 +532,103 @@ SCAN_GAIN_STEPS = 5        # ...the gain backed off up to this many times to get
 DEFAULT_PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   '..', 'soapysdrplay3-build', 'modules')
 SDRPLAY_API_DIR = r'C:\Program Files\SDRplay\API\x64'
+UHD_USER_IMAGES = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'uhd', 'images')
+
+
+@dataclass(frozen=True)
+class GainStage:
+    """One of an SDR's gain controls, as SoapySDR names it."""
+    name: str                # SoapySDR gain element
+    label: str               # as shown: 'LNA', 'IFGR', 'Gain'
+    lo: float
+    hi: float
+    unit: str = ' dB'
+
+
+@dataclass(frozen=True)
+class SdrProfile:
+    """One kind of SDR: how SoapySDR opens it, its sample rate and usable window,
+    and its gain controls. A gain is a tuple of values, one per stage."""
+    key: str                 # --sdr and the settings file
+    name: str                # as shown
+    device: str              # SoapySDR device arguments
+    rate: float              # samples/s: a whole multiple of QUAD_RATE
+    bandwidth: float         # analog filter, Hz (0: the driver's own)
+    span: float              # widest station spread the window takes (MAX_SPAN)
+    scan_centers: tuple      # band scan windows, on even tenths of a MHz: DC never on a channel
+    scan_half_width: float   # ...each using only its flat middle, this far either side
+    stages: tuple            # GainStage, ...
+    default_gain: tuple      # when not calibrated
+    settings: tuple = ()     # (key, value) SoapySDR settings written at open
+    hint: str = ''           # shown when it can't be opened
+
+    def clamp(self, gain):
+        return tuple(min(max(v, s.lo), s.hi) for s, v in zip(self.stages, gain))
+
+    def gain_text(self, gain):
+        return ' · '.join(f'{s.label} {v:g}{s.unit}' for s, v in zip(self.stages, gain))
+
+    def apply_gain(self, set_one, gain):
+        """set_one(name, value) for each stage, clamped to its range."""
+        for s, v in zip(self.stages, self.clamp(gain)):
+            set_one(s.name, v)
+
+
+_SDRPLAY_GAIN = (GainStage('RFGR', 'LNA', 0, 9, ''), GainStage('IFGR', 'IFGR', 20, 59))  # higher = less gain
+_SDRPLAY_HINT = 'Is the {name} plugged in, and is no other program (such as SDRconnect) using it?'
+SDRS = {p.key: p for p in (
+    # 9.6 MS/s, its 8 MHz IF filter flat to +/-3.7 MHz; the FM notch must be off for this.
+    SdrProfile('rsp1a', 'RSP1A', 'driver=sdrplay', 9.6e6, 8e6, 7.2e6,
+               (91.0e6, 97.0e6, 103.0e6, 109.0e6), 3.0e6, _SDRPLAY_GAIN, (4, 40),
+               (('rfnotch_ctrl', False), ('dabnotch_ctrl', False)), _SDRPLAY_HINT),
+    # The RSP1A's successor: the same API, rates, filters and gain controls.
+    SdrProfile('rsp1b', 'RSP1B', 'driver=sdrplay', 9.6e6, 8e6, 7.2e6,
+               (91.0e6, 97.0e6, 103.0e6, 109.0e6), 3.0e6, _SDRPLAY_GAIN, (4, 40),
+               (('rfnotch_ctrl', False), ('dabnotch_ctrl', False)), _SDRPLAY_HINT),
+    # 2.304 MS/s (the most an RTL2832 streams without dropping samples is ~2.4), so
+    # only stations within ~1.4 MHz of each other: its own filter rolls off past +/-1 MHz.
+    SdrProfile('rtlsdr', 'RTL-SDR', 'driver=rtlsdr', 2.304e6, 0, 1.4e6,
+               tuple(round(88.8e6 + k * 1.8e6) for k in range(12)), 0.9e6,
+               (GainStage('TUNER', 'Gain', 0, 49.6),), (30,),
+               hint='Is the RTL-SDR plugged in, with the WinUSB driver (Zadig), and no other program using it?'),
+    # 30.72 MS/s (the AD9361's LTE rate), its filter set to 24 MHz: one window takes the
+    # whole band, 88.1-107.9 MHz, with 300 kHz to spare either side for moving the centre
+    # off DC, and every station well inside the digital filters (+/-10.4 of +/-15.4 MHz).
+    # (The master clock set at open: gr-soapy only takes a rate the clock divides down to.
+    # UHD's default USB transfers, 16 of 8 kB, top out near 18 MS/s on Windows.)
+    SdrProfile('b210', 'B210', 'driver=uhd,type=b200,master_clock_rate=30.72e6,'
+               'num_recv_frames=256,recv_frame_size=16360', 30.72e6, 24e6, 20.4e6,
+               (98.0e6,), 10.0e6, (GainStage('PGA', 'Gain', 0, 76),), (40,),
+               hint='Is the B210 on a USB 3 port with the WinUSB driver (Zadig), its UHD FPGA images '
+                    'downloaded (uhd_images_downloader -t "b2xx_b210_fpga|b2xx_common_fw" '
+                    '-i %LOCALAPPDATA%\\uhd\\images), and no other program using it?'),
+)}
+
+
+def use_sdr(key):
+    """Make `key` (one of SDRS) the SDR in use: its rate and window set the module's."""
+    global SDR, SAMP_RATE, CHAN_DECIM, MAX_SPAN, EDGE_HZ, SRC_BUFFER, IBOC_DECIM, SCAN_CENTERS, SCAN_HALF_WIDTH
+    SDR = SDRS[key]
+    SAMP_RATE = SDR.rate
+    CHAN_DECIM = round(SAMP_RATE / QUAD_RATE)
+    assert CHAN_DECIM * QUAD_RATE == SAMP_RATE, f'{SDR.name}: rate must be a multiple of {QUAD_RATE:g}'
+    MAX_SPAN = SDR.span
+    EDGE_HZ = MAX_SPAN / 2 + 150e3   # a station at most this far from the SDR centre (room to move off the midpoint)
+    SRC_BUFFER = 1 << max(18, (CHAN_CHUNK * CHAN_DECIM).bit_length())  # > CHAN_CHUNK * CHAN_DECIM
+    IBOC_DECIM = max(1, round(SAMP_RATE / 1.2e6))  # to ~1.2 MS/s before the fractional resampler
+    SCAN_CENTERS, SCAN_HALF_WIDTH = SDR.scan_centers, SDR.scan_half_width
+
+
+use_sdr('rsp1a')
 
 
 def _soapy_env():
     if not os.environ.get('SOAPY_SDR_PLUGIN_PATH') and os.path.isdir(DEFAULT_PLUGIN_DIR):
         os.environ['SOAPY_SDR_PLUGIN_PATH'] = os.path.normpath(DEFAULT_PLUGIN_DIR)
+    # The B210's FPGA images: radioconda's folder needs admin to write, so
+    # uhd_images_downloader -i puts them here instead. UHD_IMAGES_DIR overrides.
+    if not os.environ.get('UHD_IMAGES_DIR') and os.path.isdir(UHD_USER_IMAGES):
+        os.environ['UHD_IMAGES_DIR'] = UHD_USER_IMAGES
     # SDRplay API DLL, plus radioconda's DLLs so the other Soapy modules load
     # quietly when this runs without `conda activate`.
     if os.name == 'nt' and SDRPLAY_API_DIR not in os.environ.get('PATH', ''):
@@ -544,7 +637,7 @@ def _soapy_env():
 
 
 def _retry(open_device, attempts=5):
-    """The SDRplay service can take a moment to free the RSP1A after a close."""
+    """An SDR can take a moment to be free again after a close (the SDRplay service especially)."""
     for i in range(attempts):
         try:
             return open_device()
@@ -565,28 +658,40 @@ def pick_initial(found, n=3):
     return sorted(f for f, _ in best)
 
 
-def band_scan(lna_state, if_gain_reduction, verbose=False):
+def band_scan(gain, verbose=False):
     """Sweep 88-108 MHz once. Returns (found, iboc_scan):
     found = [(freq_hz, snr_db), ...] of stations; iboc_scan = {freq_hz: info} where
     info is the IBOC digital-to-analog power ratio in dBc, None (no IBOC
     sidebands), or 'adjacent' (a neighbour 200 kHz away hides the sidebands).
 
-    Steps the RSP1A through SCAN_CENTERS, averages a spectrum at each, and
+    Steps the SDR through SCAN_CENTERS, averages a spectrum at each, and
     measures every channel on the North American 200 kHz raster. A channel
     counts as a station when it stands SCAN_MIN_SNR dB above the noise floor
     and isn't just the sideband splatter of a much stronger neighbour. IBOC
     shows up as flat sidebands 129-199 kHz either side of the carrier,
     outside the receivers' channel filters, so it is detected here.
     """
-    with _rsp1a_direct(lna_state, if_gain_reduction) as rsp:
-        return _scan(rsp, verbose, lna_state, if_gain_reduction)
+    with _sdr_direct(gain) as rsp:
+        return _scan(rsp, verbose, gain)
 
 
-def _scan_capture(rsp, lna, ifgr):
+def _less_gain(gain, by_db):
+    """gain turned down by at least by_db (SDRplay: the IF gain first, then the
+    LNA); None if it is already at the least."""
+    if len(SDR.stages) == 1:
+        s = SDR.stages[0]
+        return None if gain[0] <= s.lo else (max(s.lo, gain[0] - by_db),)
+    lna, ifgr = gain
+    if ifgr < 59:
+        return lna, int(min(59, ifgr + by_db))
+    return (min(9, lna + 2), ifgr) if lna < 9 else None
+
+
+def _scan_capture(rsp, gain):
     """One scan window's IQ, its gain backed off while the ADC clips: a strong
     station in the window would otherwise clip it, and the clipping's spurs
     raise the floor and hide the other stations there."""
-    rsp.set_gain(lna, ifgr)
+    rsp.set_gain(*gain)
     for _ in range(SCAN_GAIN_STEPS):
         rsp.capture(int(SAMP_RATE * 0.1))                 # let the tuner (or gain) settle
         x = rsp.capture(int(SAMP_RATE * 0.25))
@@ -594,17 +699,15 @@ def _scan_capture(rsp, lna, ifgr):
         peak_db = 20 * math.log10(float(np.percentile(mag, 99.99)) + 1e-12)
         if np.max(mag) < CAL_CLIP and peak_db <= CAL_PEAK_DBFS + SCAN_HEADROOM_DB:
             break
-        if ifgr < 59:                                     # IF gain first, then the LNA
-            ifgr = int(min(59, ifgr + max(6, math.ceil(peak_db - CAL_PEAK_DBFS))))
-        elif lna < 9:
-            lna = min(9, lna + 2)
-        else:
+        gain = _less_gain(gain, max(6, math.ceil(peak_db - CAL_PEAK_DBFS)))
+        if gain is None:
             break
-        rsp.set_gain(lna, ifgr)
+        rsp.set_gain(*gain)
     return x
 
 
-def _scan(rsp, verbose, lna=CAL_DEFAULT[0], ifgr=CAL_DEFAULT[1]):
+def _scan(rsp, verbose, gain=None):
+    gain = gain or SDR.default_gain
     nfft = 4096
     win = np.hanning(nfft).astype(np.float32)
     bin_hz = SAMP_RATE / nfft
@@ -613,7 +716,7 @@ def _scan(rsp, verbose, lna=CAL_DEFAULT[0], ifgr=CAL_DEFAULT[1]):
     an_half = int(100e3 / bin_hz)
     for center in SCAN_CENTERS:
         rsp.tune(center)
-        x = _scan_capture(rsp, lna, ifgr)
+        x = _scan_capture(rsp, gain)
         frames = x[:len(x) // nfft * nfft].reshape(-1, nfft) * win
         psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(frames, axis=1)) ** 2, axis=0))
         psd_db = 10 * np.log10(psd + 1e-20)
@@ -657,35 +760,35 @@ def _scan(rsp, verbose, lna=CAL_DEFAULT[0], ifgr=CAL_DEFAULT[1]):
 
 class _Rsp:
     """What the band scan and gain calibration need from the SDR: tune(hz),
-    set_gain(lna_state, if_gain_reduction) and capture(n) -> complex64 IQ."""
+    set_gain(*gain) (one value per SDR.stages) and capture(n) -> complex64 IQ."""
 
     def __init__(self, tune, set_gain, capture):
         self.tune, self.set_gain, self.capture = tune, set_gain, capture
 
 
 @contextlib.contextmanager
-def _rsp1a_direct(lna_state, if_gain_reduction, center_hz=None):
-    """The RSP1A opened directly through SoapySDR (no flowgraph) and streaming;
+def _sdr_direct(gain, center_hz=None):
+    """The SDR opened directly through SoapySDR (no flowgraph) and streaming;
     released on exit so the receiver can open it."""
     _soapy_env()
     import SoapySDR
     from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32
 
-    dev = _retry(lambda: SoapySDR.Device('driver=sdrplay'))
+    dev = _retry(lambda: SoapySDR.Device(SDR.device))
     dev.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE)
-    dev.setBandwidth(SOAPY_SDR_RX, 0, 8e6)
+    if SDR.bandwidth:
+        dev.setBandwidth(SOAPY_SDR_RX, 0, SDR.bandwidth)
     dev.setGainMode(SOAPY_SDR_RX, 0, False)
 
-    def set_gain(lna, ifgr):
-        dev.setGain(SOAPY_SDR_RX, 0, 'IFGR', min(max(ifgr, 20), 59))
-        dev.setGain(SOAPY_SDR_RX, 0, 'RFGR', min(max(lna, 0), 9))
+    def set_gain(*g):
+        SDR.apply_gain(lambda name, v: dev.setGain(SOAPY_SDR_RX, 0, name, v), g)
 
-    set_gain(lna_state, if_gain_reduction)
+    set_gain(*gain)
     if center_hz:
         dev.setFrequency(SOAPY_SDR_RX, 0, center_hz)
-    for key in ('rfnotch_ctrl', 'dabnotch_ctrl'):
+    for key, value in SDR.settings:
         try:
-            dev.writeSetting(key, 'false')
+            dev.writeSetting(key, str(value).lower())
         except Exception:
             pass
     stream = dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
@@ -706,24 +809,25 @@ def _rsp1a_direct(lna_state, if_gain_reduction, center_hz=None):
     finally:
         dev.deactivateStream(stream)
         dev.closeStream(stream)
-        dev.close()  # release the RSP1A before the receiver opens it
+        dev.close()  # release the SDR before the receiver opens it
 
 
 def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
-    """Choose the LNA state and IF gain reduction for receiving freqs_hz with
-    the SDR centred on center_hz. rsp is an _Rsp already tuned there.
+    """Choose the gain for receiving freqs_hz with the SDR centred on
+    center_hz. rsp is an _Rsp already tuned there.
 
-    For each LNA state (least gain first) the IF gain reduction is set so the
-    ADC's peaks sit at CAL_PEAK_DBFS, then each station's level over the noise
-    floor is measured. Returns (lna, ifgr, report): the state giving the
-    stations the best average S/N without overload (the least gain within
+    SDRplay: for each LNA state (least gain first) the IF gain reduction is
+    set so the ADC's peaks sit at CAL_PEAK_DBFS. One gain stage (RTL-SDR,
+    B210): the gain is raised CAL_STEP_DB at a time from the least until the
+    peaks pass CAL_PEAK_DBFS. At each, every station's level over the noise
+    floor is measured. Returns (gain, report): the gain giving the stations
+    the best average S/N without overload (the least gain within
     CAL_TOLERANCE_DB of the best, since past the point where antenna noise
-    dominates more gain only costs headroom), its IF gain reduction, and a
-    one-line report."""
+    dominates more gain only costs headroom), and a one-line report."""
     nfft = 4096
     win = np.hanning(nfft).astype(np.float32)
     bin_hz = SAMP_RATE / nfft
-    flat = slice(int(nfft / 2 - 3.6e6 / bin_hz), int(nfft / 2 + 3.6e6 / bin_hz))  # inside the IF filter
+    flat = slice(int(nfft / 2 - MAX_SPAN / 2 / bin_hz), int(nfft / 2 + MAX_SPAN / 2 / bin_hz))  # inside the filter
 
     def measure():
         rsp.capture(int(SAMP_RATE * 0.05))       # samples from before the gain change
@@ -742,45 +846,62 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
             snrs.append(10 * math.log10(float(np.mean(psd[k - half:k + half + 1]))) - floor)
         return peak_db, clipped, float(np.mean(snrs)), min(snrs)
 
-    tried = []
-    ifgr = 40
-    for lna in CAL_LNA_STATES:
-        rsp.set_gain(lna, ifgr)
-        peak_db, clipped, snr, worst = measure()
-        for _ in range(3):  # bring the ADC peaks to CAL_PEAK_DBFS (IF gain is about 1 dB per dB)
-            new = int(round(min(max(ifgr + peak_db - CAL_PEAK_DBFS, 20), 59)))
-            if new == ifgr:
-                break
-            ifgr = new
-            rsp.set_gain(lna, ifgr)
-            peak_db, clipped, snr, worst = measure()
-            if abs(peak_db - CAL_PEAK_DBFS) <= 1.5:
-                break
-        tried.append((lna, ifgr, peak_db, clipped, snr, worst))
+    tried = []  # (gain, peak_db, clipped, snr, worst)
+
+    def record(gain, m):
+        """Note one gain's measurement; True when there's no point in more gain."""
+        tried.append((gain, *m))
+        _, clipped, snr, worst = m
         if progress:
-            progress(f'LNA {lna}: S/N {snr:.1f} dB (weakest {worst:.1f})' + (' (overload)' if clipped else ''))
-        good = [t for t in tried if not t[3]]
-        if good and snr < max(t[4] for t in good) - 6:
-            break                                # past the best: more gain only adds overload
-        last = [t[4] for t in tried[-3:]]
-        if len(good) >= 4 and len(last) == 3 and max(last) - min(last) < 1.0:
-            break                                # S/N has levelled off: antenna noise dominates
-    # Prefer states whose peaks reached CAL_PEAK_DBFS: with a strong antenna the most
-    # sensitive states can't, even at the most IF gain reduction, and run short of headroom.
-    good = ([t for t in tried if not t[3] and t[2] <= CAL_PEAK_DBFS + 1.5]
-            or [t for t in tried if not t[3]] or tried)
-    best = max(t[4] for t in good)
-    lna, ifgr, peak_db, _, snr, worst = next(t for t in good if t[4] >= best - CAL_TOLERANCE_DB)
-    report = (f'LNA {lna} \u00b7 IFGR {ifgr} dB: stations {snr:.0f} dB over the floor on average '
+            progress(f'{SDR.gain_text(gain)}: S/N {snr:.1f} dB (weakest {worst:.1f})'
+                     + (' (overload)' if clipped else ''))
+        good = [t for t in tried if not t[2]]
+        if good and snr < max(t[3] for t in good) - 6:
+            return True                          # past the best: more gain only adds overload
+        last = [t[3] for t in tried[-3:]]
+        return len(good) >= 4 and len(last) == 3 and max(last) - min(last) < 1.0  # antenna noise dominates
+
+    if len(SDR.stages) == 2:                     # SDRplay: LNA state, IF gain reduction
+        ifgr = 40
+        for lna in CAL_LNA_STATES:
+            rsp.set_gain(lna, ifgr)
+            m = measure()
+            for _ in range(3):  # bring the ADC peaks to CAL_PEAK_DBFS (IF gain is about 1 dB per dB)
+                new = int(round(min(max(ifgr + m[0] - CAL_PEAK_DBFS, 20), 59)))
+                if new == ifgr:
+                    break
+                ifgr = new
+                rsp.set_gain(lna, ifgr)
+                m = measure()
+                if abs(m[0] - CAL_PEAK_DBFS) <= 1.5:
+                    break
+            if record((lna, ifgr), m):
+                break
+    else:
+        stage = SDR.stages[0]
+        g = stage.lo
+        while True:
+            rsp.set_gain(g)
+            m = measure()
+            if record((g,), m) or m[1] or m[0] > CAL_PEAK_DBFS + 1.5 or g >= stage.hi:
+                break                            # (past the peak target, more gain only costs headroom)
+            g = min(stage.hi, g + CAL_STEP_DB)
+    # Prefer gains whose peaks stayed at or below CAL_PEAK_DBFS: with a strong antenna the most
+    # sensitive SDRplay LNA states can't get there, even at the most IF gain reduction.
+    good = ([t for t in tried if not t[2] and t[1] <= CAL_PEAK_DBFS + 1.5]
+            or [t for t in tried if not t[2]] or tried)
+    best = max(t[3] for t in good)
+    gain, peak_db, _, snr, worst = next(t for t in good if t[3] >= best - CAL_TOLERANCE_DB)
+    report = (f'{SDR.gain_text(gain)}: stations {snr:.0f} dB over the floor on average '
               f'(weakest {worst:.0f} dB), '
-              f'ADC peaks {peak_db:.0f} dBFS ({len(tried)} LNA states tried)')
-    return lna, ifgr, report
+              f'ADC peaks {peak_db:.0f} dBFS ({len(tried)} {"LNA states" if len(SDR.stages) == 2 else "gains"} tried)')
+    return gain, report
 
 
-def calibrate_startup(receivers_hz, lna, ifgr, progress=None):
-    """Gain calibration on the RSP1A before the receiver opens it."""
+def calibrate_startup(receivers_hz, gain, progress=None):
+    """Gain calibration on the SDR before the receiver opens it."""
     center = _centre(receivers_hz)
-    with _rsp1a_direct(lna, ifgr, center) as rsp:
+    with _sdr_direct(gain, center) as rsp:
         rsp.capture(int(SAMP_RATE * 0.1))  # let the tuner settle
         return calibrate_gain(rsp, center, list(receivers_hz), progress)
 
@@ -872,22 +993,29 @@ class AdcOverload:
         return None
 
 
-def make_rsp1a(center_hz, lna_state, if_gain_reduction):
-    """Open the RSP1A through SoapySDR with fixed gain and the FM notch off."""
+def make_source(center_hz, gain):
+    """Open the SDR through SoapySDR with fixed gain (and, on an SDRplay, the FM notch off)."""
     _soapy_env()
     from gnuradio import soapy
 
-    src = _retry(lambda: soapy.source('driver=sdrplay', 'fc32', 1, '', '', [''], ['']))
-    src.set_sample_rate(0, SAMP_RATE)
-    src.set_bandwidth(0, 8e6)
+    src = _retry(lambda: soapy.source(SDR.device, 'fc32', 1, '', '', [''], ['']))
+    try:
+        src.set_sample_rate(0, SAMP_RATE)
+    except ValueError:
+        # gr-soapy takes only a rate the driver lists, exactly; UHD lists the B210's
+        # 30.72 MS/s as its clock divides it, 30720000.024. Within 1 S/s is the same rate.
+        rate = min((r.minimum() for r in src.get_sample_rate_range(0)), key=lambda r: abs(r - SAMP_RATE))
+        if abs(rate - SAMP_RATE) > 1:
+            raise
+        src.set_sample_rate(0, rate)
+    if SDR.bandwidth:
+        src.set_bandwidth(0, SDR.bandwidth)
     src.set_frequency(0, center_hz)
     src.set_gain_mode(0, False)
-    src.set_gain(0, 'IFGR', min(max(if_gain_reduction, 20), 59))
-    src.set_gain(0, 'RFGR', min(max(lna_state, 0), 9))
-    # The RSP1A has a switchable FM broadcast notch; it must be off for this.
-    for key in ('rfnotch_ctrl', 'dabnotch_ctrl'):
+    SDR.apply_gain(lambda name, v: src.set_gain(0, name, v), gain)
+    for key, value in SDR.settings:
         try:
-            src.write_setting(key, False)
+            src.write_setting(key, value)
         except Exception as e:
             print(f'could not set {key}: {e}')
     return src
@@ -3099,22 +3227,23 @@ def _centre(freqs_hz):
 
 
 class FmMonitor(gr.top_block):
-    """The RSP1A and up to MAX_RECEIVERS receivers, added and removed while
+    """The SDR (SDR) and up to MAX_RECEIVERS receivers, added and removed while
     running. Each receiver has a fixed slot (receiver 1-4): its input on the
     audio mixer and its RDS feed port. An empty slot feeds the mixer silence.
     The SDR re-centres on the receivers' stations whenever they change."""
 
-    def __init__(self, receivers, lna_state, if_gain_reduction, source=None, source_factory=None):
-        """receivers: {slot: freq_hz}, or a list of freqs for slots 0, 1, ..."""
+    def __init__(self, receivers, gain=None, source=None, source_factory=None):
+        """receivers: {slot: freq_hz}, or a list of freqs for slots 0, 1, ...
+        gain: one value per SDR.stages (default SDR.default_gain)."""
         gr.top_block.__init__(self, APP_NAME)
         receivers = dict(enumerate(receivers)) if isinstance(receivers, (list, tuple)) else dict(receivers)
         self.center_hz = _centre(receivers.values())
-        self.lna, self.ifgr = lna_state, if_gain_reduction
+        self.gain = tuple(gain or SDR.default_gain)
         self.gain_auto = False         # set by whoever calibrated the gain
         self.cal_center_hz = None      # where it was calibrated
-        self._source_factory = source_factory  # () -> a new source, for reopening (tests); else the RSP1A
+        self._source_factory = source_factory  # () -> a new source, for reopening (tests); else the SDR
         self._sdr_lock = threading.RLock()  # the SDR reopening thread vs IBOC changes on the GUI thread
-        self.src = _min_buffer(source or make_rsp1a(self.center_hz, lna_state, if_gain_reduction), SRC_BUFFER)
+        self.src = _min_buffer(source or make_source(self.center_hz, self.gain), SRC_BUFFER)
         self.adc = AdcMeter()  # the wideband peak, for the overload warning
         self._adc_in = _batch(gr.sizeof_gr_complex, ADC_BATCH, 8)
         self.connect(self.src, self._adc_in, self.adc)
@@ -3195,15 +3324,14 @@ class FmMonitor(gr.top_block):
         finally:
             self.unlock()
 
-        def set_gain(lna, ifgr):
-            self.src.set_gain(0, 'IFGR', min(max(ifgr, 20), 59))
-            self.src.set_gain(0, 'RFGR', min(max(lna, 0), 9))
+        def set_gain(*g):
+            SDR.apply_gain(lambda name, v: self.src.set_gain(0, name, v), g)
 
         try:
             freqs = [st.freq_hz for st in self.stations]
-            lna, ifgr, report = calibrate_gain(_Rsp(None, set_gain, tap.grab), self.center_hz, freqs, progress)
+            gain, report = calibrate_gain(_Rsp(None, set_gain, tap.grab), self.center_hz, freqs, progress)
         except Exception:
-            set_gain(self.lna, self.ifgr)
+            set_gain(*self.gain)
             raise
         finally:
             self.lock()
@@ -3211,8 +3339,8 @@ class FmMonitor(gr.top_block):
                 self.disconnect(self.src, batch, tap)
             finally:
                 self.unlock()
-        set_gain(lna, ifgr)
-        self.lna, self.ifgr, self.gain_auto, self.cal_center_hz = lna, ifgr, True, self.center_hz
+        set_gain(*gain)
+        self.gain, self.gain_auto, self.cal_center_hz = gain, True, self.center_hz
         return report
 
     def detach_sdr(self):
@@ -3232,7 +3360,7 @@ class FmMonitor(gr.top_block):
 
     def attach_sdr(self):
         """Open the SDR again, wire it to the receivers and start. Raises if it can't be opened."""
-        src = self._source_factory() if self._source_factory else make_rsp1a(self.center_hz, self.lna, self.ifgr)
+        src = self._source_factory() if self._source_factory else make_source(self.center_hz, self.gain)
         src = _min_buffer(src, SRC_BUFFER)
         with self._sdr_lock:
             for st in self.stations:
@@ -7114,6 +7242,7 @@ class SetupWizard(QtWidgets.QWizard):
         self.first_run = first_run
         self.addPage(self._welcome())
         self.addPage(self._location())
+        self.addPage(self._sdr())
         self.addPage(self._web())
         self.addPage(self._notifications(notify, notifier))
         self.addPage(self._finish())
@@ -7129,10 +7258,12 @@ class SetupWizard(QtWidgets.QWizard):
         page = _WizardPage(f'Welcome to {APP_NAME}' if self.first_run else f'{APP_NAME} setup',
                            'Multi-station FM modulation monitor')
         text = QtWidgets.QLabel(
-            f'{APP_NAME} monitors up to four FM stations at once from one SDRplay RSP1A: modulation, '
-            'pilot, RDS, subcarriers, loudness and stereo, with alarms on the technical rules.\n\n'
+            f'{APP_NAME} monitors up to four FM stations at once from one SDR (SDRplay RSP1A or RSP1B, '
+            'RTL-SDR or Ettus B210): modulation, pilot, RDS, subcarriers, loudness and stereo, '
+            'with alarms on the technical rules.\n\n'
             'This setup takes a minute:\n'
             '    •  where the monitor is (which rules the alarms check)\n'
+            '    •  which SDR it uses\n'
             '    •  the web version, and the password for its controls\n'
             '    •  where alarms are sent (email, webhook)\n'
             '    •  starting with Windows\n\n'
@@ -7188,6 +7319,33 @@ class SetupWizard(QtWidgets.QWizard):
         if not re.fullmatch(r'[A-Z]{2}', self.country()):
             return 'Enter the two-letter ISO country code (such as GB or MX).'
         return None
+
+    SDR_NOTES = {'rsp1a': 'stations up to {span} apart',
+                 'rsp1b': 'stations up to {span} apart',
+                 'rtlsdr': 'stations up to {span} apart: often only one or two',
+                 'b210': 'the whole FM band at once; needs USB 3'}
+
+    def _sdr(self):
+        page = _WizardPage('Which SDR?',
+                           'The receiver all the stations are taken from. One SDR window holds every open '
+                           'station, so how far apart they can be depends on the SDR.')
+        self.sdr_buttons = {}
+        group = QtWidgets.QButtonGroup(page)
+        for key, p in SDRS.items():
+            note = self.SDR_NOTES.get(key, 'stations up to {span} apart').format(span=f'{p.span / 1e6:g} MHz')
+            button = QtWidgets.QRadioButton(f'{p.name} — {p.rate / 1e6:g} MS/s, {note}')
+            button.setChecked(key == self.cfg.sdr)
+            group.addButton(button)
+            page.body.addWidget(button)
+            self.sdr_buttons[key] = button
+        page.body.addSpacing(12)
+        page.body.addWidget(self._note('Receivers that don’t fit a narrower SDR’s window aren’t opened. '
+                                       'Changed here, the SDR changes at the next start; --sdr overrides it.'))
+        page.body.addStretch(1)
+        return page
+
+    def sdr(self):
+        return next((k for k, b in self.sdr_buttons.items() if b.isChecked()), self.cfg.sdr)
 
     def _web(self):
         page = _WizardPage('Web version',
@@ -7268,7 +7426,7 @@ class SetupWizard(QtWidgets.QWizard):
         page.body.addWidget(self.autostart_box)
         page.body.addSpacing(12)
         page.body.addWidget(self._note(
-            f'Click Finish to start monitoring: {APP_NAME} scans the FM band, sets the RSP1A’s gain for '
+            f'Click Finish to start monitoring: {APP_NAME} scans the FM band, sets the SDR’s gain for '
             'the stations it finds, and opens a receiver on the strongest. "Add receiver" opens more.'
             if self.first_run else
             'Click Finish to save. Notifications and the web password apply at once; the country and web '
@@ -7289,7 +7447,8 @@ class SetupWizard(QtWidgets.QWizard):
         out = AppConfig.from_dict(self.cfg.to_dict())
         out.setup_done = True
         out.country = self.country()
-        out.web_port = self.web_port.value() if self.web_on.isChecked() else 0
+        out.sdr = self.sdr()
+        out.web_port =self.web_port.value() if self.web_on.isChecked() else 0
         out.web_bind = '127.0.0.1' if self.web_local.isChecked() else '0.0.0.0'
         if self.web_pw_remove.isChecked():
             out.web_password_hash = ''
@@ -7647,6 +7806,7 @@ class AppConfig:
     Command-line options, where given, take precedence."""
     setup_done: bool = False
     country: str = 'CA'                # ISO country: ISED rules for CA, else FCC; RadioDNS
+    sdr: str = 'rsp1a'                 # SDRS key
     web_port: int = WEB_PORT           # 0 = no web version
     web_bind: str = '0.0.0.0'          # '127.0.0.1' = this PC only
     web_password_hash: str = ''        # hash_password(); '' = controls only in a browser on this PC
@@ -7660,6 +7820,8 @@ class AppConfig:
         out.country = str(out.country or '').strip().upper()
         if not re.fullmatch(r'[A-Z]{2}', out.country):
             out.country = 'CA'
+        if out.sdr not in SDRS:
+            out.sdr = 'rsp1a'
         try:
             out.web_port = int(out.web_port)
         except (TypeError, ValueError):
@@ -8365,7 +8527,7 @@ class MainWindow(QtWidgets.QWidget):
         self.n_events = 0
         self._feed_clients = {}
         self.panels = []
-        self.setWindowTitle(f'{APP_NAME} - RSP1A')
+        self.setWindowTitle(f'{APP_NAME} - {SDR.name}')
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
@@ -8400,7 +8562,7 @@ class MainWindow(QtWidgets.QWidget):
         self.args = None   # the command line, set by main(), for the help
         self.cal_btn = QtWidgets.QPushButton('\u27f2  Recalibrate gain')
         self.cal_btn.setMinimumHeight(32)
-        self.cal_btn.setToolTip('Set the RSP1A gain for the stations being received now (takes a few '
+        self.cal_btn.setToolTip(f'Set the {SDR.name} gain for the stations being received now (takes a few '
                                 'seconds; the meters restart afterwards)')
         self.cal_btn.clicked.connect(self._recalibrate)
         top.addWidget(self.cal_btn)
@@ -8602,6 +8764,7 @@ class MainWindow(QtWidgets.QWidget):
                         ' (--web-password / FM_MODMON_WEB_PASSWORD is used while it is given)'))
         later = [what for what, changed in (
             ('the country', new.country != old.country),
+            ('the SDR', new.sdr != old.sdr),
             ('web access', (new.web_port, new.web_bind) != (old.web_port, old.web_bind))) if changed]
         if later:
             self.log('setup: ' + ' and '.join(later) + ' change at the next start')
@@ -8662,9 +8825,10 @@ class MainWindow(QtWidgets.QWidget):
         if change is None:
             return
         if change:
-            text = (f'SDR overload: the RSP1A\'s wideband samples reach {_dbfs(peak):.1f} dBFS (clipping from '
+            text = (f'SDR overload: the {SDR.name}\'s wideband samples reach {_dbfs(peak):.1f} dBFS (clipping from '
                     f'{_dbfs(CAL_CLIP):.1f}): every receiver\'s readings may be false. Recalibrate gain, '
-                    'or with --lna / --ifgr use less gain (higher values)')
+                    + ('or with --lna / --ifgr use less gain (higher values)' if len(SDR.stages) == 2 else
+                       'or use less gain (--gain)'))
         else:
             text = f'SDR overload cleared: no wideband peak at {_dbfs(CAL_CLIP):.1f} dBFS for {ADC_OVERLOAD_CLEAR_S} s'
         self.log(text)
@@ -8673,7 +8837,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _sdr_lost(self, silent):
         rec = self._recovery = {'since': time.time(), 'attempt': 0, 'error': None}
-        text = f'SDR lost: no samples from the RSP1A for {silent:.0f} s; reopening it'
+        text = f'SDR lost: no samples from the {SDR.name} for {silent:.0f} s; reopening it'
         self.log(text)
         self.notifier.event('sdr', text)
         for p in self.panels:
@@ -8781,10 +8945,10 @@ class MainWindow(QtWidgets.QWidget):
         a, tb, c = self.args, self.tb, self.tb.center_hz
         lo, hi = tb.window_hz()
         rows = [('Start command', subprocess.list2cmdline([sys.executable] + sys.argv)),
-                ('SDR', f'RSP1A centred on {c / 1e6:.2f} MHz, window {lo / 1e6:.1f}-'
+                ('SDR', f'{SDR.name} centred on {c / 1e6:.2f} MHz, window {lo / 1e6:.1f}-'
                         f'{hi / 1e6:.1f} MHz, {SAMP_RATE / 1e6:.1f} MS/s'),
                 ('Gain', self._gain_text() + ('' if tb.gain_auto else
-                                              ' (set by --lna / --ifgr)' if a and a.gain_manual else
+                                              ' (set on the command line)' if a and a.gain_manual else
                                               ' (default, not calibrated)'))]
         for p in self.panels:
             feed = f'RDS feed TCP {p.feed.port}' if p.feed else 'no RDS feed'
@@ -8824,7 +8988,7 @@ class MainWindow(QtWidgets.QWidget):
             return f'SDR LOST \u2013 reopening (attempt {max(rec["attempt"], 1)}, {time.time() - rec["since"]:.0f} s)'
         if self._cal:
             return 'Gain: calibrating\u2026'
-        text = f'LNA {tb.lna} \u00b7 IFGR {tb.ifgr} dB'
+        text = SDR.gain_text(tb.gain)
         if self.overload.active:
             return text + ' \u00b7 ADC OVERLOAD'
         if not tb.gain_auto:
@@ -8837,7 +9001,7 @@ class MainWindow(QtWidgets.QWidget):
         """Run the gain calibration on the running receivers, off the GUI thread."""
         if self._cal or self._recovery:
             return
-        cal = self._cal = {'was': f'LNA {self.tb.lna} \u00b7 IFGR {self.tb.ifgr} dB'}
+        cal = self._cal = {'was': SDR.gain_text(self.tb.gain)}
 
         def run():
             try:
@@ -8916,14 +9080,14 @@ class MainWindow(QtWidgets.QWidget):
         c = self.tb.center_hz
         lo, hi = self.tb.window_hz()
         window = f'{lo / 1e6:.1f}\u2013{hi / 1e6:.1f} MHz'
-        chips = {'sdr': f'RSP1A  {c / 1e6:.2f} MHz', 'window': f'Window {window}',
+        chips = {'sdr': f'{SDR.name}  {c / 1e6:.2f} MHz', 'window': f'Window {window}',
                  'rate': f'{SAMP_RATE / 1e6:.1f} MS/s', 'gain': self._gain_text(),
                  'found': f'{self.n_found} stations found' if self.scanned else 'no scan'}
         for key, text in chips.items():
             self.chips[key].setText(text)
         self.chip_row.updateGeometry()
         self.chip_row.fit()
-        self.header_text = f'RSP1A centred on {c / 1e6:.2f} MHz (window {window})  \u00b7  ' + '  \u00b7  '.join(
+        self.header_text = f'{SDR.name} centred on {c / 1e6:.2f} MHz (window {window})  \u00b7  ' + '  \u00b7  '.join(
             chips[k] for k in ('rate', 'gain', 'found'))
         for p in self.panels:
             p.set_fit([q.station.freq_hz for q in self.panels if q is not p])
@@ -9199,10 +9363,17 @@ def build_parser(width=100):
                     help='open the setup (as at the first start) before starting')
     ap.add_argument('--no-scan', action='store_true',
                     help='skip the band scan; dropdowns then list every channel')
-    ap.add_argument('--lna', type=int, help='RSP1A LNA state 0-9, higher = less gain (default: calibrated at '
-                                            f'start-up; {CAL_DEFAULT[0]} if only --ifgr is given)')
-    ap.add_argument('--ifgr', type=int, help='IF gain reduction 20-59 dB (default: calibrated at start-up; '
-                                             f'{CAL_DEFAULT[1]} if only --lna is given)')
+    ap.add_argument('--sdr', choices=list(SDRS),
+                    help='the SDR: ' + ', '.join(f'{k} ({p.name}, {p.rate / 1e6:g} MS/s, stations within '
+                                                 f'{p.span / 1e6:g} MHz)' for k, p in SDRS.items())
+                         + ' (default: as set in Setup, else rsp1a)')
+    sdrplay = SDRS['rsp1a']
+    ap.add_argument('--lna', type=int, help='SDRplay LNA state 0-9, higher = less gain (default: calibrated at '
+                                            f'start-up; {sdrplay.default_gain[0]} if only --ifgr is given)')
+    ap.add_argument('--ifgr', type=int, help='SDRplay IF gain reduction 20-59 dB (default: calibrated at start-up; '
+                                             f'{sdrplay.default_gain[1]} if only --lna is given)')
+    ap.add_argument('--gain', type=float, metavar='DB',
+                    help='RTL-SDR or B210 gain in dB, higher = more gain (default: calibrated at start-up)')
     ap.add_argument('--web-port', type=int,
                     help=f'port for the web version (0 = off; default: as set in Setup, else {WEB_PORT})')
     ap.add_argument('--web-bind',
@@ -9229,13 +9400,9 @@ def build_parser(width=100):
 def parse_args(argv=None):
     ap = build_parser()
     args = ap.parse_args(argv)
-    args.gain_manual = args.lna is not None or args.ifgr is not None
-    args.lna = CAL_DEFAULT[0] if args.lna is None else args.lna
-    args.ifgr = CAL_DEFAULT[1] if args.ifgr is None else args.ifgr
+    args.gain_manual = args.lna is not None or args.ifgr is not None or args.gain is not None
     if args.freqs and len(args.freqs) > MAX_RECEIVERS:
         ap.error(f'at most {MAX_RECEIVERS} receivers')
-    if args.freqs and round(max(args.freqs) - min(args.freqs), 6) > MAX_SPAN / 1e6:
-        ap.error(f'stations must lie within {MAX_SPAN / 1e6:.1f} MHz of each other')
     return args
 
 
@@ -9249,14 +9416,20 @@ def choose_stations(args, saved=None):
         stations = [(ch * 100000, None) for ch in CHANNELS_MHZ10]
     else:
         print('Scanning the FM band...', flush=True)
-        found, iboc_scan = band_scan(args.lna, args.ifgr)
+        found, iboc_scan = band_scan(args.gain)
         print('Found:', ', '.join(f'{f / 1e6:.1f} ({snr:.0f} dB{", IBOC" if isinstance(iboc_scan.get(f), float) else ""})'
                                   for f, snr in found) or 'nothing')
         stations = list(found)
     if args.freqs:
         receivers = {i: int(round(f * 10)) * 100000 for i, f in enumerate(args.freqs)}
     elif saved:
-        receivers = {slot: freq for slot, (freq, _) in saved.items()}
+        receivers = {}
+        for slot, (freq, _) in sorted(saved.items()):  # (saved with an SDR whose window was wider?)
+            if _fits(list(receivers.values()) + [freq]):
+                receivers[slot] = freq
+            else:
+                print(f'Receiver {slot + 1} ({freq / 1e6:.1f} MHz) not opened: it doesn\'t fit the '
+                      f'{SDR.name}\'s window with the others')
     else:
         receivers = {0: (pick_initial(found, n=1) or [int(round(DEFAULT_FREQS_MHZ[0] * 10)) * 100000])[0]}
     known = {f for f, _ in stations}
@@ -9270,6 +9443,21 @@ def resolve_args(args, app):
     args.web_port = app.web_port if args.web_port is None else args.web_port
     args.web_bind = args.web_bind or app.web_bind
     args.web_password_hash = app.web_password_hash
+    args.sdr = args.sdr or app.sdr
+    use_sdr(args.sdr)
+    ap = build_parser()
+    sdrplay = len(SDR.stages) == 2
+    if args.gain is not None and sdrplay:
+        ap.error(f'the {SDR.name} takes --lna and --ifgr, not --gain')
+    if (args.lna is not None or args.ifgr is not None) and not sdrplay:
+        ap.error(f'the {SDR.name} takes --gain, not --lna or --ifgr')
+    if sdrplay:
+        args.gain = (SDR.default_gain[0] if args.lna is None else args.lna,
+                     SDR.default_gain[1] if args.ifgr is None else args.ifgr)
+    else:
+        args.gain = SDR.default_gain if args.gain is None else (args.gain,)
+    if args.freqs and round(max(args.freqs) - min(args.freqs), 6) > MAX_SPAN / 1e6:
+        ap.error(f'stations must lie within {MAX_SPAN / 1e6:.1f} MHz of each other on the {SDR.name}')
     return args
 
 
@@ -9363,21 +9551,21 @@ def main():
                 app.processEvents()
 
             step('')
-            args.lna, args.ifgr, cal_report = calibrate_startup(receivers.values(), args.lna, args.ifgr, step)
+            args.gain, cal_report = calibrate_startup(receivers.values(), args.gain, step)
             print('Gain calibrated:', cal_report)
-        tb = FmMonitor(receivers, args.lna, args.ifgr)
+        tb = FmMonitor(receivers, args.gain)
         if cal_report:
             tb.gain_auto, tb.cal_center_hz = True, tb.center_hz
         web = start_web(args)
-        win = MainWindow(tb, stations, f'LNA {args.lna} · IFGR {args.ifgr} dB', iboc_scan, web,
+        win = MainWindow(tb, stations, SDR.gain_text(args.gain), iboc_scan, web,
                          feed_opener(args), {slot: cfg for slot, (_, cfg) in saved.items()}, args.config,
                          args.nrsc5 if os.path.isfile(args.nrsc5) else None,
                          None if args.no_radiodns else RadioDns(args.radiodns_client_id), args.country,
                          args.ffmpeg if web and web.formats else None)
     except Exception as e:  # noqa: BLE001 - anything that stops start-up is shown, then the app exits
         splash.close()
-        hint = ('\n\nIs the RSP1A plugged in, and is no other program (such as SDRconnect) using it?'
-                if 'RSP' in str(e) or 'sdrplay' in str(e).lower() else '')
+        hint = ('\n\n' + SDR.hint.format(name=SDR.name)
+                if re.search(r'rsp|sdrplay|rtl|uhd|soapy|device', str(e), re.I) else '')
         QtWidgets.QMessageBox.critical(None, APP_NAME, f'{APP_NAME} could not start:\n\n{e}{hint}')
         sys.exit(1)
     if cal_report:
