@@ -101,7 +101,7 @@ header .grow { flex: 1; }
 .trend .note { font-size: 10px; color: var(--dim); white-space: nowrap; overflow: hidden; }
 canvas.spark { width: 100%; height: 26px; display: block; }
 .ann { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; }
-.lamp { font: 600 9px/1 Consolas, monospace; text-align: center; padding: 4px 0; border-radius: 2px; background: #26282d; color: #7d838a; cursor: default; }
+.lamp { font: 600 9px/1 Consolas, monospace; text-align: center; padding: 4px 0; border-radius: 2px; background: #26282d; color: #7d838a; cursor: help; }
 .lamp[data-s=waiting] { color: #4f545a; }
 .lamp[data-s=raised] { background: #7a1f26; color: #ffe0e0; box-shadow: inset 0 0 0 1px #c24a52; }
 .lamp[data-s=pending] { background: #4a3a1c; color: var(--amber); }
@@ -429,7 +429,7 @@ function scaParts(kind, baud) {
 }
 function readouts(r) {
   const o = {}, L = k => (r.levels || {})[k] || null;
-  o['PI'] = r.pi ?? '-'; o['PTY'] = r.pty ?? '-'; o['PTYN'] = r.ptyn || '-';
+  o['PI'] = r.pi == null ? '-' : [[r.pi, L('pi')]]; o['PTY'] = r.pty ?? '-'; o['PTYN'] = r.ptyn || '-';
   o['ECC'] = r.ecc == null ? '-' : r.ecc ? r.ecc.toString(16).toUpperCase().padStart(2, '0') : '00 (not set)';
   o['Groups/s'] = fx(r.rds_rate);
   o['Group loss'] = r.rds_loss_pct == null ? '-' : fx(r.rds_loss_pct, 0) + '%';
@@ -451,7 +451,7 @@ function readouts(r) {
   for (const k of r.data_lost || []) { if (ds.length) ds.push('  ·  '); ds.push([k + ' lost', 'alarm']); }
   o['Data services'] = ds.length ? ds : '-';
   if (r.has_signal) {
-    o['RF level'] = num(r.rf_dbfs, 'dBFS');
+    o['RF level'] = [[num(r.rf_dbfs, 'dBFS'), L('rf_dbfs')]];
     o['MPX S/N'] = num(r.snr_db, 'dB');
     o['Carrier offset'] = [[`${sgn(r.offset_hz, 0)} Hz`, L('offset_hz')]];
     o['AM / multipath'] = [[fx(r.am_pct) + '%' + ({warn: '  peaks unreliable', alarm: '  readings unreliable'}[L('am_pct')] || ''), L('am_pct')]];
@@ -812,9 +812,11 @@ function explain(p, name, anchor) {
 }
 function explainAlarm(p, name, anchor) {
   const a = info.alarms[name], s = anchor.dataset.s || 'waiting', desc = anchor.dataset.desc;
+  // alarm_when() in the app
   const hold = name === 'SILENCE' ? p.r.settings.silence_s : a.hold;
-  let when = hold ? `It raises once its condition has held ${hold} s, and clears the same way.` : 'It raises at once.';
-  if (a.clean_only) when += ` Judged only on clean reception (AM / multipath under ${info.clean_am_pct}%).`;
+  let when = hold ? `It raises once its condition has held ${hold} s, and clears once it has been gone ${hold} s.`
+                  : 'It raises and clears at once.';
+  if (info.judged[name]) when += ` ${info.judged[name]} While it is not judged it counts as clear, so a raised alarm clears ${hold} s later.`;
   const means = state.alarm_means[s], note = (p.r.notes || {})[name];
   const word = {clear: 'clear', waiting: 'not judged yet', raised: 'RAISED', pending: 'pending', suppressed: 'not judged now', off: 'off'}[s];
   showExplain(anchor, desc[0].toUpperCase() + desc.slice(1), word, {raised: 'alarm', pending: 'warn', suppressed: 'warn'}[s],
@@ -1094,7 +1096,7 @@ function updateReceiver(p, r) {
   for (const [name, lamp] of Object.entries(p.lamps)) {
     const s = alarms[name] || 'waiting';
     if (lamp.dataset.s !== s) lamp.dataset.s = s;
-    const tip = `${lamp.textContent}: ${lamp.dataset.desc}\n${state.alarm_means[s]}` + (notes[name] ? '\n' + notes[name] : '');
+    const tip = `${lamp.textContent}: ${lamp.dataset.desc}\n${state.alarm_means[s]}` + (notes[name] ? '\n' + notes[name] : '') + '\nClick for details.';
     if (lamp.title !== tip) lamp.title = tip;
   }
   // detail (drawn only while it is the one shown)
@@ -1128,7 +1130,10 @@ function updateReceiver(p, r) {
     const d = READ[name], all = detailAll.has(d.card), surf = !d.essential && !all && out.has(name);
     const show = col.hidden.has(name) || !(d.essential || all || surf) ? 'none' : '';
     if (k.style.display !== show) k.style.display = v.style.display = show;
-    k.classList.toggle('surf', surf);
+    if (k.classList.contains('surf') !== surf) {
+      k.classList.toggle('surf', surf);
+      k.title = d.what + (surf ? ' Shown because it is out of range.' : '') + ' Click for details.';
+    }
   }
   p.histCap.style.display = p.hist.style.display = detailAll.has('mod') ? '' : 'none';
   setText(p.absMpx, col.mpx); setText(p.absRds, col.rds);
@@ -1240,7 +1245,8 @@ function openSettings(n) {
   const rows = {
     CARRIER: ['below', field('min_snr_db', 0, 60, 'any', 'dB S/N')],
     SILENCE: ['below', [...field('silence_lufs', -70, -10, 'any', 'LUFS'), ' for ', ...field('silence_s', 2, 300, 1, 's')]],
-    OVERMOD: ['above', [...limit('mod_base_pct'), ' + ', ...limit('mod_per_sub'), ' \u00d7 subcarriers, max ', ...limit('mod_max_pct')]],
+    OVERMOD: ['above', [...limit('mod_base_pct'), ' + ', ...limit('mod_per_sub'), ' \u00d7 subcarriers (with ', ...limit('mod_min_subs'),
+                        ' or more on air), max ', ...limit('mod_max_pct')]],
     PILOT_SPEC: ['outside', [...limit('pilot_min_pct'), ' \u2013 ', ...limit('pilot_max_pct'), ' or 19 kHz \u00b1 ', ...limit('pilot_tol_hz')]],
     SUBCARRIERS: ['above', [...limit('sub_total_pct'), ' total in stereo, ', ...limit('sub_mono_pct'), ' in mono, or ',
                             ...limit('sub_high_pct'), ' above 75 kHz']],

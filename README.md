@@ -41,11 +41,13 @@ annunciator with every alarm in a fixed place (raised, holding off, not judged, 
 The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
 Audio cards, listing what a station doesn't carry once instead of as dashes, and a History
 tab: the readings as stacked strips over 1 minute to 1 hour with one cursor across them.
-Each card shows its essential readings; "All" shows the rest (remembered), and a hidden
-reading shows anyway, marked ▲, while it is out of range, with a line above the cards
-listing everything out of range. Click any reading, bar, graph's (i) or alarm lamp for
-what it is, how it's measured, what it means right now and the rule or standard behind it.
 Under it, the Alarms tab lists each alarm once, with how long it lasted.
+
+Each card shows its essential readings; "All" shows the rest (remembered, the same for every
+receiver; the web page remembers its own choice per browser), and a hidden reading shows
+anyway, marked ▲, while it is out of range, with a line above the cards listing everything
+out of range. Click any reading, bar, graph's (i) or alarm lamp for what it is, how it's
+measured, what it means right now and the rule or standard behind it.
 
 ## Alarms
 
@@ -59,9 +61,9 @@ the limit, carrier frequency out of tolerance), each limit adjustable per receiv
 
 | Check | FCC (47 CFR 73) | ISED (BETS-6, BPR-3) |
 |---|---|---|
-| Modulation | 100% + 0.5% per 1% subcarrier injection, max 110% | same |
+| Modulation | 100% + 0.5% per 1% subcarrier injection, max 110% | same, but the allowance only with two or more subcarriers on air (RDS alone: 100%) |
 | Pilot | 8–10%, 19 kHz ± 2 Hz | same |
-| Subcarriers | ≤ 20% total in stereo, 30% in mono; ≤ 10% above 75 kHz | same |
+| Subcarriers | ≤ 20% total in stereo, 30% in mono; ≤ 10% above 75 kHz | ≤ 20% total in stereo or mono; ≤ 10% above 76 kHz |
 | Carrier frequency | ± 2000 Hz | ± 1000 Hz |
 
 Alarms go to the event log and optionally to email (SMTP) and webhooks (JSON, Slack,

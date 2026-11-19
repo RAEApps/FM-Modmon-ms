@@ -87,8 +87,9 @@ r, s, a = p.readings, st.meter.stats, st.audio_meter.stats
 check('readings carry the meter values', r['rf_dbfs'] == s['rf_dbfs'] and r['pos_pct'] == s['pos_pct']
       and r['short_term'] == a['short_term'] and r['rds_pct'] == s['rds_pct'])
 # (the synthetic run is over before these refreshes, so the RDS rate itself is 0 here)
+# The panel is in Canada (ISED rules): RDS alone gets no subcarrier allowance (BPR-3 3.13.2), so 100%.
 check('readings: stereo, RDS decoded and the limit', r['stereo_mode'] == 'stereo' and r['pi'] and r['group_types']
-      and abs(r['limit_pct'] - min(100 + 0.5 * s['rds_pct'], 110)) < 1e-9, f"{r['stereo_mode']} {r['pi']}")
+      and r['limit_pct'] == 100.0, f"{r['stereo_mode']} {r['pi']} limit {r['limit_pct']}")
 check('levels: peak over the limit is an alarm', r['levels'].get('pos_pct') == 'alarm', r['levels'])
 check('levels: L over 110% is an alarm', r['levels'].get('mod_l') == 'alarm', r['levels'])
 check('flags decoded to booleans', r['flags'] is not None and set(r['flags']) == set(rm.RDS_FLAGS))
