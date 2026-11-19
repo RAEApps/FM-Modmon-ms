@@ -58,7 +58,8 @@ The detail cards show each card's essential readings; "All (+n)" on a card shows
 the rest (remembered, and the same for every receiver; the web page remembers its
 own choice, per browser), and a reading beyond the
 essentials shows anyway, marked with a triangle, while it is out of range. The
-line above the cards lists every reading out of range. Click any reading, bar,
+line above the cards lists every reading out of range (what doesn't fit is
+counted, "+n more", in its tooltip). Click any reading, bar,
 graph's (i) or alarm lamp (or a station row's bars and trend, or a History
 strip's name) for what it is, how it is measured, what it means
 right now, and the rule or standard behind it (clicking the MPX spectrum or the
@@ -5679,10 +5680,11 @@ class StationPanel(QtCore.QObject):
         self.pages.addWidget(overview)
 
         # IBOC, PSD, SIS and RadioDNS lines (each only while there is something to say),
-        # with the station logo and album art beside them
+        # with the station logo and album art under them: in the RDS card, where they
+        # take its spare room rather than pushing the cards down when they appear
         text_grid = QtWidgets.QGridLayout()
         text_grid.setHorizontalSpacing(8)
-        text_grid.setVerticalSpacing(3)
+        text_grid.setVerticalSpacing(2)
         self.iboc_line, self.psd_line, self.sis_line, self.rdns_line = (QtWidgets.QLabel('-') for _ in range(4))
         self._iboc_rows = []   # IBOC, PSD and SIS rows: shown only when the station has IBOC
         self._rdns_row = ()     # the RadioDNS row: shown only while RadioDNS works for the station
@@ -5699,20 +5701,24 @@ class StationPanel(QtCore.QObject):
         # a RadioDNS slide's click-through link (TS 101 499 5.3.3) opens in the browser
         self.art_img.mousePressEvent = lambda e: self.art_img.link and QtGui.QDesktopServices.openUrl(
             QtCore.QUrl(self.art_img.link))
-        text_grid.addWidget(self.logo_img, 0, 2, 4, 1)
-        text_grid.addWidget(self.art_img, 0, 3, 4, 1)
+        media = QtWidgets.QHBoxLayout()
+        media.setSpacing(8)
+        media.addWidget(self.logo_img)
+        media.addWidget(self.art_img)
+        media.addStretch(1)
         for w in (self.iboc_line, self.psd_line, self.sis_line, self.rdns_line):
             w.setTextFormat(QtCore.Qt.RichText)
             w.setStyleSheet('color: #c4c7cc;')
-            # long text is cut at the edge (full text in the tooltip), never widening the view
+            # long text wraps in the card (full text in the tooltip too), never widening it
             w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+            w.setWordWrap(True)
         self.psd_line.setToolTip('IBOC programme service data (PSD) of the programme playing')
         self.sis_line.setToolTip('IBOC station information service (SIS)')
         for i, (title, widget) in enumerate((('IBOC', self.iboc_line), ('PSD', self.psd_line),
                                              ('SIS', self.sis_line), ('RadioDNS', self.rdns_line))):
             label = QtWidgets.QLabel(title)
-            label.setStyleSheet('font-weight: bold; color: #9aa0a6;')
-            label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            label.setStyleSheet('color: #9aa0a6;')    # as the card's other readings
+            label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
             text_grid.addWidget(label, i, 0)
             text_grid.addWidget(widget, i, 1)
             if title == 'RadioDNS':
@@ -5725,7 +5731,7 @@ class StationPanel(QtCore.QObject):
             w.hide()
         for w in self._rdns_row:
             w.hide()
-        ov.addLayout(text_grid)
+        self._rds_lines = (text_grid, media)    # (laid out in the RDS card)
 
         self.values = {}
         self._kv_rows = {}      # readout: its (label, value), to hide when it isn't on air
@@ -5739,7 +5745,8 @@ class StationPanel(QtCore.QObject):
         # the readings out of range now, each a link to its explanation (shown whatever the cards show)
         self.strip = QtWidgets.QLabel()
         self.strip.setTextFormat(QtCore.Qt.RichText)
-        self.strip.setWordWrap(True)
+        # one line, whatever its width: what doesn't fit is counted ("+n more", in its tooltip)
+        self.strip.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.strip.linkActivated.connect(lambda name: self.explain(name, self.strip))
         ov.addWidget(self.strip)
         cards = QtWidgets.QGridLayout()
@@ -5801,6 +5808,8 @@ class StationPanel(QtCore.QObject):
         box.addLayout(self._kv(('PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs',
                                 'Clock', 'Group types', 'Data services'), 1,
                                wide=('Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services')))
+        for lay in self._rds_lines:
+            box.addLayout(lay)
         self.absent['rds'] = dim_label()
         self.absent['rds'].setWordWrap(True)
         box.addWidget(self.absent['rds'])
@@ -6648,9 +6657,26 @@ class StationPanel(QtCore.QObject):
             pills.append(f'<a href="{_html(name)}" style="color:{colour}; text-decoration: none">'
                          f'{_html(name)} <b>{_html(text)}</b></a>')
         label = f'<span style="color:{DIM}; font-size: 8pt; letter-spacing: 1px">OUT OF RANGE</span>&nbsp;&nbsp; '
-        text = label + ('&nbsp;&nbsp;·&nbsp;&nbsp;'.join(pills) if pills else f'<span style="color:{DIM}">none</span>')
+        sep = '&nbsp;&nbsp;·&nbsp;&nbsp;'
+        text = label + (sep.join(pills) if pills else f'<span style="color:{DIM}">none</span>')
+        if len(pills) > 1 and self.strip.width() > 100:
+            # as many as fit on the line, then how many more
+            doc = QtGui.QTextDocument()
+            doc.setDefaultFont(self.strip.font())
+            doc.setDocumentMargin(0)
+            for n in range(len(pills), 0, -1):
+                more = len(pills) - n
+                text = label + sep.join(pills[:n]) + (
+                    f'{sep}<span style="color:{DIM}">+{more} more</span>' if more else '')
+                doc.setHtml(text)
+                if doc.idealWidth() <= self.strip.width():
+                    break
+        tip = '\n'.join(QtGui.QTextDocumentFragment.fromHtml(p).toPlainText() for p in pills)
+        tip = f'Out of range:\n{tip}\nClick one for what it means.' if pills else ''
         if self.strip.text() != text:
             self.strip.setText(text)
+        if self.strip.toolTip() != tip:
+            self.strip.setToolTip(tip)
 
     @staticmethod
     def _peak_state(r, key):
@@ -8532,6 +8558,8 @@ class ReceiverScroll(QtWidgets.QScrollArea):
 
 
 class MainWindow(QtWidgets.QWidget):
+    SPARE_H = 48    # px the window opens taller than its contents (fit_on_screen)
+
     def __init__(self, tb, stations, gain_info, iboc_scan=None, web=None, open_feed=None,
                  settings=None, config_path=None, nrsc5=None, radiodns=None, country='CA', ffmpeg=None):
         super().__init__()
@@ -8937,7 +8965,9 @@ class MainWindow(QtWidgets.QWidget):
         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
         self.adjustSize()
         frame_extra = self.frameGeometry().size() - self.geometry().size()
-        width, height = self.width(), self.height()
+        # room to spare, so a receiver's detail growing a little later (a line of RDS data,
+        # a logo) doesn't bring up the scroll bar
+        width, height = self.width(), self.height() + self.SPARE_H
         max_width, max_height = screen.width() - frame_extra.width(), screen.height() - frame_extra.height()
         if height > max_height:   # the receivers will scroll: leave room for the scroll bar
             width += self.scroll.verticalScrollBar().sizeHint().width()
