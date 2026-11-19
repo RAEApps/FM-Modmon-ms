@@ -179,5 +179,29 @@ ps_on_air('TES     ', False, age=1.0)
 check('PS not yet held long enough: not used either', p.title == '101.0 Hits FM', p.title)
 st.rds.snapshot = snap
 
+# ---- the audio sources a station doesn't carry: greyed, still selectable (as SCA, IBOC)
+def sources(p):
+    return {s['value']: s for s in p.web_state(None, None, 0)['sources']}
+
+
+p, st = panel(left=[(997, 0.8)], right=[(997, 0.8)], pilot=0.09, rds=0.04)
+settle(p, n=12)                    # long enough to find there is no SCA
+p.slot = 0
+p.iboc_scan = {st.freq_hz: None}   # the start-up scan saw no IBOC (it can miss weak sidebands)
+p.set_sources('nrsc5')
+src = sources(p)
+check('no SCA: greyed "(none)", still selectable', src['sca67']['dim'] and src['sca67']['enabled']
+      and src['sca67']['label'].endswith('(none)'), src['sca67'])
+check('no IBOC seen: greyed "(none seen)", still selectable', src['iboc0']['dim'] and src['iboc0']['enabled']
+      and src['iboc0']['label'] == 'IBOC MPS (none seen)', src['iboc0'])
+p.iboc_scan = {st.freq_hz: -20.0}
+p.set_sources('nrsc5')
+src = sources(p)
+check('IBOC seen: plain', not src['iboc0']['dim'] and src['iboc0']['label'] == 'IBOC MPS', src['iboc0'])
+p.set_sources(None)
+src = sources(p)
+check('no nrsc5: IBOC disabled', not src['iboc0']['enabled'] and 'nrsc5' in src['iboc0']['tip'], src['iboc0'])
+check('analog never greyed', not src['analog']['dim'] and src['analog']['enabled'], src['analog'])
+
 print('\nall state checks passed' if not failed else f'\n{len(failed)} FAILED: {failed}')
 sys.exit(1 if failed else 0)
