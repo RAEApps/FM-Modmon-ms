@@ -1,5 +1,5 @@
 """First-run setup: secrets, config sections, the wizard, the web login with a hash."""
-import importlib.util, json, os, sys, tempfile, urllib.request
+import importlib.util, json, os, socket, sys, tempfile, urllib.request
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.stdout.reconfigure(encoding='utf-8')
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py')
@@ -88,14 +88,21 @@ check('existing password kept when blank', w2.app_config().web_password_hash == 
 w2.web_pw_remove.setChecked(True); check('remove password', w2.app_config().web_password_hash == '')
 
 # --- web login against the hash
-web = m.WebView('127.0.0.1', 8799, None, h)
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+PORT = free_port()   # (not a fixed one: another program may hold it)
+web = m.WebView('127.0.0.1', PORT, None, h)
 def post(path, body, extra=None):
-    req = urllib.request.Request(f'http://127.0.0.1:8799{path}', data=json.dumps(body).encode(), method='POST',
+    req = urllib.request.Request(f'http://127.0.0.1:{PORT}{path}', data=json.dumps(body).encode(), method='POST',
                                  headers={'X-FM-Modmon': '1', **(extra or {})})
     try:
         with urllib.request.urlopen(req) as r: return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e: return e.code, json.loads(e.read())
-st = json.loads(urllib.request.urlopen('http://127.0.0.1:8799/state.json').read())
+st = json.loads(urllib.request.urlopen(f'http://127.0.0.1:{PORT}/state.json').read())
 check('web reports a password', st['access']['password'] is True)
 check('wrong web password 403', post('/api/login', {'password': 'nope'})[0] == 403)
 code, body = post('/api/login', {'password': 'correct horse'})
@@ -103,11 +110,11 @@ check('right web password signs in', code == 200 and body.get('token'))
 web.set_password_hash(m.hash_password('another one'))
 check('new password ends sessions', not web.sessions)
 try:  # (a second server on a port in use answered half the requests: this test was flaky beside another run)
-    m.WebView('127.0.0.1', 8799, None, h); taken = False
+    m.WebView('127.0.0.1', PORT, None, h); taken = False
 except OSError:
     taken = True
 check('web port already in use fails to open', taken)
-web2 = m.WebView('127.0.0.1', 8798, 'cli-pass', h)
+web2 = m.WebView('127.0.0.1', free_port(), 'cli-pass', h)
 check('--web-password wins over the hash', web2.check_password('cli-pass') and not web2.check_password('correct horse'))
 
 # --- settings dialog has the setup button
