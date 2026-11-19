@@ -62,7 +62,8 @@ the limit, carrier frequency out of tolerance), each limit adjustable per receiv
 
 Alarms go to the event log and optionally to email (SMTP) and webhooks (JSON, Slack,
 Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout, and warns of ADC
-overload (wideband peaks at full scale, which make every receiver's readings false).
+overload (wideband peaks at full scale, which make every receiver's readings false; the
+stations' alarms are held until it clears).
 
 > The monitor is a measurement aid, not a type-approved modulation monitor. Carrier
 > offset includes the SDR's own tuning error, and levels depend on gain calibration.

@@ -109,7 +109,8 @@ levels are comparable. "Recalibrate gain" repeats it on the running receivers
 While running, the wideband samples' peak is watched: when it reaches CAL_CLIP
 (the level calibration counts as overload) in ADC_OVERLOAD_N of
 ADC_OVERLOAD_WINDOW_S seconds, "SDR overload" is logged and notified and the
-gain chip turns red, until ADC_OVERLOAD_CLEAR_S pass without one.
+gain chip turns red, until ADC_OVERLOAD_CLEAR_S pass without one; meanwhile the
+stations' alarms are held (neither raised nor cleared), as every reading is false.
 
 Measurements (refreshed 10x per second):
   RDS
@@ -412,7 +413,9 @@ ASYM_WARN_PCT = 3.0        # ...flagged from here: programme is symmetric, a sta
 MPX_HOLD_DECAY_DB = 0.3    # the large MPX spectrum's peak hold falls this much per update (3 dB/s)
 PILOT_AM_WARN_PCT = 1.0    # pilot amplitude ripple shown amber from here (Inovonics' multipath sign; a confirmation,
                            # not a gate: noise and composite clipping that hits the pilot raise it too)
-IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor
+IBOC_MIN_DB = 6.0          # IBOC sidebands must be this far above the floor...
+IBOC_MIN_DBC = -30.0       # ...and this strong against the analog carrier (hybrid IBOC: -10 to -23
+                           # dBc); a strong analog station's own skirts reach -40 dBc there
 WEB_PORT = 8765            # web view; 0 turns it off
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fm-modmon-ms-web.html')
 # Browser audio formats, encoded by ffmpeg from 48 kHz 16-bit stereo; offered when
@@ -512,6 +515,8 @@ SCAN_CENTERS = (91.0e6, 97.0e6, 103.0e6, 109.0e6)  # even tenths: DC never on a 
 SCAN_HALF_WIDTH = 3.0e6    # use only the flat middle of each 8 MHz window
 SCAN_MIN_SNR = 10.0        # dB above the window's noise floor
 SCAN_SPLATTER_DB = 20.0    # ignore channels this far below a 200 kHz neighbour
+SCAN_HEADROOM_DB = 3.0     # a scan window's ADC peaks at most this far above CAL_PEAK_DBFS...
+SCAN_GAIN_STEPS = 5        # ...the gain backed off up to this many times to get there
 
 # SoapySDRPlay3 module (radioconda has none: the SDRplay API is closed source, so it is
 # built locally); used from ../soapysdrplay3-build/modules if there. SOAPY_SDR_PLUGIN_PATH overrides.
@@ -566,10 +571,32 @@ def band_scan(lna_state, if_gain_reduction, verbose=False):
     outside the receivers' channel filters, so it is detected here.
     """
     with _rsp1a_direct(lna_state, if_gain_reduction) as rsp:
-        return _scan(rsp, verbose)
+        return _scan(rsp, verbose, lna_state, if_gain_reduction)
 
 
-def _scan(rsp, verbose):
+def _scan_capture(rsp, lna, ifgr):
+    """One scan window's IQ, its gain backed off while the ADC clips: a strong
+    station in the window would otherwise clip it, and the clipping's spurs
+    raise the floor and hide the other stations there."""
+    rsp.set_gain(lna, ifgr)
+    for _ in range(SCAN_GAIN_STEPS):
+        rsp.capture(int(SAMP_RATE * 0.1))                 # let the tuner (or gain) settle
+        x = rsp.capture(int(SAMP_RATE * 0.25))
+        mag = np.abs(x)
+        peak_db = 20 * math.log10(float(np.percentile(mag, 99.99)) + 1e-12)
+        if np.max(mag) < CAL_CLIP and peak_db <= CAL_PEAK_DBFS + SCAN_HEADROOM_DB:
+            break
+        if ifgr < 59:                                     # IF gain first, then the LNA
+            ifgr = int(min(59, ifgr + max(6, math.ceil(peak_db - CAL_PEAK_DBFS))))
+        elif lna < 9:
+            lna = min(9, lna + 2)
+        else:
+            break
+        rsp.set_gain(lna, ifgr)
+    return x
+
+
+def _scan(rsp, verbose, lna=CAL_DEFAULT[0], ifgr=CAL_DEFAULT[1]):
     nfft = 4096
     win = np.hanning(nfft).astype(np.float32)
     bin_hz = SAMP_RATE / nfft
@@ -578,8 +605,7 @@ def _scan(rsp, verbose):
     an_half = int(100e3 / bin_hz)
     for center in SCAN_CENTERS:
         rsp.tune(center)
-        rsp.capture(int(SAMP_RATE * 0.1))                 # let the tuner settle
-        x = rsp.capture(int(SAMP_RATE * 0.25))
+        x = _scan_capture(rsp, lna, ifgr)
         frames = x[:len(x) // nfft * nfft].reshape(-1, nfft) * win
         psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(frames, axis=1)) ** 2, axis=0))
         psd_db = 10 * np.log10(psd + 1e-20)
@@ -609,7 +635,7 @@ def _scan(rsp, verbose):
         _, floor, an, lsb_db, usb_db, sb = power[ch]
         if stations & {ch - 2, ch + 2}:
             iboc_scan[f] = 'adjacent'
-        elif min(lsb_db, usb_db) - floor >= IBOC_MIN_DB:
+        elif min(lsb_db, usb_db) - floor >= IBOC_MIN_DB and 10 * math.log10(sb / an) >= IBOC_MIN_DBC:
             iboc_scan[f] = 10 * math.log10(sb / an)
         else:
             iboc_scan[f] = None
@@ -731,7 +757,10 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
         last = [t[4] for t in tried[-3:]]
         if len(good) >= 4 and len(last) == 3 and max(last) - min(last) < 1.0:
             break                                # S/N has levelled off: antenna noise dominates
-    good = [t for t in tried if not t[3]] or tried
+    # Prefer states whose peaks reached CAL_PEAK_DBFS: with a strong antenna the most
+    # sensitive states can't, even at the most IF gain reduction, and run short of headroom.
+    good = ([t for t in tried if not t[3] and t[2] <= CAL_PEAK_DBFS + 1.5]
+            or [t for t in tried if not t[3]] or tried)
     best = max(t[4] for t in good)
     lna, ifgr, peak_db, _, snr, worst = next(t for t in good if t[4] >= best - CAL_TOLERANCE_DB)
     report = (f'LNA {lna} \u00b7 IFGR {ifgr} dB: stations {snr:.0f} dB over the floor on average '
@@ -5353,8 +5382,11 @@ class StationPanel(QtCore.QObject):
 
     @property
     def title(self):
-        ps = self.static_ps() or self.station.rds.snapshot()['ps'].strip()
-        return f'{self.station.freq_hz / 1e6:.1f}' + (f' {ps}' if ps else '')
+        """Frequency and name, for the event log, notifications and window titles:
+        the PS once it is known to be static, else the receiver's own name. Never
+        the PS on air now, which on a scrolling PS is a word of RadioText."""
+        name = self.static_ps() or self.settings.name.strip()
+        return f'{self.station.freq_hz / 1e6:.1f}' + (f' {name}' if name else '')
 
     def set_fit(self, other_freqs):
         """Grey out stations that can't share the SDR window with other_freqs."""
@@ -5376,15 +5408,17 @@ class StationPanel(QtCore.QObject):
         self.source.setCurrentIndex(self.source.findData(key))
 
     def set_sources(self, nrsc5):
-        """Grey out IBOC where it can't play: no nrsc5, or no IBOC found on this station."""
+        """Grey out IBOC where it can't play (no nrsc5). A station the start-up scan
+        saw no IBOC on can still be tried: the scan's quarter-second look can miss
+        weak sidebands (an HD station seen at -14 dBc in one scan was missed in the next)."""
         scan = self.iboc_scan.get(self.station.freq_hz, 'unknown')
-        why = ('nrsc5 not found (see --nrsc5)' if not nrsc5 else
-               'The start-up scan found no IBOC on this station' if scan is None else '')
+        why = 'nrsc5 not found (see --nrsc5)' if not nrsc5 else ''
+        tip = why or ('The start-up scan saw no IBOC on this station; it may still have it' if scan is None else '')
         for i, (key, _) in enumerate(AUDIO_SOURCES):
             if key.startswith('iboc'):
                 item = self.source.model().item(i)
                 item.setEnabled(not why)
-                item.setToolTip(why)
+                item.setToolTip(tip)
         self._web_lists = None
         return not why
 
@@ -8458,6 +8492,8 @@ class MainWindow(QtWidgets.QWidget):
                 self.log(f'RDS feed TCP {p.feed.port} (receiver {p.slot + 1}): '
                          f'{"client connected" if n > was else "client disconnected"}, {n} now')
                 self._feed_clients[p.slot] = n
+            if self.overload.active:
+                p.alarms.hold()   # the SDR's overload falsifies every reading: not the stations' fault
             for desc, raised, detail in p.refresh():
                 self._alarm_event(p, desc, raised, detail)
             alert = p.station.iboc.status['alert'] if p.station.iboc else None
