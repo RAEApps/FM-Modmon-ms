@@ -136,9 +136,30 @@ for name, wanted, found, required in (('nothing attached', 'auto', [], False),
 
 # The one found is the one opened: its serial goes into the device arguments.
 rm.use_sdr('b210', '301234')
-check('the serial found is opened', rm.SDR.device.endswith(',serial=301234') and rm.SAMP_RATE == 30.72e6,
+check('the serial found is opened', ',serial=301234' in rm.SDR.device and rm.SAMP_RATE == 30.72e6,
       rm.SDR.device)
 rm.use_sdr('rsp1a')
+
+# The B210's firmware and FPGA go to UHD as explicit paths when they are there; else UHD searches.
+import tempfile  # noqa: E402
+
+saved_dir = os.environ.get('UHD_IMAGES_DIR')
+with tempfile.TemporaryDirectory() as folder:
+    os.environ['UHD_IMAGES_DIR'] = folder
+    check('images: none there, so no paths given', rm.uhd_image_args() == '')
+    for name in rm.UHD_IMAGES:
+        open(os.path.join(folder, name), 'wb').close()
+    args = rm.uhd_image_args()
+    check('images: both there, both paths given', args == f',fw={os.path.join(folder, rm.UHD_IMAGES[0])}'
+                                                         f',fpga={os.path.join(folder, rm.UHD_IMAGES[1])}', args)
+    rm.use_sdr('b210', '301234')
+    check('images: the B210 is opened with them', rm.SDR.device.endswith(args), rm.SDR.device)
+    rm.use_sdr('rsp1a')
+    check('images: not for other SDRs', 'fw=' not in rm.SDR.device)
+if saved_dir is None:
+    del os.environ['UHD_IMAGES_DIR']
+else:
+    os.environ['UHD_IMAGES_DIR'] = saved_dir
 check('...and not kept for the next one', 'serial' not in rm.SDR.device)
 
 # Automatic: the options wait for the detected SDR; --lna on an RTL-SDR found is refused then.
