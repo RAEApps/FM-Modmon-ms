@@ -23,9 +23,11 @@ channel filter, stereo WBFM demodulator, RDS decoder and measurement blocks,
 and its own "radio" panel. Each panel has a Play button; one station plays
 at a time (stereo, 75 us de-emphasis; falls back to mono without a pilot).
 
-Other SDRs (--sdr, or chosen in Setup; SDRS): the RSP1B, as the RSP1A; an
-RTL-SDR at 2.304 MS/s (stations within 1.4 MHz; --gain in dB); an Ettus B210
-at 30.72 MS/s (the whole band at once; --gain in dB). Every station is
+Other SDRs (SDRS): the RSP1B, as the RSP1A; an RTL-SDR at 2.304 MS/s
+(stations within 1.4 MHz; --gain in dB); an Ettus B210 at 30.72 MS/s (the
+whole band at once; --gain in dB). At each start the SDRs plugged in are
+found (find_sdrs) and the one with the widest window is used, unless Setup
+prefers one that is plugged in or --sdr names one. Every station is
 decimated to the same 384 kS/s, so the measurements don't depend on the SDR.
 
 Run with radioconda's Python:
@@ -309,7 +311,7 @@ import urllib.request
 import warnings
 import xml.etree.ElementTree as ET
 from collections import Counter, OrderedDict, deque
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import NamedTuple
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
@@ -616,10 +618,13 @@ SDRS = {p.key: p for p in (
 )}
 
 
-def use_sdr(key):
-    """Make `key` (one of SDRS) the SDR in use: its rate and window set the module's."""
+def use_sdr(key, serial=''):
+    """Make `key` (one of SDRS) the SDR in use: its rate and window set the module's.
+    serial: open that one (as find_sdrs() reported it), not the first of its kind."""
     global SDR, SAMP_RATE, CHAN_DECIM, MAX_SPAN, EDGE_HZ, SRC_BUFFER, IBOC_DECIM, SCAN_CENTERS, SCAN_HALF_WIDTH
     SDR = SDRS[key]
+    if serial:
+        SDR = replace(SDR, device=f'{SDR.device},serial={serial}')
     SAMP_RATE = SDR.rate
     CHAN_DECIM = round(SAMP_RATE / QUAD_RATE)
     assert CHAN_DECIM * QUAD_RATE == SAMP_RATE, f'{SDR.name}: rate must be a multiple of {QUAD_RATE:g}'
@@ -631,6 +636,91 @@ def use_sdr(key):
 
 
 use_sdr('rsp1a')
+
+
+class SdrNotFound(RuntimeError):
+    """No SDR the monitor can use is attached (or not the one asked for)."""
+
+
+def _profile_for(found):
+    """The SDRS key for one SoapySDR enumerate() result, or None if it isn't one of them."""
+    driver = found.get('driver')
+    if driver == 'uhd':
+        return 'b210' if found.get('type') == 'b200' else None   # (a B200 too: the same AD9361)
+    if driver == 'sdrplay':    # the label names the model: 'SDRplay Dev0 RSP1A 1801234567'
+        label = found.get('label', '')
+        return 'rsp1b' if 'RSP1B' in label else 'rsp1a' if 'RSP1A' in label else None  # (other RSPs: other gains)
+    if driver == 'rtlsdr':
+        return 'rtlsdr'
+    return None
+
+
+SDRPLAY_SERVICE = 'SDRplayAPIService'
+SDRPLAY_SERVICE_WAIT_S = 15   # at start-up, wait this long for the service to be running (Windows restarts it)
+
+
+def sdrplay_service_state(wait_s=0.0):
+    """'running', 'stopped' (or starting) or None (not installed, not Windows) for the
+    SDRplay API service, through which every RSP is reached. It can crash when an RSP is
+    closed and reopened quickly; set up as the installer does, Windows restarts it within
+    seconds, so wait_s > 0 waits that long for it to be running again."""
+    if os.name != 'nt':
+        return None
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            out = subprocess.run(['sc.exe', 'query', SDRPLAY_SERVICE], capture_output=True, text=True, timeout=5,
+                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        m = re.search(r'STATE\s*:\s*(\d+)', out.stdout)
+        if not m:
+            return None                       # (1060: not installed)
+        if m.group(1) == '4':                 # SERVICE_RUNNING
+            return 'running'
+        if time.monotonic() >= deadline:
+            return 'stopped'
+        time.sleep(0.5)
+
+
+def find_sdrs():
+    """The SDRs attached that the monitor can use, widest window first:
+    [(SDRS key, serial, label), ...]. Takes a few seconds (a B210's firmware loads)."""
+    _soapy_env()
+    import SoapySDR
+    out = []
+    for driver in ('uhd', 'sdrplay', 'rtlsdr'):
+        try:
+            results = SoapySDR.Device.enumerate(f'driver={driver}')
+        except Exception:  # noqa: BLE001 - a driver that can't look (no service, no module) finds nothing
+            continue
+        for found in results:
+            found = dict(found)
+            key = _profile_for(found)
+            if key:
+                out.append((key, found.get('serial', ''), found.get('label') or SDRS[key].name))
+    return sorted(out, key=lambda f: -SDRS[f[0]].span)
+
+
+def choose_sdr(wanted, found, required=False):
+    """(key, serial, label, note): `wanted` ('auto', or an SDRS key, as Setup or
+    --sdr chose) if it is in found (find_sdrs()), else the attached SDR with the
+    widest window, with a note saying so; with required (--sdr), only `wanted`.
+    Raises SdrNotFound when there is none to use."""
+    for key, serial, label in found:
+        if wanted in ('auto', key):
+            return key, serial, label, ''
+    if not found:
+        raise SdrNotFound(f'No SDR found. {APP_NAME} looks for a B210, an RSP1A or RSP1B, and an RTL-SDR: '
+                          'is one plugged in, with its driver installed (for an RSP, the SDRplay API '
+                          'service running), and no other program using it?')
+    names = ', '.join(label for _, _, label in found)
+    if required:
+        raise SdrNotFound(f'The {SDRS[wanted].name} (--sdr {wanted}) isn\'t attached. Found: {names}'
+                          + ('. (An RSP is only found while the SDRplay API service runs: '
+                             'Services > SDRplay API Service > Start.)' if wanted.startswith('rsp') else ''))
+    key, serial, label = found[0]
+    return key, serial, label, f'the {SDRS[wanted].name} chosen in Setup isn\'t attached'
 
 
 def _soapy_env():
@@ -7560,6 +7650,12 @@ class SetupWizard(QtWidgets.QWizard):
                            'station, so how far apart they can be depends on the SDR.')
         self.sdr_buttons = {}
         group = QtWidgets.QButtonGroup(page)
+        auto = QtWidgets.QRadioButton('Automatic — whichever is plugged in at the start '
+                                      '(with more than one, the widest window)')
+        auto.setChecked(self.cfg.sdr == 'auto')
+        group.addButton(auto)
+        page.body.addWidget(auto)
+        self.sdr_buttons['auto'] = auto
         for key, p in SDRS.items():
             note = self.SDR_NOTES.get(key, 'stations up to {span} apart').format(span=f'{p.span / 1e6:g} MHz')
             button = QtWidgets.QRadioButton(f'{p.name} — {p.rate / 1e6:g} MS/s, {note}')
@@ -7568,7 +7664,8 @@ class SetupWizard(QtWidgets.QWizard):
             page.body.addWidget(button)
             self.sdr_buttons[key] = button
         page.body.addSpacing(12)
-        page.body.addWidget(self._note('Receivers that don’t fit a narrower SDR’s window aren’t opened. '
+        page.body.addWidget(self._note('A chosen SDR is used when it is plugged in; otherwise whichever is. '
+                                       'Receivers that don’t fit a narrower SDR’s window aren’t opened. '
                                        'Changed here, the SDR changes at the next start; --sdr overrides it.'))
         page.body.addStretch(1)
         return page
@@ -8035,7 +8132,7 @@ class AppConfig:
     Command-line options, where given, take precedence."""
     setup_done: bool = False
     country: str = 'CA'                # ISO country: ISED rules for CA, else FCC; RadioDNS
-    sdr: str = 'rsp1a'                 # SDRS key
+    sdr: str = 'auto'                  # 'auto' (whichever is attached) or an SDRS key
     web_port: int = WEB_PORT           # 0 = no web version
     web_bind: str = '0.0.0.0'          # '127.0.0.1' = this PC only
     web_password_hash: str = ''        # hash_password(); '' = controls only in a browser on this PC
@@ -8049,8 +8146,8 @@ class AppConfig:
         out.country = str(out.country or '').strip().upper()
         if not re.fullmatch(r'[A-Z]{2}', out.country):
             out.country = 'CA'
-        if out.sdr not in SDRS:
-            out.sdr = 'rsp1a'
+        if out.sdr != 'auto' and out.sdr not in SDRS:
+            out.sdr = 'auto'
         try:
             out.web_port = int(out.web_port)
         except (TypeError, ValueError):
@@ -9596,10 +9693,11 @@ def build_parser(width=100):
                     help='open the setup (as at the first start) before starting')
     ap.add_argument('--no-scan', action='store_true',
                     help='skip the band scan; dropdowns then list every channel')
-    ap.add_argument('--sdr', choices=list(SDRS),
-                    help='the SDR: ' + ', '.join(f'{k} ({p.name}, {p.rate / 1e6:g} MS/s, stations within '
-                                                 f'{p.span / 1e6:g} MHz)' for k, p in SDRS.items())
-                         + ' (default: as set in Setup, else rsp1a)')
+    ap.add_argument('--sdr', choices=['auto'] + list(SDRS),
+                    help='the SDR: auto (whichever is attached; with several, the widest window), or '
+                         + ', '.join(f'{k} ({p.name}, {p.rate / 1e6:g} MS/s, stations within '
+                                     f'{p.span / 1e6:g} MHz)' for k, p in SDRS.items())
+                         + ', which must then be attached (default: as set in Setup, else auto)')
     sdrplay = SDRS['rsp1a']
     ap.add_argument('--lna', type=int, help='SDRplay LNA state 0-9, higher = less gain (default: calibrated at '
                                             f'start-up; {sdrplay.default_gain[0]} if only --ifgr is given)')
@@ -9634,6 +9732,7 @@ def parse_args(argv=None):
     ap = build_parser()
     args = ap.parse_args(argv)
     args.gain_manual = args.lna is not None or args.ifgr is not None or args.gain is not None
+    args.gain_db = args.gain   # --gain as given; args.gain becomes the SDR's gain tuple (configure_sdr)
     if args.freqs and len(args.freqs) > MAX_RECEIVERS:
         ap.error(f'at most {MAX_RECEIVERS} receivers')
     return args
@@ -9676,22 +9775,58 @@ def resolve_args(args, app):
     args.web_port = app.web_port if args.web_port is None else args.web_port
     args.web_bind = args.web_bind or app.web_bind
     args.web_password_hash = app.web_password_hash
-    args.sdr = args.sdr or app.sdr
-    use_sdr(args.sdr)
-    ap = build_parser()
+    args.sdr_required = bool(args.sdr)   # --sdr names one that must be attached; Setup's is a preference
+    args.sdr = args.sdr or app.sdr       # 'auto' or an SDRS key; main() looks for what is attached
+    if args.sdr != 'auto':
+        configure_sdr(args, args.sdr)
+    return args
+
+
+def configure_sdr(args, key, serial='', error=None):
+    """Switch to SDR `key` (serial: the one attached) and fit the gain options and
+    --freqs to it: args.gain becomes its gain tuple. error(text) reports options
+    it can't take (default: the command-line error, which exits)."""
+    error = error or build_parser().error
+    use_sdr(key, serial)
     sdrplay = len(SDR.stages) == 2
-    if args.gain is not None and sdrplay:
-        ap.error(f'the {SDR.name} takes --lna and --ifgr, not --gain')
+    if args.gain_db is not None and sdrplay:
+        error(f'the {SDR.name} takes --lna and --ifgr, not --gain')
     if (args.lna is not None or args.ifgr is not None) and not sdrplay:
-        ap.error(f'the {SDR.name} takes --gain, not --lna or --ifgr')
+        error(f'the {SDR.name} takes --gain, not --lna or --ifgr')
     if sdrplay:
         args.gain = (SDR.default_gain[0] if args.lna is None else args.lna,
                      SDR.default_gain[1] if args.ifgr is None else args.ifgr)
     else:
-        args.gain = SDR.default_gain if args.gain is None else (args.gain,)
+        args.gain = SDR.default_gain if args.gain_db is None else (args.gain_db,)
     if args.freqs and round(max(args.freqs) - min(args.freqs), 6) > MAX_SPAN / 1e6:
-        ap.error(f'stations must lie within {MAX_SPAN / 1e6:.1f} MHz of each other on the {SDR.name}')
-    return args
+        error(f'stations must lie within {MAX_SPAN / 1e6:.1f} MHz of each other on the {SDR.name}')
+
+
+def detect_sdr(args):
+    """Look for the SDRs attached, switch to the one to use (configure_sdr) and
+    return a line for the log saying which, and why."""
+    service = sdrplay_service_state(SDRPLAY_SERVICE_WAIT_S)
+    found = find_sdrs()
+    if service == 'stopped' and not any(k.startswith('rsp') for k, _, _ in found):
+        found_note = (f'the SDRplay API service didn\'t start within {SDRPLAY_SERVICE_WAIT_S} s, '
+                      'so no RSP could be found')
+        print('SDR:', found_note, flush=True)
+    else:
+        found_note = ''
+    try:
+        key, serial, label, note = choose_sdr(args.sdr, found, args.sdr_required)
+    except SdrNotFound as e:
+        raise SdrNotFound(f'{e} ({found_note})' if found_note else str(e)) from None
+
+    def fail(text):
+        raise ValueError(text)
+
+    configure_sdr(args, key, serial, fail)
+    others = [lbl for k, s, lbl in found if (k, s) != (key, serial)]
+    how = ('--sdr' if args.sdr_required else note if note else
+           'found automatically' if args.sdr == 'auto' else 'as set in Setup')
+    return (f'{label} ({how})' + (f'; also attached: {", ".join(others)}' if others else '')
+            + (f'; {found_note}' if found_note else ''))
 
 
 def first_run_setup(args):
@@ -9770,10 +9905,15 @@ def main():
     splash.show()
     app.processEvents()
     try:
+        splash.showMessage('Looking for an SDR…\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
+                           QtGui.QColor('#9aa0a6'))
+        app.processEvents()
+        sdr_report = detect_sdr(args)
+        print('SDR:', sdr_report, flush=True)
         saved = {} if args.freqs else load_config(args.config)
         if not args.no_scan:
-            splash.showMessage('Scanning the FM band…\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
-                               QtGui.QColor('#9aa0a6'))
+            splash.showMessage(f'Scanning the FM band on the {SDR.name}…\n',
+                               QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter, QtGui.QColor('#9aa0a6'))
             app.processEvents()
         stations, receivers, iboc_scan = choose_stations(args, saved)
         cal_report = None
@@ -9798,9 +9938,11 @@ def main():
     except Exception as e:  # noqa: BLE001 - anything that stops start-up is shown, then the app exits
         splash.close()
         hint = ('\n\n' + SDR.hint.format(name=SDR.name)
-                if re.search(r'rsp|sdrplay|rtl|uhd|soapy|device', str(e), re.I) else '')
+                if not isinstance(e, SdrNotFound) and re.search(r'rsp|sdrplay|rtl|uhd|soapy|device', str(e), re.I)
+                else '')
         QtWidgets.QMessageBox.critical(None, APP_NAME, f'{APP_NAME} could not start:\n\n{e}{hint}')
         sys.exit(1)
+    win.log(f'SDR: {sdr_report}')
     if cal_report:
         win.log(f'gain: calibrated at start-up, {cal_report}')
     win.args = args

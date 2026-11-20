@@ -146,6 +146,11 @@ function Install-Sdrplay {
     # The monitor reaches the RSP1A through this service: run it now and at boot.
     $out = & sc.exe config SDRplayAPIService start= auto
     if ($LASTEXITCODE) { Write-Warning "Couldn't set the SDRplay API service to start at boot (sc.exe $LASTEXITCODE): $out" }
+    # It can crash when an RSP is closed and reopened quickly (API 3.15: access violation in
+    # sdrplay_apiService.exe); Windows then leaves it stopped. Have Windows restart it instead,
+    # every time (the failure count resets after a day), so the monitor never needs a hand.
+    $out = & sc.exe failure SDRplayAPIService reset= 86400 actions= restart/2000/restart/2000/restart/5000
+    if ($LASTEXITCODE) { Write-Warning "Couldn't set the SDRplay API service to restart after a crash (sc.exe $LASTEXITCODE): $out" }
     $out = & sc.exe start SDRplayAPIService
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 1056) {   # 1056: already running
         Write-Warning "The SDRplay API service didn't start (sc.exe $LASTEXITCODE): $out"

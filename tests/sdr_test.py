@@ -92,7 +92,8 @@ check('B210: the band\'s two end channels open together', max(abs(88.1e6 - c), a
       f'(centre {c / 1e6:.3f} MHz)')
 check('B210: the scan is one window', len(rm.SCAN_CENTERS) == 1)
 check('settings keep the SDR', rm.AppConfig.from_dict(rm.AppConfig(sdr='b210').to_dict()).sdr == 'b210')
-check('an unknown SDR in the settings falls back to the RSP1A', rm.AppConfig.from_dict({'sdr': 'nope'}).sdr == 'rsp1a')
+check('an unknown SDR in the settings falls back to automatic', rm.AppConfig.from_dict({'sdr': 'nope'}).sdr == 'auto')
+check('automatic by default', rm.AppConfig().sdr == 'auto')
 
 # Saved receivers that don't fit a narrower SDR's window: the first that fit open.
 rm.use_sdr('rtlsdr')
@@ -100,6 +101,57 @@ a = rm.parse_args(['--no-scan'])
 a.sdr, a.gain = 'rtlsdr', (30,)
 _, receivers, _ = rm.choose_stations(a, {0: (94.5e6, None), 1: (100.9e6, None), 2: (94.9e6, None)})
 check('RTL-SDR: saved receivers that don\'t fit are left closed', receivers == {0: 94.5e6, 2: 94.9e6}, receivers)
+rm.use_sdr('rsp1a')
+
+# Detection: what each SoapySDR driver's enumerate() reports, and which profile that is.
+B210 = {'driver': 'uhd', 'label': 'B210 301234', 'name': 'MyB210', 'product': 'B210', 'serial': '301234', 'type': 'b200'}
+RSP1A = {'driver': 'sdrplay', 'label': 'SDRplay Dev0 RSP1A 1801234567', 'serial': '1801234567'}
+RSP1B = {'driver': 'sdrplay', 'label': 'SDRplay Dev0 RSP1B 2304012345', 'serial': '2304012345'}
+RSPDX = {'driver': 'sdrplay', 'label': 'SDRplay Dev0 RSPdx 2201012345', 'serial': '2201012345'}
+RTL = {'driver': 'rtlsdr', 'label': 'Generic RTL2832U OEM :: 00000001', 'serial': '00000001',
+       'tuner': 'Rafael Micro R820T'}
+X310 = {'driver': 'uhd', 'label': 'X310', 'type': 'x300', 'serial': '31AB'}
+for found, key in ((B210, 'b210'), (RSP1A, 'rsp1a'), (RSP1B, 'rsp1b'), (RTL, 'rtlsdr'), (RSPDX, None), (X310, None)):
+    check(f'detect: {found["label"]} -> {key}', rm._profile_for(found) == key, rm._profile_for(found))
+
+
+def found_list(*records):
+    return sorted([(rm._profile_for(r), r['serial'], r['label']) for r in records], key=lambda f: -rm.SDRS[f[0]].span)
+
+
+both = found_list(RSP1A, B210, RTL)
+check('detect: the widest window first', [k for k, _, _ in both] == ['b210', 'rsp1a', 'rtlsdr'], both)
+check('auto: the widest attached', rm.choose_sdr('auto', both)[:2] == ('b210', '301234'))
+check('auto: an RTL-SDR alone', rm.choose_sdr('auto', found_list(RTL))[0] == 'rtlsdr')
+check('Setup\'s choice when attached', rm.choose_sdr('rsp1a', both)[:2] == ('rsp1a', '1801234567'))
+key, _, _, note = rm.choose_sdr('rsp1b', found_list(RTL))
+check('Setup\'s choice not attached: whichever is, with a note', key == 'rtlsdr' and 'RSP1B' in note, note)
+for name, wanted, found, required in (('nothing attached', 'auto', [], False),
+                                      ('--sdr not attached', 'b210', found_list(RTL), True)):
+    try:
+        rm.choose_sdr(wanted, found, required)
+        check(f'{name}: refused', False)
+    except rm.SdrNotFound as e:
+        check(f'{name}: refused', True, f'({e})')
+
+# The one found is the one opened: its serial goes into the device arguments.
+rm.use_sdr('b210', '301234')
+check('the serial found is opened', rm.SDR.device.endswith(',serial=301234') and rm.SAMP_RATE == 30.72e6,
+      rm.SDR.device)
+rm.use_sdr('rsp1a')
+check('...and not kept for the next one', 'serial' not in rm.SDR.device)
+
+# Automatic: the options wait for the detected SDR; --lna on an RTL-SDR found is refused then.
+a = rm.resolve_args(rm.parse_args(['--no-scan']), rm.AppConfig())
+check('auto: no SDR chosen before detection', a.sdr == 'auto' and a.gain is None and not a.sdr_required)
+rm.configure_sdr(a, 'rtlsdr', '00000001')
+check('auto: the RTL-SDR found sets the window and gain', (rm.MAX_SPAN, a.gain) == (1.4e6, (30,)))
+a = rm.resolve_args(rm.parse_args(['--no-scan', '--lna', '2']), rm.AppConfig())
+try:
+    rm.configure_sdr(a, 'rtlsdr', '', lambda text: (_ for _ in ()).throw(ValueError(text)))
+    check('auto: --lna on the RTL-SDR found refused', False)
+except ValueError as e:
+    check('auto: --lna on the RTL-SDR found refused', True, f'({e})')
 rm.use_sdr('rsp1a')
 
 print('\nall ok' if not bad else f'\n{len(bad)} WRONG')
