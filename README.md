@@ -203,10 +203,11 @@ Receivers and settings are saved to `fm-modmon-ms_config.json`; events are logge
 
 At each start the monitor looks for the SDRs plugged in and uses the one it finds, its window,
 gain controls and name in the window: with more than one, the widest window (B210, then
-RSP1A / RSP1B, then RTL-SDR). The event log says which it found. Setup can name a preferred SDR,
-used when it's plugged in; `--sdr` names one that must be. All the stations come from one SDR
-window, so the SDR's sample rate sets how far apart they can be. Every station is filtered down
-to the same 384 kS/s, so the measurements are the same whichever SDR it is.
+RSP1A / RSP1B, then RTL-SDR). The event log says which it found. *Settings → SDR* (or setup)
+can name a preferred SDR, used when it's plugged in, from the next start; `--sdr` names one that
+must be. All the stations come from one SDR window, so the SDR's sample rate sets how far apart
+they can be. Every station is filtered down to the same 384 kS/s, so the measurements are the
+same whichever SDR it is.
 
 | SDR | `--sdr` | Rate | Stations within | Gain | Needs |
 |---|---|---|---|---|---|

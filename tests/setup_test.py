@@ -126,6 +126,33 @@ QtCore.QTimer.singleShot(0, lambda: [b for b in dlg.findChildren(QtWidgets.QPush
 check('Run setup again returns RUN_SETUP', dlg.exec_() == m.AppSettingsDialog.RUN_SETUP)
 dlg.show(); app.processEvents(); dlg.grab().save(os.path.join(OUT, 'settings_dialog.png'))
 
+# --- settings dialog: the SDR to prefer
+dlg = m.AppSettingsDialog(None, m.NotifySettings(), notifier)
+check('settings: SDR automatic by default', dlg.sdr() == 'auto')
+check('settings: every SDR offered', [dlg.sdr_box.itemData(i) for i in range(dlg.sdr_box.count())]
+      == ['auto'] + list(m.SDRS))
+dlg = m.AppSettingsDialog(None, m.NotifySettings(), notifier, 'rsp1a', 'B210 (found automatically)')
+check('settings: the saved SDR shown', dlg.sdr() == 'rsp1a')
+check('settings: what is in use now shown',
+      any('In use now: B210' in lbl.text() for lbl in dlg.findChildren(QtWidgets.QLabel)))
+dlg.sdr_box.setCurrentIndex(dlg.sdr_box.findData('b210'))
+check('settings: SDR chosen', dlg.sdr() == 'b210')
+
+
+class Win:   # the parts of MainWindow that _apply_sdr uses
+    app_config, saved, logged = None, 0, []
+    save = lambda self: setattr(self, 'saved', self.saved + 1)  # noqa: E731
+    log = lambda self, text: self.logged.append(text)  # noqa: E731
+
+
+win = Win()
+win.app_config = m.AppConfig(setup_done=True, country='US')
+m.MainWindow._apply_sdr(win, 'rtlsdr')
+check('settings: the SDR saved, the rest kept', (win.app_config.sdr, win.app_config.country, win.saved)
+      == ('rtlsdr', 'US', 1) and 'next start' in win.logged[-1])
+m.MainWindow._apply_sdr(win, 'rtlsdr')
+check('settings: unchanged SDR not saved again', win.saved == 1)
+
 print('\nscreenshots:', *shots)
 print('\nall ok' if not bad else f'\n{len(bad)} WRONG')
 sys.exit(1 if bad else 0)
