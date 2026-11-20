@@ -104,8 +104,8 @@ check('RTL-SDR: saved receivers that don\'t fit are left closed', receivers == {
 rm.use_sdr('rsp1a')
 
 # Detection: what each SoapySDR driver's enumerate() reports, and which profile that is.
-B210 = {'driver': 'uhd', 'label': 'B210 209012', 'name': 'MyB210', 'product': 'B210', 'serial': '209012', 'type': 'b200'}
-RSP1A = {'driver': 'sdrplay', 'label': 'SDRplay Dev0 RSP1A 1807078093', 'serial': '1807078093'}
+B210 = {'driver': 'uhd', 'label': 'B210 301234', 'name': 'MyB210', 'product': 'B210', 'serial': '301234', 'type': 'b200'}
+RSP1A = {'driver': 'sdrplay', 'label': 'SDRplay Dev0 RSP1A 1801234567', 'serial': '1801234567'}
 RSP1B = {'driver': 'sdrplay', 'label': 'SDRplay Dev0 RSP1B 2304012345', 'serial': '2304012345'}
 RSPDX = {'driver': 'sdrplay', 'label': 'SDRplay Dev0 RSPdx 2201012345', 'serial': '2201012345'}
 RTL = {'driver': 'rtlsdr', 'label': 'Generic RTL2832U OEM :: 00000001', 'serial': '00000001',
@@ -121,9 +121,9 @@ def found_list(*records):
 
 both = found_list(RSP1A, B210, RTL)
 check('detect: the widest window first', [k for k, _, _ in both] == ['b210', 'rsp1a', 'rtlsdr'], both)
-check('auto: the widest attached', rm.choose_sdr('auto', both)[:2] == ('b210', '209012'))
+check('auto: the widest attached', rm.choose_sdr('auto', both)[:2] == ('b210', '301234'))
 check('auto: an RTL-SDR alone', rm.choose_sdr('auto', found_list(RTL))[0] == 'rtlsdr')
-check('Setup\'s choice when attached', rm.choose_sdr('rsp1a', both)[:2] == ('rsp1a', '1807078093'))
+check('Setup\'s choice when attached', rm.choose_sdr('rsp1a', both)[:2] == ('rsp1a', '1801234567'))
 key, _, _, note = rm.choose_sdr('rsp1b', found_list(RTL))
 check('Setup\'s choice not attached: whichever is, with a note', key == 'rtlsdr' and 'RSP1B' in note, note)
 for name, wanted, found, required in (('nothing attached', 'auto', [], False),
@@ -135,8 +135,8 @@ for name, wanted, found, required in (('nothing attached', 'auto', [], False),
         check(f'{name}: refused', True, f'({e})')
 
 # The one found is the one opened: its serial goes into the device arguments.
-rm.use_sdr('b210', '209012')
-check('the serial found is opened', rm.SDR.device.endswith(',serial=209012') and rm.SAMP_RATE == 30.72e6,
+rm.use_sdr('b210', '301234')
+check('the serial found is opened', rm.SDR.device.endswith(',serial=301234') and rm.SAMP_RATE == 30.72e6,
       rm.SDR.device)
 rm.use_sdr('rsp1a')
 check('...and not kept for the next one', 'serial' not in rm.SDR.device)

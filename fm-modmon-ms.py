@@ -647,7 +647,7 @@ def _profile_for(found):
     driver = found.get('driver')
     if driver == 'uhd':
         return 'b210' if found.get('type') == 'b200' else None   # (a B200 too: the same AD9361)
-    if driver == 'sdrplay':    # the label names the model: 'SDRplay Dev0 RSP1A 1807078093'
+    if driver == 'sdrplay':    # the label names the model: 'SDRplay Dev0 RSP1A 1801234567'
         label = found.get('label', '')
         return 'rsp1b' if 'RSP1B' in label else 'rsp1a' if 'RSP1A' in label else None  # (other RSPs: other gains)
     if driver == 'rtlsdr':
