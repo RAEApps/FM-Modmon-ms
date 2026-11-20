@@ -205,9 +205,13 @@ At each start the monitor looks for the SDRs plugged in and uses the one it find
 gain controls and name in the window: with more than one, the widest window (B210, then
 RSP1A / RSP1B, then RTL-SDR). The event log says which it found. *Settings → SDR* (or setup)
 can name a preferred SDR, used when it's plugged in, from the next start; `--sdr` names one that
-must be. All the stations come from one SDR window, so the SDR's sample rate sets how far apart
-they can be. Every station is filtered down to the same 384 kS/s, so the measurements are the
-same whichever SDR it is.
+must be. To change SDR while running, click the SDR chip at the top of the window (▾) and pick
+another one plugged in: the monitor restarts on it (about half a minute), scans, calibrates its
+gain and reopens the receivers that fit its window; it also becomes the preferred SDR.
+
+All the stations come from one SDR window, so the SDR's sample rate sets how far apart they can
+be. Every station is filtered down to the same 384 kS/s, so the measurements are the same
+whichever SDR it is.
 
 | SDR | `--sdr` | Rate | Stations within | Gain | Needs |
 |---|---|---|---|---|---|

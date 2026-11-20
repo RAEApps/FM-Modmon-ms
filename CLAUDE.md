@@ -18,6 +18,8 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
 - SDRs: one `SdrProfile` each in `SDRS`; `use_sdr()` sets `SAMP_RATE`, `CHAN_DECIM`, `MAX_SPAN` and the
   other rate-derived globals from it. Every station is decimated to the same `QUAD_RATE` (384 kS/s).
   At start-up `detect_sdr()` finds what is plugged in (`find_sdrs`, `choose_sdr`) and switches to it.
+  Switching SDR while running (the header's SDR chip) restarts the process (`switch_sdr`, `restart_argv`,
+  `--after-pid`): the sample rate changes every filter, and UHD can crash closing a B210 in-process.
 - CPU: `tools\profile_cpu.py` profiles the monitor on the RSP1A (~70 s; needs the SDR free).
   Pass `--config` with a copy that has notifications off when testing here.
 - Install: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins

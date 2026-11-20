@@ -154,5 +154,43 @@ except ValueError as e:
     check('auto: --lna on the RTL-SDR found refused', True, f'({e})')
 rm.use_sdr('rsp1a')
 
+# Switching SDR from the header restarts the monitor: the options pinning the old SDR,
+# its gain or its stations go; everything else stays; it waits for the old process.
+for argv, want in (([], ['--sdr', 'rsp1a', '--after-pid', '42']),
+                   (['--web-port', '0', '--sdr', 'b210', '--gain', '30', '--freqs', '94.5', '101.7', '--no-scan'],
+                    ['--web-port', '0', '--no-scan', '--sdr', 'rsp1a', '--after-pid', '42']),
+                   (['--lna=2', '--ifgr', '35', '--config', 'x.json', '--setup', '--after-pid', '7'],
+                    ['--config', 'x.json', '--sdr', 'rsp1a', '--after-pid', '42']),
+                   (['--freqs', '94.5', '--country', 'US'], ['--country', 'US', '--sdr', 'rsp1a', '--after-pid', '42'])):
+    got = rm.restart_argv(argv, 'rsp1a', 42)
+    check(f'switch: restart {" ".join(argv) or "(no options)"}', got == want, got)
+    a = rm.parse_args(got)   # (and the result parses)
+check('switch: the restart waits for the old monitor', a.after_pid == 42 and a.sdr == 'rsp1a')
+
+from PyQt5 import QtWidgets  # noqa: E402
+
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+class Win(QtWidgets.QWidget):   # what MainWindow._sdr_menu uses
+    _recovery = _cal = None
+
+
+win = Win()
+win.sdr_found = found_list(RSP1A, B210)
+rm.use_sdr('b210', '301234')
+actions = [a for a in rm.MainWindow._sdr_menu(win).actions() if a.isCheckable()]
+check('switch menu: every SDR found offered', [a.text().split('  ')[0] for a in actions] == ['B210', 'RSP1A'],
+      [a.text() for a in actions])
+check('switch menu: the one in use ticked, not offered', actions[0].isChecked() and not actions[0].isEnabled())
+check('switch menu: the other offered', actions[1].isEnabled() and not actions[1].isChecked())
+win._cal = {'thread': None}
+actions = [a for a in rm.MainWindow._sdr_menu(win).actions() if a.isCheckable()]
+check('switch menu: nothing offered while calibrating', not any(a.isEnabled() for a in actions))
+win._cal, win.sdr_found = None, found_list(B210)
+notes = [a.text() for a in rm.MainWindow._sdr_menu(win).actions() if not a.isCheckable()]
+check('switch menu: says when nothing else is plugged in', any('No other SDR' in t for t in notes), notes)
+rm.use_sdr('rsp1a')
+
 print('\nall ok' if not bad else f'\n{len(bad)} WRONG')
 sys.exit(1 if bad else 0)
