@@ -8789,20 +8789,38 @@ class DetailWindow(QtWidgets.QWidget):
         super().closeEvent(event)
 
 
+class ClickChip(QtWidgets.QLabel):
+    """A header chip that drops down a menu: menu_for() -> QMenu, shown under it."""
+
+    def __init__(self):
+        super().__init__()
+        self.menu_for = None
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self.menu_for:
+            menu = self.menu_for()
+            if menu:
+                menu.exec_(self.mapToGlobal(QtCore.QPoint(0, self.height())))
+                return
+        super().mousePressEvent(event)
+
+
 class ChipRow(QtWidgets.QWidget):
     """The header's status chips. When the window is too narrow for them all, the least
     important (sample rate, SDR window, stations found) are hidden; the SDR and gain
     chips (which shows SDR LOST) always stay."""
     HIDE_FIRST = ('rate', 'window', 'found')
 
-    def __init__(self, keys):
+    def __init__(self, keys, menus=()):
+        """menus: the keys whose chip opens a menu when clicked (ClickChip)."""
         super().__init__()
         self.box = QtWidgets.QHBoxLayout(self)
         self.box.setContentsMargins(0, 0, 0, 0)
         self.box.setSpacing(6)
         self.chips = {}
         for key in keys:
-            chip = self.chips[key] = QtWidgets.QLabel()
+            chip = self.chips[key] = ClickChip() if key in menus else QtWidgets.QLabel()
             chip.setObjectName('chip')
             self.box.addWidget(chip)
         self.box.addStretch(1)
@@ -8888,8 +8906,12 @@ class MainWindow(QtWidgets.QWidget):
         title = QtWidgets.QLabel(APP_NAME)
         title.setObjectName('appTitle')
         top.addWidget(title)
-        self.chip_row = ChipRow(('sdr', 'window', 'rate', 'gain', 'found'))
+        self.chip_row = ChipRow(('sdr', 'window', 'rate', 'gain', 'found'), menus=('sdr',))
         self.chips = self.chip_row.chips
+        self.chips['sdr'].menu_for = self._sdr_menu
+        self.chips['sdr'].setToolTip('The SDR in use: click to switch to another one plugged in')
+        self.sdr_found = []    # [(SDRS key, serial, label)] attached at start-up, set by main()
+        self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr), else None
         top.addWidget(self.chip_row, 1)
         self.help_btn = QtWidgets.QPushButton('?')
         self.help_btn.setObjectName('help')
@@ -9107,6 +9129,47 @@ class MainWindow(QtWidgets.QWidget):
         self.save()
         name = 'automatic (the widest window plugged in)' if sdr == 'auto' else f'the {SDRS[sdr].name} when plugged in'
         self.log(f'settings: SDR set to {name}; it changes at the next start')
+
+    def _sdr_menu(self):
+        """The SDR chip's drop-down: the SDRs found at start-up, to switch to."""
+        menu = QtWidgets.QMenu(self)
+        title = menu.addAction('Switch to (the monitor restarts on it and sets its gain):')
+        title.setEnabled(False)
+        busy = bool(self._recovery or self._cal)
+        for key, serial, label in self.sdr_found:
+            p = SDRS[key]
+            reach = SetupWizard.SDR_NOTES.get(key, 'stations up to {span} apart').format(span=f'{p.span / 1e6:g} MHz')
+            action = menu.addAction(f'{p.name}  ({reach})')
+            action.setCheckable(True)
+            current = key == SDR.key and (not serial or f'serial={serial}' in SDR.device)
+            action.setChecked(current)
+            action.setEnabled(not current and not busy)
+            action.setToolTip(label)
+            action.triggered.connect(lambda _=False, k=key: self.switch_sdr(k))
+        if len(self.sdr_found) < 2:
+            note = menu.addAction('No other SDR was plugged in at start-up')
+            note.setEnabled(False)
+        return menu
+
+    def switch_sdr(self, key):
+        """Restart the monitor on SDR `key` (asked first): a new SDR has its own sample
+        rate, window and gain, so the receivers are rebuilt from the settings file, the
+        band rescanned and the gain calibrated, as at a start. The new process waits for
+        this one to let go of the SDR and the ports; this one exits without closing the
+        SDR itself (UHD can crash closing a B210)."""
+        name = SDRS[key].name
+        ok = QtWidgets.QMessageBox.question(
+            self, APP_NAME,
+            f'Switch to the {name}?\n\n{APP_NAME} restarts on it: it scans the band, sets the {name}’s gain '
+            'and reopens the receivers that fit its window, in about half a minute. The web version and RDS '
+            f'feeds pause meanwhile. The {name} also becomes the SDR to prefer (Settings → SDR).')
+        if ok != QtWidgets.QMessageBox.Yes:
+            return
+        self.app_config = replace(self.app_config or AppConfig(setup_done=True), sdr=key)
+        self.save()
+        self.log(f'SDR: switching to the {name}; restarting on it')
+        self.switch_to = key
+        QtWidgets.QApplication.quit()
 
     def run_setup(self):
         """The setup wizard again, from Settings."""
@@ -9443,7 +9506,7 @@ class MainWindow(QtWidgets.QWidget):
         c = self.tb.center_hz
         lo, hi = self.tb.window_hz()
         window = f'{lo / 1e6:.1f}\u2013{hi / 1e6:.1f} MHz'
-        chips = {'sdr': f'{SDR.name}  {c / 1e6:.2f} MHz', 'window': f'Window {window}',
+        chips = {'sdr': f'{SDR.name}  {c / 1e6:.2f} MHz  ▾', 'window': f'Window {window}',
                  'rate': f'{SAMP_RATE / 1e6:.1f} MS/s', 'gain': self._gain_text(),
                  'found': f'{self.n_found} stations found' if self.scanned else 'no scan'}
         for key, text in chips.items():
@@ -9597,7 +9660,7 @@ class MainWindow(QtWidgets.QWidget):
         web = self.web
         state = {
             'ready': True, 'app': APP_NAME, 'time': time.strftime('%H:%M:%S'),
-            'chips': [self.chips[k].text() for k in ('sdr', 'window', 'rate', 'gain', 'found')],
+            'chips': [self.chips[k].text().rstrip(' ▾') for k in ('sdr', 'window', 'rate', 'gain', 'found')],
             'add': {'enabled': self.add_btn.isEnabled(), 'tip': self.add_btn.toolTip()},
             'calibrating': bool(self._cal),
             'audio_formats': [{'key': f, 'label': WEB_FORMATS[f]['label'], 'canplay': WEB_FORMATS[f]['canplay']}
@@ -9724,6 +9787,7 @@ def build_parser(width=100):
                     help='where receivers and their settings are saved (default: %(default)s)')
     ap.add_argument('--setup', action='store_true',
                     help='open the setup (as at the first start) before starting')
+    ap.add_argument('--after-pid', type=int, help=argparse.SUPPRESS)  # (switching SDR: wait for the old one)
     ap.add_argument('--no-scan', action='store_true',
                     help='skip the band scan; dropdowns then list every channel')
     ap.add_argument('--sdr', choices=['auto'] + list(SDRS),
@@ -9839,7 +9903,15 @@ def detect_sdr(args):
     """Look for the SDRs attached, switch to the one to use (configure_sdr) and
     return a line for the log saying which, and why."""
     service = sdrplay_service_state(SDRPLAY_SERVICE_WAIT_S)
-    found = find_sdrs()
+    found = args.sdr_found = find_sdrs()
+    if args.after_pid:   # switched to: the old monitor has only just let go of it, so look again
+        args.sdr_required = False   # (and rather than not start, fall back to what's there)
+        for _ in range(SWITCH_LOOKS):
+            if any(k == args.sdr for k, _, _ in found):
+                break
+            time.sleep(2)
+            service = sdrplay_service_state(SDRPLAY_SERVICE_WAIT_S)
+            found = args.sdr_found = find_sdrs()
     if service == 'stopped' and not any(k.startswith('rsp') for k, _, _ in found):
         found_note = (f'the SDRplay API service didn\'t start within {SDRPLAY_SERVICE_WAIT_S} s, '
                       'so no RSP could be found')
@@ -9856,7 +9928,7 @@ def detect_sdr(args):
 
     configure_sdr(args, key, serial, fail)
     others = [lbl for k, s, lbl in found if (k, s) != (key, serial)]
-    how = ('--sdr' if args.sdr_required else note if note else
+    how = ('--sdr' if args.sdr_required else note if note else 'switched to' if args.after_pid else
            'found automatically' if args.sdr == 'auto' else 'as set in Setup')
     return (f'{label} ({how})' + (f'; also attached: {", ".join(others)}' if others else '')
             + (f'; {found_note}' if found_note else ''))
@@ -9923,8 +9995,54 @@ def feed_opener(args):
     return open_feed
 
 
+SWITCH_LOOKS = 3   # after switching SDR, look again this many times (2 s apart) for the one switched to
+RESTART_DROP = {'--sdr': 1, '--lna': 1, '--ifgr': 1, '--gain': 1, '--after-pid': 1, '--freqs': '+', '--setup': 0}
+
+
+def restart_argv(argv, sdr, pid):
+    """The command line to restart on SDR `sdr` (switch_sdr): argv without the
+    options that pin the old SDR, its gain or its stations (the receivers come back
+    from the settings file, the gain is calibrated), plus --sdr and --after-pid."""
+    out, skip = [], 0
+    for arg in argv:
+        if skip == '+':
+            if not arg.startswith('-') or re.fullmatch(r'-?\d+(\.\d*)?', arg):
+                continue                      # --freqs' values
+            skip = 0
+        elif skip:
+            skip -= 1
+            continue
+        name = arg.split('=', 1)[0]
+        if name in RESTART_DROP:
+            skip = 0 if '=' in arg else RESTART_DROP[name]
+            continue
+        out.append(arg)
+    return out + ['--sdr', sdr, '--after-pid', str(pid)]
+
+
+def wait_for_exit(pid, timeout_s=30.0):
+    """Wait (up to timeout_s) for process `pid` to end: the monitor being switched
+    away from, which still holds the SDR and the ports."""
+    if os.name == 'nt':
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x00100000, False, pid)   # SYNCHRONIZE
+        if handle:
+            kernel32.WaitForSingleObject(handle, int(timeout_s * 1000))
+            kernel32.CloseHandle(handle)
+        return
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.2)
+
+
 def main():
     args = parse_args()
+    if args.after_pid:
+        wait_for_exit(args.after_pid)
     clear_cache(stale=True)  # caches left by a session that didn't close cleanly
     enable_high_dpi()
     app = QtWidgets.QApplication(sys.argv)
@@ -9980,6 +10098,7 @@ def main():
         win.log(f'gain: calibrated at start-up, {cal_report}')
     win.args = args
     win.sdr_report = sdr_report
+    win.sdr_found = args.sdr_found
     win.app_config = app_cfg
     win.set_notify(load_notify(args.config))
     win.save()
@@ -10003,10 +10122,19 @@ def main():
     tb.start()
     win.start_watchdog()
     win.notifier.event('startstop', 'FM-Modmon-ms started: ' + ', '.join(p.title for p in win.panels))
-    app.aboutToQuit.connect(lambda: (win.log('monitor stopped'), web and web.close_audio(), tb.stop_all_iboc(),
-                                     tb.stop(), tb.wait(), clear_cache(),
+    app.aboutToQuit.connect(lambda: (win.log('monitor stopped' + (' to switch SDR' if win.switch_to else '')),
+                                     web and web.close_audio(), tb.stop_all_iboc(), tb.stop(), tb.wait(),
+                                     clear_cache(),
+                                     None if win.switch_to else   # (it's back in half a minute)
                                      win.notifier.send_now('startstop', 'FM-Modmon-ms stopped')))
-    sys.exit(app.exec_())
+    code = app.exec_()
+    if win.switch_to:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__)]
+                         + restart_argv(sys.argv[1:], win.switch_to, os.getpid()))
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)   # without closing the SDR in-process (UHD can crash closing a B210)
+    sys.exit(code)
 
 
 if __name__ == '__main__':
