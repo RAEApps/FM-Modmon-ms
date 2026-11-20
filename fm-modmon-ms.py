@@ -7485,18 +7485,35 @@ class NotifyForm(QtWidgets.QWidget):
 
 
 class AppSettingsDialog(QtWidgets.QDialog):
-    """Notifications (email, webhook, which events) and start with Windows;
-    "Run setup again" closes it with RUN_SETUP for the setup wizard."""
+    """Notifications (email, webhook, which events), the SDR to prefer (sdr: 'auto'
+    or an SDRS key; in_use: what this run found, for the note) and start with
+    Windows; "Run setup again" closes it with RUN_SETUP for the setup wizard."""
 
     RUN_SETUP = 2
 
-    def __init__(self, parent, settings, notifier):
+    def __init__(self, parent, settings, notifier, sdr='auto', in_use=''):
         super().__init__(parent)
         self.setWindowTitle(f'{APP_NAME} settings')
         self.setMinimumWidth(600)
         layout = QtWidgets.QVBoxLayout(self)
         self.form = NotifyForm(settings, notifier)
         layout.addWidget(self.form)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel('SDR:'))
+        self.sdr_box = QtWidgets.QComboBox()
+        self.sdr_box.addItem('Automatic: the widest window plugged in', 'auto')
+        for key, p in SDRS.items():
+            note = SetupWizard.SDR_NOTES.get(key, 'stations up to {span} apart').format(span=f'{p.span / 1e6:g} MHz')
+            self.sdr_box.addItem(f'{p.name} when plugged in ({note})', key)
+        self.sdr_box.setCurrentIndex(max(0, self.sdr_box.findData(sdr)))
+        self.sdr_box.setToolTip('With more than one SDR plugged in, the one to use. If it isn\'t plugged in, '
+                                'whichever is. --sdr overrides it.')
+        row.addWidget(self.sdr_box, 1)
+        layout.addLayout(row)
+        note = QtWidgets.QLabel((f'In use now: {in_use}. ' if in_use else '') + 'A change applies at the next start.')
+        note.setWordWrap(True)
+        note.setStyleSheet(f'color: {DIM};')
+        layout.addWidget(note)
         self.autostart = QtWidgets.QCheckBox('Start FM-Modmon-ms when I sign in to Windows')
         self.autostart.setChecked(autostart_enabled())
         layout.addWidget(self.autostart)
@@ -7510,6 +7527,9 @@ class AppSettingsDialog(QtWidgets.QDialog):
 
     def settings(self):
         return self.form.settings()
+
+    def sdr(self):
+        return self.sdr_box.currentData()
 
     def _accept(self):
         problems = self.form.problems()
@@ -8888,6 +8908,7 @@ class MainWindow(QtWidgets.QWidget):
         self._watch_from = None  # the SDR watchdog starts once the flowgraph does
         self.overload = AdcOverload()  # judged by the watchdog
         self.args = None   # the command line, set by main(), for the help
+        self.sdr_report = ''  # which SDR start-up found and why, set by main()
         self.cal_btn = QtWidgets.QPushButton('\u27f2  Recalibrate gain')
         self.cal_btn.setMinimumHeight(32)
         self.cal_btn.setToolTip(f'Set the {SDR.name} gain for the stations being received now (takes a few '
@@ -9065,7 +9086,8 @@ class MainWindow(QtWidgets.QWidget):
         self.notify_settings = self.notifier.settings = settings
 
     def _app_settings(self):
-        dialog = AppSettingsDialog(self, self.notify_settings, self.notifier)
+        app = self.app_config or AppConfig(setup_done=True)
+        dialog = AppSettingsDialog(self, self.notify_settings, self.notifier, app.sdr, self.sdr_report)
         result = dialog.exec_()
         if result == AppSettingsDialog.RUN_SETUP:
             self.run_setup()
@@ -9073,7 +9095,18 @@ class MainWindow(QtWidgets.QWidget):
         if result != QtWidgets.QDialog.Accepted:
             return
         self._apply_notify(dialog.settings())
+        self._apply_sdr(dialog.sdr())
         self._apply_autostart(dialog.autostart.isChecked())
+
+    def _apply_sdr(self, sdr):
+        """The SDR preference ('auto' or an SDRS key): saved, used from the next start."""
+        app = self.app_config or AppConfig(setup_done=True)
+        if sdr == app.sdr:
+            return
+        self.app_config = replace(app, sdr=sdr)
+        self.save()
+        name = 'automatic (the widest window plugged in)' if sdr == 'auto' else f'the {SDRS[sdr].name} when plugged in'
+        self.log(f'settings: SDR set to {name}; it changes at the next start')
 
     def run_setup(self):
         """The setup wizard again, from Settings."""
@@ -9946,6 +9979,7 @@ def main():
     if cal_report:
         win.log(f'gain: calibrated at start-up, {cal_report}')
     win.args = args
+    win.sdr_report = sdr_report
     win.app_config = app_cfg
     win.set_notify(load_notify(args.config))
     win.save()
