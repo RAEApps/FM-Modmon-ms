@@ -546,6 +546,17 @@ DEFAULT_PLUGIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   '..', 'soapysdrplay3-build', 'modules')
 SDRPLAY_API_DIR = r'C:\Program Files\SDRplay\API\x64'
 UHD_USER_IMAGES = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'uhd', 'images')
+UHD_IMAGES = ('usrp_b200_fw.hex', 'usrp_b210_fpga.bin')   # a B210's firmware (all B2xx) and FPGA
+
+
+def uhd_image_args():
+    """',fw=...,fpga=...' naming the B210's firmware and FPGA files (in UHD_IMAGES_DIR,
+    else UHD_USER_IMAGES) for UHD's device arguments, so it loads them from there
+    rather than searching for an images folder: some starts from a terminal found none
+    although UHD_IMAGES_DIR was set. '' if they aren't there (UHD then searches)."""
+    folder = os.environ.get('UHD_IMAGES_DIR') or UHD_USER_IMAGES
+    fw, fpga = (os.path.join(folder, name) for name in UHD_IMAGES)
+    return f',fw={fw},fpga={fpga}' if os.path.isfile(fw) and os.path.isfile(fpga) else ''
 
 
 @dataclass(frozen=True)
@@ -625,6 +636,8 @@ def use_sdr(key, serial=''):
     SDR = SDRS[key]
     if serial:
         SDR = replace(SDR, device=f'{SDR.device},serial={serial}')
+    if 'driver=uhd' in SDR.device:
+        SDR = replace(SDR, device=SDR.device + uhd_image_args())
     SAMP_RATE = SDR.rate
     CHAN_DECIM = round(SAMP_RATE / QUAD_RATE)
     assert CHAN_DECIM * QUAD_RATE == SAMP_RATE, f'{SDR.name}: rate must be a multiple of {QUAD_RATE:g}'
@@ -691,7 +704,7 @@ def find_sdrs():
     out = []
     for driver in ('uhd', 'sdrplay', 'rtlsdr'):
         try:
-            results = SoapySDR.Device.enumerate(f'driver={driver}')
+            results = SoapySDR.Device.enumerate(f'driver={driver}' + (uhd_image_args() if driver == 'uhd' else ''))
         except Exception:  # noqa: BLE001 - a driver that can't look (no service, no module) finds nothing
             continue
         for found in results:
