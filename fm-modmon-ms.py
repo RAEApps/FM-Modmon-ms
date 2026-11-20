@@ -585,6 +585,8 @@ class SdrProfile:
     default_gain: tuple      # when not calibrated
     settings: tuple = ()     # (key, value) SoapySDR settings written at open
     hint: str = ''           # shown when it can't be opened
+    closes_cleanly: bool = True  # False: closing it in-process can crash, so the monitor never does;
+                                 # it exits without closing it, and restarts itself when it is lost
 
     def clamp(self, gain):
         return tuple(min(max(v, s.lo), s.hi) for s, v in zip(self.stages, gain))
@@ -620,12 +622,15 @@ SDRS = {p.key: p for p in (
     # off DC, and every station well inside the digital filters (+/-10.4 of +/-15.4 MHz).
     # (The master clock set at open: gr-soapy only takes a rate the clock divides down to.
     # UHD's default USB transfers, 16 of 8 kB, top out near 18 MS/s on Windows.)
+    # UHD crashes closing it in-process (20-50% of closes after streaming, through SoapySDR
+    # or gr-uhd alike), so it is never closed while the monitor runs: see closes_cleanly.
     SdrProfile('b210', 'B210', 'driver=uhd,type=b200,master_clock_rate=30.72e6,'
                'num_recv_frames=256,recv_frame_size=16360', 30.72e6, 24e6, 20.4e6,
                (98.0e6,), 10.0e6, (GainStage('PGA', 'Gain', 0, 76),), (40,),
                hint='Is the B210 on a USB 3 port with the WinUSB driver (Zadig), its UHD FPGA images '
                     'downloaded (uhd_images_downloader -t "b2xx_b210_fpga|b2xx_common_fw" '
-                    '-i %LOCALAPPDATA%\\uhd\\images), and no other program using it?'),
+                    '-i %LOCALAPPDATA%\\uhd\\images), and no other program using it?',
+               closes_cleanly=False),
 )}
 
 
@@ -761,6 +766,52 @@ def _retry(open_device, attempts=5):
             time.sleep(1.0)
 
 
+_IN_CHILD = False   # True in a helper process started by _in_child
+
+
+def _in_child(func, *args, progress=None):
+    """func(*args) (band_scan or calibrate_startup) in a helper process, for an SDR that
+    can't be closed in-process (closes_cleanly False): the helper opens it, does the work
+    and exits without closing it, so the monitor can then open it for the receivers.
+    Returns func's result as JSON gives it back (tuples as lists); the helper's progress
+    lines go to progress(text)."""
+    spec = json.dumps({'func': func, 'sdr': SDR.key, 'device': SDR.device, 'args': args})
+    proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), '--child-call', spec],
+                            stdout=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+    result, error = None, None
+    for line in proc.stdout:
+        if line.startswith('CHILD-PROGRESS ') and progress:
+            progress(line[len('CHILD-PROGRESS '):].rstrip('\n'))
+        elif line.startswith('CHILD-RESULT '):
+            result = json.loads(line[len('CHILD-RESULT '):])
+        elif line.startswith('CHILD-ERROR '):
+            error = line[len('CHILD-ERROR '):].strip()
+    proc.wait()
+    if result is None:
+        raise RuntimeError(f'{SDR.name} {func.replace("_", " ")}: '
+                           + (error or f'the helper process ended ({proc.returncode})'))
+    return result
+
+
+def _child_call(spec_json):
+    """The helper process of _in_child: run the call, print its result, exit without closing the SDR."""
+    global _IN_CHILD, SDR
+    spec = json.loads(spec_json)
+    _IN_CHILD = True
+    use_sdr(spec['sdr'])
+    SDR = replace(SDR, device=spec['device'])
+    try:
+        if spec['func'] == 'band_scan':
+            result = band_scan(*spec['args'])
+        else:
+            result = calibrate_startup(*spec['args'], progress=lambda text: print('CHILD-PROGRESS ' + text, flush=True))
+        print('CHILD-RESULT ' + json.dumps(result), flush=True)
+    except Exception as e:  # noqa: BLE001 - reported to the monitor, which shows it
+        print('CHILD-ERROR ' + (str(e) or type(e).__name__).replace('\n', ' '), flush=True)
+    sys.stdout.flush()
+    os._exit(0)
+
+
 def pick_initial(found, n=3):
     """Strongest n stations that fit together in one SDR window, sorted by frequency."""
     best = []
@@ -785,6 +836,9 @@ def band_scan(gain, verbose=False):
     shows up as flat sidebands 129-199 kHz either side of the carrier,
     outside the receivers' channel filters, so it is detected here.
     """
+    if not SDR.closes_cleanly and not _IN_CHILD:
+        found, iboc_scan = _in_child('band_scan', list(gain))
+        return [tuple(f) for f in found], {int(f): info for f, info in iboc_scan.items()}
     with _sdr_direct(gain) as rsp:
         return _scan(rsp, verbose, gain)
 
@@ -921,9 +975,10 @@ def _sdr_direct(gain, center_hz=None):
     try:
         yield _Rsp(lambda hz: dev.setFrequency(SOAPY_SDR_RX, 0, hz), set_gain, capture)
     finally:
-        dev.deactivateStream(stream)
-        dev.closeStream(stream)
-        dev.close()  # release the SDR before the receiver opens it
+        if not _IN_CHILD:   # (a helper process exits without closing it: see _in_child)
+            dev.deactivateStream(stream)
+            dev.closeStream(stream)
+            dev.close()  # release the SDR before the receiver opens it
 
 
 def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
@@ -1014,6 +1069,9 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
 
 def calibrate_startup(receivers_hz, gain, progress=None):
     """Gain calibration on the SDR before the receiver opens it."""
+    if not SDR.closes_cleanly and not _IN_CHILD:
+        gain, report = _in_child('calibrate_startup', list(receivers_hz), list(gain), progress=progress)
+        return tuple(gain), report
     center = _centre(receivers_hz)
     with _sdr_direct(gain, center) as rsp:
         rsp.capture(int(SAMP_RATE * 0.1))  # let the tuner settle
@@ -8924,7 +8982,8 @@ class MainWindow(QtWidgets.QWidget):
         self.chips['sdr'].menu_for = self._sdr_menu
         self.chips['sdr'].setToolTip('The SDR in use: click to switch to another one plugged in')
         self.sdr_found = []    # [(SDRS key, serial, label)] attached at start-up, set by main()
-        self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr), else None
+        self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr, _sdr_lost), else None
+        self.restart_extra = []  # options for that restart (_sdr_lost: --recovering)
         top.addWidget(self.chip_row, 1)
         self.help_btn = QtWidgets.QPushButton('?')
         self.help_btn.setObjectName('help')
@@ -9273,6 +9332,17 @@ class MainWindow(QtWidgets.QWidget):
         self._update_window()
 
     def _sdr_lost(self, silent):
+        if not SDR.closes_cleanly:
+            # Reopening means closing it first, which can crash this process (a B210): restart
+            # the monitor on it instead, as switching SDR does; the new start waits for it to be back.
+            text = (f'SDR lost: no samples from the {SDR.name} for {silent:.0f} s; '
+                    f'restarting {APP_NAME} to reopen it')
+            self.log(text)
+            self.notifier.send_now('sdr', text)   # (now: this process ends in a moment)
+            self.save()
+            self.switch_to, self.restart_extra = SDR.key, ['--recovering']
+            QtWidgets.QApplication.quit()
+            return
         rec = self._recovery = {'since': time.time(), 'attempt': 0, 'error': None}
         text = f'SDR lost: no samples from the {SDR.name} for {silent:.0f} s; reopening it'
         self.log(text)
@@ -9801,6 +9871,7 @@ def build_parser(width=100):
     ap.add_argument('--setup', action='store_true',
                     help='open the setup (as at the first start) before starting')
     ap.add_argument('--after-pid', type=int, help=argparse.SUPPRESS)  # (switching SDR: wait for the old one)
+    ap.add_argument('--recovering', action='store_true', help=argparse.SUPPRESS)  # (restarted: the SDR was lost)
     ap.add_argument('--no-scan', action='store_true',
                     help='skip the band scan; dropdowns then list every channel')
     ap.add_argument('--sdr', choices=['auto'] + list(SDRS),
@@ -9912,17 +9983,26 @@ def configure_sdr(args, key, serial='', error=None):
         error(f'stations must lie within {MAX_SPAN / 1e6:.1f} MHz of each other on the {SDR.name}')
 
 
-def detect_sdr(args):
+def detect_sdr(args, progress=None):
     """Look for the SDRs attached, switch to the one to use (configure_sdr) and
-    return a line for the log saying which, and why."""
+    return a line for the log saying which, and why. progress(text): while waiting
+    for a lost SDR to come back (--recovering)."""
     service = sdrplay_service_state(SDRPLAY_SERVICE_WAIT_S)
     found = args.sdr_found = find_sdrs()
     if args.after_pid:   # switched to: the old monitor has only just let go of it, so look again
         args.sdr_required = False   # (and rather than not start, fall back to what's there)
-        for _ in range(SWITCH_LOOKS):
+        since = time.monotonic()
+        for look in itertools.count():
             if any(k == args.sdr for k, _, _ in found):
                 break
-            time.sleep(2)
+            waited = time.monotonic() - since
+            if not args.recovering and look >= SWITCH_LOOKS:
+                break
+            if args.recovering and waited >= RECOVER_WAIT_S and found:
+                break   # (lost for good, it seems: carry on with another SDR attached)
+            if args.recovering and progress:
+                progress(f'Waiting for the {SDRS[args.sdr].name} to come back… ({waited:.0f} s)')
+            time.sleep(2 if look < SWITCH_LOOKS else 5)
             service = sdrplay_service_state(SDRPLAY_SERVICE_WAIT_S)
             found = args.sdr_found = find_sdrs()
     if service == 'stopped' and not any(k.startswith('rsp') for k, _, _ in found):
@@ -9941,7 +10021,8 @@ def detect_sdr(args):
 
     configure_sdr(args, key, serial, fail)
     others = [lbl for k, s, lbl in found if (k, s) != (key, serial)]
-    how = ('--sdr' if args.sdr_required else note if note else 'switched to' if args.after_pid else
+    how = ('--sdr' if args.sdr_required else note if note else
+           'reopened after it was lost' if args.recovering else 'switched to' if args.after_pid else
            'found automatically' if args.sdr == 'auto' else 'as set in Setup')
     return (f'{label} ({how})' + (f'; also attached: {", ".join(others)}' if others else '')
             + (f'; {found_note}' if found_note else ''))
@@ -10009,7 +10090,10 @@ def feed_opener(args):
 
 
 SWITCH_LOOKS = 3   # after switching SDR, look again this many times (2 s apart) for the one switched to
-RESTART_DROP = {'--sdr': 1, '--lna': 1, '--ifgr': 1, '--gain': 1, '--after-pid': 1, '--freqs': '+', '--setup': 0}
+RECOVER_WAIT_S = 60  # restarted after losing the SDR: wait this long for it before using another one
+                     # (with none attached, wait on until one is)
+RESTART_DROP = {'--sdr': 1, '--lna': 1, '--ifgr': 1, '--gain': 1, '--after-pid': 1, '--freqs': '+', '--setup': 0,
+                '--recovering': 0}
 
 
 def restart_argv(argv, sdr, pid):
@@ -10053,6 +10137,8 @@ def wait_for_exit(pid, timeout_s=30.0):
 
 
 def main():
+    if sys.argv[1:2] == ['--child-call']:   # a helper process for _in_child, not the monitor
+        _child_call(sys.argv[2])
     args = parse_args()
     if args.after_pid:
         wait_for_exit(args.after_pid)
@@ -10072,7 +10158,11 @@ def main():
         splash.showMessage('Looking for an SDR…\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
                            QtGui.QColor('#9aa0a6'))
         app.processEvents()
-        sdr_report = detect_sdr(args)
+        def waiting(text):
+            splash.showMessage(f'{text}\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter, QtGui.QColor('#9aa0a6'))
+            app.processEvents()
+
+        sdr_report = detect_sdr(args, waiting)
         print('SDR:', sdr_report, flush=True)
         saved = {} if args.freqs else load_config(args.config)
         if not args.no_scan:
@@ -10134,8 +10224,13 @@ def main():
 
     tb.start()
     win.start_watchdog()
-    win.notifier.event('startstop', 'FM-Modmon-ms started: ' + ', '.join(p.title for p in win.panels))
-    app.aboutToQuit.connect(lambda: (win.log('monitor stopped' + (' to switch SDR' if win.switch_to else '')),
+    if args.recovering:
+        win.log('SDR recovered: the monitor restarted on it')
+        win.notifier.event('sdr', f'SDR recovered: {APP_NAME} restarted on the {SDR.name}: '
+                           + ', '.join(p.title for p in win.panels))
+    else:
+        win.notifier.event('startstop', 'FM-Modmon-ms started: ' + ', '.join(p.title for p in win.panels))
+    app.aboutToQuit.connect(lambda: (win.log('monitor stopped' + (' to restart' if win.switch_to else '')),
                                      web and web.close_audio(), tb.stop_all_iboc(), tb.stop(), tb.wait(),
                                      clear_cache(),
                                      None if win.switch_to else   # (it's back in half a minute)
@@ -10143,10 +10238,13 @@ def main():
     code = app.exec_()
     if win.switch_to:
         subprocess.Popen([sys.executable, os.path.abspath(__file__)]
-                         + restart_argv(sys.argv[1:], win.switch_to, os.getpid()))
+                         + restart_argv(sys.argv[1:], win.switch_to, os.getpid()) + win.restart_extra)
+    if win.switch_to or not SDR.closes_cleanly:
+        # Everything is stopped, saved and sent: end without closing the SDR in-process
+        # (UHD can crash closing a B210); Windows releases it as the process ends.
         sys.stdout.flush()
         sys.stderr.flush()
-        os._exit(0)   # without closing the SDR in-process (UHD can crash closing a B210)
+        os._exit(0 if win.switch_to else code)
     sys.exit(code)
 
 

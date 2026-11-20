@@ -229,6 +229,12 @@ Centred on 98 MHz, a cellular carrier near 886 MHz (9 × 98 = 882 MHz) came in a
 block of noise 16 dB above the floor across 102–105 MHz, and the scan listed every channel
 there as a station.
 
+UHD (4.8, on Windows) can crash closing a B210, so the monitor never closes it while it
+runs: the start-up scan and gain calibration run in a short-lived helper process, the monitor
+exits without closing it (Windows releases it), and when the B210 goes silent the monitor
+restarts itself on it instead of reopening it in place (about half a minute; it waits for the
+B210 to come back, and after a minute uses another SDR if one is plugged in).
+
 An RTL-SDR's 8-bit ADC has much less headroom than the others, and its window takes only
 stations within 1.4 MHz of each other, often just one or two. Saved receivers that don't
 fit the window are left closed. On an RTL-SDR without a TCXO, the frequency error shows up

@@ -187,6 +187,12 @@ for argv, want in (([], ['--sdr', 'rsp1a', '--after-pid', '42']),
     check(f'switch: restart {" ".join(argv) or "(no options)"}', got == want, got)
     a = rm.parse_args(got)   # (and the result parses)
 check('switch: the restart waits for the old monitor', a.after_pid == 42 and a.sdr == 'rsp1a')
+got = rm.restart_argv(['--recovering', '--web-port', '0'], 'b210', 42)
+check('switch: an earlier --recovering is not carried over',
+      got == ['--web-port', '0', '--sdr', 'b210', '--after-pid', '42'], got)
+check('a lost-SDR restart parses', rm.parse_args(got + ['--recovering']).recovering)
+check('only the B210 is kept open in-process (UHD crashes closing it)',
+      [k for k, p in rm.SDRS.items() if not p.closes_cleanly] == ['b210'])
 
 from PyQt5 import QtWidgets  # noqa: E402
 
