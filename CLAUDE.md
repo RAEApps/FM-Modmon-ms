@@ -17,6 +17,7 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\sdr_test.py` covers the SDR profiles (`SDRS`: RSP1A, RSP1B, RTL-SDR, B210) and a station at each one's rate.
 - SDRs: one `SdrProfile` each in `SDRS`; `use_sdr()` sets `SAMP_RATE`, `CHAN_DECIM`, `MAX_SPAN` and the
   other rate-derived globals from it. Every station is decimated to the same `QUAD_RATE` (384 kS/s).
+  At start-up `detect_sdr()` finds what is plugged in (`find_sdrs`, `choose_sdr`) and switches to it.
 - CPU: `tools\profile_cpu.py` profiles the monitor on the RSP1A (~70 s; needs the SDR free).
   Pass `--config` with a copy that has notifications off when testing here.
 - Install: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins
