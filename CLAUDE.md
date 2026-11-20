@@ -20,6 +20,8 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   At start-up `detect_sdr()` finds what is plugged in (`find_sdrs`, `choose_sdr`) and switches to it.
   Switching SDR while running (the header's SDR chip) restarts the process (`switch_sdr`, `restart_argv`,
   `--after-pid`): the sample rate changes every filter, and UHD can crash closing a B210 in-process.
+  So an SDR with `closes_cleanly=False` (the B210) is never closed in-process: scan and calibration run
+  in a helper (`_in_child`, `--child-call`), exit is `os._exit`, and SDR lost restarts (`--recovering`).
 - CPU: `tools\profile_cpu.py` profiles the monitor on the RSP1A (~70 s; needs the SDR free).
   Pass `--config` with a copy that has notifications off when testing here.
 - Install: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins
