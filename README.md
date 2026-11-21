@@ -7,6 +7,19 @@ One RSP1A at 9.6 MS/s watches up to **four FM stations at once**: each gets its 
 channel filter, stereo demodulator, RDS decoder, measurement chain, alarms and panel,
 in a PyQt5 window and an identical web page with live audio.
 
+## In use
+
+Two stations off one RSP1A, 101.7 (CKNX-FM) and 94.5 (CIBU-FM), 7.2 MHz apart:
+
+![The main window: both stations' rows, with 101.7 in detail](docs/media/overview-101.7.png)
+
+**[Watch the 1-minute demo, with each station's audio](docs/media/fm-modmon-ms-demo.mp4)** –
+101.7 in detail for 30 s, then 94.5 and its History.
+
+| 94.5 in detail (multipath at this site, flagged amber) | 94.5's History tab |
+|---|---|
+| ![94.5 in detail](docs/media/overview-94.5.png) | ![94.5 History](docs/media/history-94.5.png) |
+
 ## What it measures
 
 Per station, refreshed 10× a second:
