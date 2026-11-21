@@ -126,7 +126,7 @@ check(S, 'Width S/M dB', 0.0, a['width_db'], 0.3, 'dB')
 # RDS
 f = st.rds.fields
 raw = st.rds.snapshot()
-check(S, 'PI', 'C6B2', f.get(0, '').strip())
+check(S, 'PI', '618F', f.get(0, '').strip())
 check(S, 'PS', 'TESTFM  ', raw['ps'])
 check(S, 'PTY (RBDS 6)', 'Classic Rock', plain(v['PTY']))
 check(S, 'Flags', 'TP TA Music DI-Stereo AH CMP', plain(v['Flags']))

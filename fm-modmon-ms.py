@@ -2128,7 +2128,7 @@ class RdsState(gr.sync_block):
 class RdsGroupServer:
     """TCP server streaming one receiver's error-free RDS groups as hex text:
     one group per line, four blocks of four hex digits, CR LF
-    (`C6B200C8E0CD4349`), as an Inovonics INOmini 633 or RDS Spy sends them.
+    (`618F00C8E0CD4349`), as an Inovonics INOmini 633 or RDS Spy sends them.
 
     While no group has gone out for a second, an all-errored line
     (`---- ---- ---- ----`) is sent each second: the receiver is alive but
@@ -7918,7 +7918,7 @@ class ReceiverDialog(QtWidgets.QDialog):
         form.addRow('PTY names:', self.pty)
 
         self.pi = QtWidgets.QLineEdit(settings.expected_pi)
-        self.pi.setPlaceholderText('optional, e.g. C6B2')
+        self.pi.setPlaceholderText('optional, e.g. 618F')
         self.pi.setValidator(QtGui.QRegularExpressionValidator(QtCore.QRegularExpression('[0-9A-Fa-f]{0,4}')))
         form.addRow('Expected PI:', self.pi)
 
@@ -8056,7 +8056,7 @@ class ReceiverDialog(QtWidgets.QDialog):
         pi = self.pi.text().strip()
         if pi and len(pi) != 4:
             QtWidgets.QMessageBox.warning(self, self.windowTitle(),
-                                          'Expected PI is four hex digits (such as C6B2), or empty.')
+                                          'Expected PI is four hex digits (such as 618F), or empty.')
             return
         self.accept()
 
@@ -9831,7 +9831,7 @@ class MainWindow(QtWidgets.QWidget):
                 raise ValueError('no settings')
             pi = str(got.get('expected_pi', '')).strip()
             if pi and not re.fullmatch(r'[0-9A-Fa-f]{4}', pi):
-                raise ValueError('Expected PI is four hex digits (such as C6B2), or empty.')
+                raise ValueError('Expected PI is four hex digits (such as 618F), or empty.')
             merged = panel.settings.to_dict() | got
             merged['audio_source'] = panel.settings.audio_source  # set with the source control
             default = self.open_feed.base_port + panel.slot if self.open_feed else None
