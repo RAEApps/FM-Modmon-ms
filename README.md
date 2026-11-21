@@ -13,8 +13,10 @@ Two stations off one RSP1A, 101.7 (CKNX-FM) and 94.5 (CIBU-FM), 7.2 MHz apart:
 
 ![The main window: both stations' rows, with 101.7 in detail](docs/media/overview-101.7.png)
 
-**[Watch the 1-minute demo, with each station's audio](docs/media/fm-modmon-ms-demo.mp4)** –
-101.7 in detail for 30 s, then 94.5 and its History.
+A 1-minute demo, with each station's audio: 101.7 in detail for 30 s, then 94.5 and its History
+([download](docs/media/fm-modmon-ms-demo.mp4?raw=true)).
+
+https://github.com/user-attachments/assets/70fe9501-c045-4010-9537-bd8c57199032
 
 | 94.5 in detail (multipath at this site, flagged amber) | 94.5's History tab |
 |---|---|
