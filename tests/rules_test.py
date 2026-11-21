@@ -101,7 +101,7 @@ def check(title, got, want):
 print('--- station alarms')
 music = dict(left=[(997, 0.42)], right=[(1600, 0.42)], pilot=0.09, rds=0.04)
 st = station(**music)
-check('PI as expected: no alarm', judge(st, '', expected_pi='C6B2')[0], [])
+check('PI as expected: no alarm', judge(st, '', expected_pi='618F')[0], [])
 check('PI differs', judge(st, '', expected_pi='ABCD')[0], ['PI'])
 check('PI differs, alarm switched off', judge(st, '', expected_pi='ABCD', alarms={'PI': False})[0], [])
 check('silent programme', judge(station(pilot=0.09, rds=0.04), '', keep=('SILENCE',))[0], ['SILENCE'])
@@ -150,7 +150,7 @@ st = station(left=[(997, 0.86)], right=[(997, 0.86)], pilot=0.09, rds=0.04)
 got, _, p, _ = judge(st, 'fcc', expected_pi='ABCD')
 check('PI differs from expected: over-modulation withheld', (got, p.readings['alarms']['OVERMOD'],
                                                             p.readings['invalid_why']),
-      (['PI'], 'suppressed', 'PI C6B2, not ABCD'))
+      (['PI'], 'suppressed', 'PI 618F, not ABCD'))
 rm.time = fake
 try:
     p.settings = rm.ReceiverSettings()
@@ -160,11 +160,11 @@ try:
             clock['t'] += 1.0
             why = p._other_station(pi)
         return why
-    check('no expected PI: none suspected before one is held 60 s', (seen('C6B2', 30), seen('1234', 1)), (None, None))
-    seen('C6B2', 61)
+    check('no expected PI: none suspected before one is held 60 s', (seen('618F', 30), seen('1234', 1)), (None, None))
+    seen('618F', 61)
     check('...then another PI is withheld for 60 s after it last shows',
-          (seen('1234', 1), seen('C6B2', 59), seen('C6B2', 2), st.meter.interference),
-          ('PI 1234, not C6B2', 'PI 1234, not C6B2', None, None))
+          (seen('1234', 1), seen('618F', 59), seen('618F', 2), st.meter.interference),
+          ('PI 1234, not 618F', 'PI 1234, not 618F', None, None))
 finally:
     rm.time = real_time
 check('S/N ~44 dB under a 50 dB minimum', judge(station(rf_amp=0.0003, **music), '', min_snr_db=50)[0], ['CARRIER'])
@@ -217,7 +217,7 @@ try:
         st.rds.groups += 11                                          # RDS itself stays fine throughout
         if second < 40:                                              # paging on air for 40 s: steady
             with st.rds._lock:
-                st.rds._decode(0xC6B2, (14 << 11), 0x1234, 0x5678)
+                st.rds._decode(0x618F, (14 << 11), 0x1234, 0x5678)
         changes += p.refresh()
         if second == 39:
             on_air = QtGui.QTextDocumentFragment.fromHtml(p.values['Data services'].text()).toPlainText()
@@ -253,20 +253,20 @@ print('--- data services and RT+ Alarm (raw groups, no SDR)')
 rm.time = fake
 try:
     rs = rm.RdsState()
-    rs._decode(0xC6B2, (0 << 11) | 0, 0, 0x4142)                    # 0A: programme, not data
-    rs._decode(0xC6B2, (14 << 11), 0x1234, 0x5678)                  # 7A, nothing announced on it
-    rs._decode(0xC6B2, (2 << 11) | 0x05, 0x03A1, 0)                 # 1A v0: paging codes 05, OPC 3, ECC A1
-    rs._decode(0xC6B2, (2 << 11) | 0x05, 0x22B4, 0)                 # 1A v2: paging ID 2B4
-    rs._decode(0xC6B2, (26 << 11), 0, 0)                            # 13A: enhanced paging
-    rs._decode(0xC6B2, (6 << 11) | 22, 0, 0x4BD7)                   # 3A: RT+ on 11A
-    rs._decode(0xC6B2, (6 << 11) | 18, 0, 0x1234)                   # 3A: ODA 1234 on 9A
-    rs._decode(0xC6B2, (18 << 11), 0, 0)                            # 9A: that ODA, not EWS
+    rs._decode(0x618F, (0 << 11) | 0, 0, 0x4142)                    # 0A: programme, not data
+    rs._decode(0x618F, (14 << 11), 0x1234, 0x5678)                  # 7A, nothing announced on it
+    rs._decode(0x618F, (2 << 11) | 0x05, 0x03A1, 0)                 # 1A v0: paging codes 05, OPC 3, ECC A1
+    rs._decode(0x618F, (2 << 11) | 0x05, 0x22B4, 0)                 # 1A v2: paging ID 2B4
+    rs._decode(0x618F, (26 << 11), 0, 0)                            # 13A: enhanced paging
+    rs._decode(0x618F, (6 << 11) | 22, 0, 0x4BD7)                   # 3A: RT+ on 11A
+    rs._decode(0x618F, (6 << 11) | 18, 0, 0x1234)                   # 3A: ODA 1234 on 9A
+    rs._decode(0x618F, (18 << 11), 0, 0)                            # 9A: that ODA, not EWS
     text = 'EVACUATE NOW'
     for seg in range(4):                                             # 2A: RadioText, then an RT+ Alarm tag
         chunk = (text + '\r').ljust(16)[seg * 4:seg * 4 + 4].encode('latin-1')
-        rs._decode(0xC6B2, (4 << 11) | seg, (chunk[0] << 8) | chunk[1], (chunk[2] << 8) | chunk[3])
+        rs._decode(0x618F, (4 << 11) | seg, (chunk[0] << 8) | chunk[1], (chunk[2] << 8) | chunk[3])
     n = len(text) - 1
-    rs._decode(0xC6B2, (22 << 11) | (1 << 4) | (1 << 3) | (27 >> 3), ((27 & 7) << 13) | (n << 1), 0)
+    rs._decode(0x618F, (22 << 11) | (1 << 4) | (1 << 3) | (27 >> 3), ((27 & 7) << 13) | (n << 1), 0)
     snap = rs.snapshot()
     check('services seen', sorted(snap['data']), ['ODA 1234', 'Paging (13A)', 'Paging (7A)'])
     check('1A paging codes / OPC / paging ID / ECC', (snap['rp_codes'], snap['opc'], snap['paging_id'], snap['ecc']),

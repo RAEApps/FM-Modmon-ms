@@ -46,7 +46,7 @@ def mjd(date):
 
 
 class RdsContent:
-    def __init__(self, pi=0xC6B2, pty=6, tp=1, ta=0, ms=1, stereo=1, ps='TESTFM  ', afs=(94.5, 101.7),
+    def __init__(self, pi=0x618F, pty=6, tp=1, ta=0, ms=1, stereo=1, ps='TESTFM  ', afs=(94.5, 101.7),
                  rt='Now playing Bohemian Rhapsody by Queen', ecc=0xA1, ptyn='CLASSICS',
                  ct=(datetime.date(2026, 11, 16), 12, 34, -10)):
         self.pi, self.pty, self.tp, self.ta, self.ms, self.stereo = pi, pty, tp, ta, ms, stereo

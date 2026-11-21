@@ -41,7 +41,7 @@ for i in range(12000):
     time.sleep(0.001)
     for _ in range(5):
         t = time.perf_counter()
-        srv.send_group(0xC6B2, i & 0xFFFF, 0, 0)
+        srv.send_group(0x618F, i & 0xFFFF, 0, 0)
         worst = max(worst, time.perf_counter() - t)
     try:
         while good.recv(65536):
