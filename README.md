@@ -9,14 +9,15 @@ in a PyQt5 window and an identical web page with live audio.
 
 ## In use
 
-Two stations off one RSP1A, 101.7 (CKNX-FM) and 94.5 (CIBU-FM), 7.2 MHz apart:
+Two stations off one RSP1A, 7.2 MHz apart: 101.7 and 94.5, called WEXA-FM and WEXB-FM here
+(examples; their call letters and other identifying text are blurred):
 
 ![The main window: both stations' rows, with 101.7 in detail](docs/media/overview-101.7.png)
 
-A 1-minute demo, with each station's audio: 101.7 in detail for 30 s, then 94.5 and its History
+A 1-minute demo, with each station's audio (music only): 101.7 in detail for 30 s, then 94.5 and its History
 ([download](docs/media/fm-modmon-ms-demo.mp4?raw=true)).
 
-https://github.com/user-attachments/assets/70fe9501-c045-4010-9537-bd8c57199032
+https://github.com/user-attachments/assets/2ee09cf4-8ef9-4e7f-abff-613bd7426aa1
 
 | 94.5 in detail (multipath at this site, flagged amber) | 94.5's History tab |
 |---|---|
