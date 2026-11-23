@@ -1,8 +1,10 @@
 """Band scan and gain calibration against a simulated RSP1A whose ADC clips:
 a strong station must not hide the others in its scan window, and calibration
 must keep the ADC peaks at CAL_PEAK_DBFS. Exits non-zero on a failure."""
+import math
 import os
 import sys
+import tempfile
 
 import numpy as np
 
@@ -144,6 +146,36 @@ check('one gain stage: calibration brings the peaks up to CAL_PEAK_DBFS without 
       rm.CAL_PEAK_DBFS - rm.CAL_STEP_DB - rm.CAL_TOLERANCE_DB - 0.5 <= peak <= rm.CAL_PEAK_DBFS + 2.0,
       f'({report}; peaks {peak:.1f} dBFS)')
 rm.use_sdr('rsp1a')
+
+# An SDR that is open but delivers only zeros (seen on a fresh install): the scan says so, in
+# words, instead of "math domain error"; calibration and antenna tuning get -200 dB, not an error.
+
+
+class ZeroSdr(FakeRsp):
+    def capture(self, n):
+        return np.zeros(min(n, 1 << 18), np.complex64)
+
+
+try:
+    rm._scan(ZeroSdr({}), False)
+    said = None
+except Exception as e:  # noqa: BLE001
+    said = f'{type(e).__name__}: {e}'
+check('zeros from the SDR: the scan says it delivers only zeros', said is not None and 'only zeros' in said, said)
+peak, clipped, snrs = rm.window_snrs(np.zeros(1 << 16, np.complex64), 98e6, [98.1e6])
+check('zeros from the SDR: window_snrs reads no signal, without an error', (clipped, snrs) == (False, [0.0]),
+      (clipped, snrs))
+check('dB of an exact 0: -200 dB', rm._db_floor(0.0) == -200.0, rm._db_floor(0.0))
+
+# what stops start-up is written down with its traceback (the box shows only its message)
+rm.LOG_DIR = tempfile.mkdtemp()
+try:
+    math.log10(0)
+except ValueError as e:
+    where = rm.startup_error_log(e)
+text = open(where, encoding='utf-8').read() if where else ''
+check('start-up error: its traceback in the logs folder',
+      bool(where) and where.startswith(rm.LOG_DIR) and 'Traceback' in text and 'math domain error' in text, where)
 
 print('\nall ok' if not bad else f'\n{len(bad)} WRONG')
 sys.exit(1 if bad else 0)
