@@ -58,7 +58,7 @@ web page draw from one palette (`THEME`), four type sizes and square 3 px corner
 are set in Consolas, whose digits keep their width as values change. The header holds the
 status line (SDR, gain, recording), the player, Settings and a Tools menu (recalibrate the
 gain, tune the antenna). Each station row has PI, stereo, pilot and "RDS ok" (or its group
-loss) under the frequency; peak modulation against the limit in force with a 2 s peak hold,
+loss) under the frequency, then its RadioText and RT+ tags (or RDS flags); peak modulation against the limit in force with a 2 s peak hold,
 RF, AM and MPX power (against 0 dBr) bars; a 5-minute sparkline of peak modulation ending on
 its newest value, with the bursts over 100% a minute; and an
 annunciator with every alarm in a fixed place (raised, holding off, not judged, shelved, off). A
@@ -77,9 +77,10 @@ The detail view has tabs:
 - **MPX** – the Modulation and Multiplex cards in full beside the ITU-R SM.1268 views: a
   header of readings, as DEVA's (peak deviation, the share over 75 and 77 kHz and over the
   limit + 2 kHz, MPX power and the hour's highest with its time, multipath, the time
-  measured), a large MPX spectrum with peak hold, the deviation exceedance plot (the share of
+  measured), a large MPX spectrum with peak hold beside the deviation exceedance plot (the share of
   samples above each level, log scale; a click places a marker, read out under it) and MPX
-  power over the last hour, on clock time, with its highest marked. A click on the small
+  power over the last hour, on clock time, with its highest marked, full width; the two cards
+  are under them. A click on the small
   spectrum, or a card's "MPX tab" link, opens it.
 - **RDS** – the RDS card in full.
 - **Audio** – the Audio card in full (with loudness range and max momentary / short-term),
@@ -138,7 +139,7 @@ stations' alarms are held until it clears).
 
 ## Antenna tuning
 
-**Antenna tune** (the window's Tools menu, or the web page's button) helps get the most from an antenna:
+**Antenna tune** (the Tools menu, in the window or on the web page) helps get the most from an antenna:
 its length, position, direction, or which antenna to use. It holds the gain where it is and
 measures each open station's S/N over the noise floor five times a second. The **score** is the
 weakest station's S/N, because the monitor is only as good as its worst station. Each bar has a

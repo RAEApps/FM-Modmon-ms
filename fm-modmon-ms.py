@@ -4882,9 +4882,9 @@ class Meter(QtWidgets.QWidget):
 
 # Widths of a station row's fixed columns (the text column takes the rest); the
 # column headings above the rows use the same widths.
-ROW_COLS = (('status', '', 26), ('station', 'Station', 250), ('text', 'Text · RT+ · flags', 0),
+ROW_COLS = (('status', '', 26), ('station', 'Station · RadioText · RT+ / flags', 0),
             ('tapes', 'Levels · MOD peak hold 2 s', 300), ('trend', 'Peak mod · 5 min', 176),
-            ('alarms', 'Alarms', 216))
+            ('alarms', 'Alarms', 290))
 TAPE_COLOURS = {None: NORMAL, 'warn': '#f0a35e', 'alarm': RED, 'off': '#5d6167'}
 
 
@@ -5527,7 +5527,7 @@ class Annunciator(QtWidgets.QWidget):
     alarm's state (StationPanel._alarm_states); hover one for what it means. A raised
     alarm takes its priority's colour and shape; unacknowledged, it has a white
     ring; raised and since cleared but not acknowledged, its outline stays."""
-    COLS = 4
+    COLS = 5
     SHORT = {d.name: d.short for d in ALARM_DEFS}
     # state: (fill, text, outline or None, hatched); None = the alarm's priority colour
     LOOK = {'clear': ('#2b2d31', '#9aa0a6', None, False),
@@ -5557,12 +5557,12 @@ class Annunciator(QtWidgets.QWidget):
         self.priorities = {d.name: d.priority for d in ALARM_DEFS}
         self.on_click = None    # on_click(alarm name, its lamp's rect in global coordinates)
         self.on_menu = None     # on_menu(alarm name, global position): the right-click menu
-        self.setMinimumHeight(50)
+        self.setMinimumHeight(60)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.setMouseTracking(True)
 
     def sizeHint(self):
-        return QtCore.QSize(216, 50)
+        return QtCore.QSize(290, 60)
 
     def set_states(self, states, notes=None, priorities=None):
         """states: {alarm: state}; notes: {alarm: extra text for its tooltip};
@@ -5591,7 +5591,7 @@ class Annunciator(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         font = QtGui.QFont('Consolas')
-        font.setPointSizeF(7)
+        font.setPointSizeF(8)
         font.setBold(True)
         p.setFont(font)
         for name, _, rect in self._cells():
@@ -7525,7 +7525,7 @@ class StationPanel(QtCore.QObject):
         self.meta.setStyleSheet('color: #9aa0a6; font-size: 8pt;')
         self.meta.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         station_box = QtWidgets.QWidget()
-        station_box.setFixedWidth(widths['station'])
+        station_box.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         sb = QtWidgets.QVBoxLayout(station_box)
         sb.setContentsMargins(0, 0, 0, 0)
         sb.setSpacing(2)
@@ -7537,7 +7537,7 @@ class StationPanel(QtCore.QObject):
         top.addStretch(1)
         sb.addLayout(top)
         sb.addWidget(self.meta)
-        row.addWidget(station_box)
+        row.addWidget(station_box, 1)
 
         # Radiotext: up to 64 characters on one line (cut at the column edge, all
         # of it in the tooltip); RT+ tags, else the RDS flags, under it.
@@ -7552,18 +7552,15 @@ class StationPanel(QtCore.QObject):
         self.rtplus.setTextFormat(QtCore.Qt.RichText)
         self.rtplus.setStyleSheet('color: #b8bdc4;')
         self.rtplus.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
-        text_box = QtWidgets.QVBoxLayout()
-        text_box.setSpacing(3)
-        text_box.addWidget(self.rt)
-        text_box.addWidget(self.rtplus)
-        row.addLayout(text_box, 1)
+        sb.addWidget(self.rt)       # (in the station column, under the meta line, as the mock-up)
+        sb.addWidget(self.rtplus)
 
         # now: peak modulation against the limit in force, RF level, AM / multipath
         self.tapes = {
-            'mod': Tape('MOD', 0, 130, band=(85, 100), hold=True),
-            'rf': Tape('RF', -90, -10, band=(-60, -10)),
-            'am': Tape('AM', 0, 40, band=(0, PEAK_AM_PCT)),
-            'mpx': Tape('MPX', -12, 6, band=(-6, 0)),
+            'mod': Tape('MOD', 0, 130, band=(85, 100), hold=True, name_w=46),
+            'rf': Tape('RF', -90, -10, band=(-60, -10), name_w=46),
+            'am': Tape('AM', 0, 40, band=(0, PEAK_AM_PCT), name_w=46),
+            'mpx': Tape('MPX', -12, 6, band=(-6, 0), name_w=46),
         }
         self.tapes['mod'].setToolTip('Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force '
                                      '(red notch); the grey band is the normal range. Click for details.')
@@ -7594,15 +7591,15 @@ class StationPanel(QtCore.QObject):
                               'red: over the limit in force. Click for details.')
         trend = QtWidgets.QWidget()
         trend.setFixedWidth(widths['trend'])
-        tr = QtWidgets.QHBoxLayout(trend)
+        tr = QtWidgets.QVBoxLayout(trend)
         tr.setContentsMargins(0, 0, 0, 0)
-        tr.setSpacing(6)
-        tr.addWidget(self.spark, 1)
-        end = QtWidgets.QVBoxLayout()
-        end.setSpacing(0)
-        end.addWidget(self.trend_last)
-        end.addWidget(self.trend_note)
-        tr.addLayout(end)
+        tr.setSpacing(1)
+        line = QtWidgets.QHBoxLayout()
+        line.setSpacing(6)
+        line.addWidget(self.spark, 1)
+        line.addWidget(self.trend_last)
+        tr.addLayout(line)
+        tr.addWidget(self.trend_note)
         row.addWidget(trend)
         self._trend_t = -math.inf
         self.web_trends = {}    # the sparklines and histogram for the web page
@@ -7856,44 +7853,43 @@ class StationPanel(QtCore.QObject):
             cards.setColumnStretch(col, stretch)
         self.card_widgets = {'mod': mod, 'mpx': mpx_card, 'rds': rds, 'aud': audio}
 
-        # MPX: the Modulation and Multiplex cards in full, beside what ITU-R SM.1268 asks a
-        # monitor to show: MPX power against time with its maximum, and the share of samples
-        # over each deviation; with the large spectrum (peak hold) and a header line.
+        # MPX, as the mock-up: what ITU-R SM.1268 asks a monitor to show. The header cells; the
+        # large spectrum (peak hold) beside the deviation exceedance; MPX power against time,
+        # full width, with its maximum; then the Modulation and Multiplex cards in full.
         mpx_page = QtWidgets.QWidget()
-        mp = QtWidgets.QHBoxLayout(mpx_page)
+        mp = QtWidgets.QVBoxLayout(mpx_page)
         mp.setContentsMargins(0, 0, 0, 0)
-        mp.setSpacing(8)
-        self._mpx_cards = QtWidgets.QHBoxLayout()
-        self._mpx_cards.setSpacing(8)
-        mp.addLayout(self._mpx_cards, 5)
-        right = QtWidgets.QVBoxLayout()
-        right.setSpacing(6)
+        mp.setSpacing(6)
         self.sm_strip = SummaryCells()
-        right.addWidget(self.sm_strip)
+        mp.addWidget(self.sm_strip)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(12)
         self.big_mpx = MpxSpectrum(hold=True)
-        self.big_mpx.setMinimumHeight(200)
+        self.big_mpx.setMinimumHeight(240)
         self.big_mpx.setToolTip('Grey: now. Amber: peak hold, falling '
                                 f'{MPX_HOLD_DECAY_DB * UPDATE_HZ:g} dB/s. dB re a 100% (75 kHz) sine, 500 Hz bins')
-        right.addWidget(dim_label('MPX spectrum · 0–100 kHz · 500 Hz bins · grey now, amber peak hold'))
-        right.addWidget(self.big_mpx, 3)
-        graphs = QtWidgets.QHBoxLayout()
-        graphs.setSpacing(8)
         self.exceed_plot, self.power_plot = ExceedancePlot(), MpxPowerPlot()
+        self.power_plot.setMinimumHeight(140)
         self.marker_label = QtWidgets.QLabel('')
         self.marker_label.setStyleSheet(f'color: {ACCENT}; font-family: Consolas; font-size: {TYPE["label"]};')
         self.exceed_plot.on_marker = lambda: self.marker_label.setText(self.exceed_plot.marker_text())
-        for cap, w, under in (('Deviation exceedance · share of samples above · last 15 min valid',
-                               self.exceed_plot, self.marker_label),
-                              ('MPX power · 60 s window · last 60 min · limit 0 dBr (BS.412)', self.power_plot, None)):
+
+        def plot(cap, w, under=None):
             col = QtWidgets.QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(dim_label(cap))
             col.addWidget(w, 1)
             if under:
                 col.addWidget(under)
-            graphs.addLayout(col, 1)
-        right.addLayout(graphs, 2)
-        mp.addLayout(right, 6)
+            return col
+        top.addLayout(plot('MPX spectrum · 0–100 kHz · 500 Hz bins · grey now, amber peak hold', self.big_mpx), 16)
+        top.addLayout(plot('Deviation exceedance · share of samples above · last 15 min valid', self.exceed_plot,
+                           self.marker_label), 9)
+        mp.addLayout(top, 3)
+        mp.addLayout(plot('MPX power · 60 s window · last 60 min · limit 0 dBr (BS.412)', self.power_plot), 2)
+        self._mpx_cards = QtWidgets.QHBoxLayout()   # (_show_tab moves the two cards here)
+        self._mpx_cards.setSpacing(8)
+        mp.addLayout(self._mpx_cards)
         self.pages.addWidget(mpx_page)
 
         # RDS: its card in full (the IBOC, PSD, SIS and RadioDNS lines are in it)
@@ -8144,9 +8140,12 @@ class StationPanel(QtCore.QObject):
             label.setStyleSheet('color: #b8bdc4;')
             value = QtWidgets.QLabel('-')
             value.setTextFormat(QtCore.Qt.RichText)
-            value.setStyleSheet('font-weight: 600;')
+            # values in a right-aligned column of steady (Consolas) digits, as the mock-up; long ones
+            # wrap at full width instead
+            value.setStyleSheet('font-weight: 600;' + ('' if name in wide else ' font-family: Consolas;'))
             value.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
             value.setWordWrap(name in wide)   # long ones wrap in the card rather than being cut
+            value.setAlignment((QtCore.Qt.AlignLeft if name in wide else QtCore.Qt.AlignRight) | QtCore.Qt.AlignTop)
             label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
             grid.addWidget(label, row, col * 2)
             grid.addWidget(value, row, col * 2 + 1, 1, span)

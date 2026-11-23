@@ -231,6 +231,9 @@ p.show_tab('Overview')
 check('web: the header cells sent too', [c[0] for c in p.web_state(None, None, 0)['sm_cells']][:1],
       ['Peak deviation, + / −'])
 check('row: the MPX power tape shows', p.tapes['mpx'].text.endswith('dBr'), p.tapes['mpx'].text)
+check('row: the RadioText in the station column, under the meta line (as the mock-up)',
+      p.rt.parent() is p.meta.parent() and p.rtplus.parent() is p.meta.parent())
+check('row: the lamps in 5 columns', rm.Annunciator.COLS, 5)
 
 # ---- IBOC lines from readings
 ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,

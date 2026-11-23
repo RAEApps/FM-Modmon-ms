@@ -22,7 +22,7 @@
   --normal: #7b8794; --accent: #8ab4f8; --red: #ff6b6b; --amber: #f0a35e;
   --btn: #2b2d31; --btn-b: #6f747c; --btn-bh: #b8bdc4; --btn-h: #33363c; --field: #16171a;
   --lcd: #111214; --lcd-b: #34373d;
-  --cols: 26px 250px minmax(0, 1fr) 300px 176px 190px 28px;
+  --cols: 26px minmax(0, 1fr) 300px 176px 290px 28px;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
@@ -80,7 +80,7 @@ header .grow { flex: 1; }
 .dyn { font: 600 11px/1 Consolas, monospace; padding: 3px 4px; border-radius: 3px; background: #33363c; color: var(--bright); border: 1px solid #34373d; justify-self: start; }
 .meta { grid-column: 1 / -1; color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meta b { color: var(--bright); }
-.txt { min-width: 0; display: grid; gap: 3px; }
+.txt { grid-column: 1 / -1; min-width: 0; display: grid; gap: 3px; }
 .rt { font: 13px Consolas, monospace; color: #e6e7ea; background: var(--lcd); border: 1px solid var(--lcd-b); border-radius: 3px;
       padding: 2px 6px; white-space: pre; overflow: hidden; text-overflow: ellipsis; min-height: 22px; }
 .sub { color: #b8bdc4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 17px; }
@@ -99,13 +99,14 @@ header .grow { flex: 1; }
 .tape .lim::before { content: ''; position: absolute; left: -3.5px; top: -1px; border: 3.5px solid transparent; border-top: 4px solid var(--red); }
 .tape .zero { position: absolute; top: -3px; bottom: -3px; width: 1px; background: #5d6167; }
 .tape .v { text-align: right; font-weight: 700; white-space: nowrap; color: var(--bright); }
-.trend { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; min-width: 0; }
+.trend { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 6px; align-items: center; min-width: 0; }
+.trend .note { grid-column: 1 / -1; }
 .trend .note { font-size: 11px; color: var(--dim); white-space: nowrap; }
 .trend .last { font: 600 13px Consolas, monospace; color: var(--bright); }
 .trend canvas.spark { height: 34px; }
 canvas.spark { width: 100%; height: 26px; display: block; }
-.ann { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; }
-.lamp { font: 600 9px/1 Consolas, monospace; text-align: center; padding: 4px 0; border-radius: 2px; background: #2b2d31; color: #9aa0a6; cursor: help; }
+.ann { display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; }
+.lamp { font: 600 11px/1 Consolas, monospace; text-align: center; padding: 4px 0; border-radius: 2px; background: #2b2d31; color: #9aa0a6; cursor: help; }
 .lamp[data-s=waiting] { color: #5d6167; }
 /* raised: the alarm's priority colour (--pc) and shape; unacknowledged: a white ring; cleared but not
    acknowledged: its outline stays (as AlarmTable / Annunciator in the app) */
@@ -166,6 +167,11 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 .tabcards .card { width: 300px; }
 .tabside { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .tabside .plots { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mpxpage { flex-direction: column; align-items: stretch; }
+.mpxpage .tabside .plots { grid-template-columns: 16fr 9fr; gap: 12px; }
+.mpxpage .tabcards .card { width: auto; flex: 1; }
+.mpxpage canvas.bigmpx, .mpxpage canvas.tabplot { height: 260px; }
+.mpxpage .tabside > div:last-child canvas.tabplot { height: 170px; }
 .smcells { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--card-b); }
 .smcells > div { display: grid; gap: 1px; padding: 4px 12px; border-right: 1px solid var(--card-b); }
 .smcells .k, .smcells .n, .smcells .u { color: var(--dim); font-size: 11px; }
@@ -186,6 +192,7 @@ canvas.biggonio { width: 360px; height: 360px; max-width: 100%; }
 .kv .k { color: var(--muted); white-space: nowrap; }
 .kv .v { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .kv .v.wide { grid-column: 2 / -1; white-space: normal; }   /* long readouts wrap, not cut */
+.kv .v:not(.wide) { text-align: right; font-family: Consolas, monospace; }   /* a column of steady digits, as the mock-up */
 /* essentials / all, the out-of-range line, and what a reading means (on a click, as the app) */
 [data-r] { cursor: help; }
 .kv .k[data-r]:hover, .kv .v[data-r]:hover, .tape[data-r]:hover { background: #34373d; border-radius: 3px; }
@@ -325,10 +332,10 @@ canvas.mpx { cursor: pointer; }
 @media (max-width: 1250px) { .cards { grid-template-columns: 1fr 1fr; } .tabpage { flex-direction: column; align-items: stretch; } }
 @media (max-width: 700px) { .tabcards { flex-direction: column; } .tabcards .card { width: auto; } .tabside .plots { grid-template-columns: 1fr; } }
 @media (max-width: 1100px) {
-  :root { --cols: 26px 230px minmax(0, 1fr) 260px 28px; }
-  .colhead span:nth-child(5), .colhead span:nth-child(6) { display: none; }
+  :root { --cols: 26px minmax(0, 1fr) 260px 28px; }
+  .colhead span:nth-child(4), .colhead span:nth-child(5) { display: none; }
   .row .trend, .row .ann { grid-row: 2; }
-  .row .trend { grid-column: 2 / 4; } .row .ann { grid-column: 4 / 6; }
+  .row .trend { grid-column: 2 / 3; } .row .ann { grid-column: 3 / 5; }
 }
 @media (max-width: 700px) {
   body { padding: 8px; }
@@ -336,7 +343,7 @@ canvas.mpx { cursor: pointer; }
   .colhead { display: none; }
   .row .stat { grid-column: 1; grid-row: 1; }
   .row .stn { grid-column: 2; grid-row: 1; } .row .rbtn { grid-column: 3; grid-row: 1; }
-  .row .txt, .row .tapes, .row .trend, .row .ann { grid-column: 1 / -1; grid-row: auto; }
+  .row .tapes, .row .trend, .row .ann { grid-column: 1 / -1; grid-row: auto; }
   .cards { grid-template-columns: 1fr; }
   .kv { grid-template-columns: auto minmax(0, 1fr); }
   .kv .v { white-space: normal; }
@@ -366,11 +373,12 @@ canvas.mpx { cursor: pointer; }
     <span id="signin"><input type="password" placeholder="password" autocomplete="current-password"><button class="primary">Sign in</button><span class="err"></span></span>
   </span>
   <button id="help-btn" title="Help: using this page, the guide and the command-line options">?</button>
-  <button id="ant" disabled title="Tune the antenna: each station's S/N live at a fixed gain, to compare lengths, positions or antennas">Antenna tune</button>
-  <button id="cal" disabled title="Set the SDR gain for the stations being received now (takes a few seconds; the meters restart afterwards)">Recalibrate gain</button>
+  <button id="tools" title="Occasional actions: tune the antenna, recalibrate the gain">Tools &#9662;</button>
+  <button id="ant" hidden disabled title="Tune the antenna: each station's S/N live at a fixed gain, to compare lengths, positions or antennas">Antenna tune</button>
+  <button id="cal" hidden disabled title="Set the SDR gain for the stations being received now (takes a few seconds; the meters restart afterwards)">Recalibrate gain</button>
   <button id="add" class="primary" disabled>+&nbsp; Add receiver</button>
 </header>
-<div class="colhead"><span></span><span>Station</span><span>Text · RT+ · flags</span><span>Levels · MOD peak hold 2 s</span><span>Peak mod · 5 min</span><span>Alarms</span><span></span></div>
+<div class="colhead"><span></span><span>Station · RadioText · RT+ / flags</span><span>Levels · MOD peak hold 2 s</span><span>Peak mod · 5 min</span><span>Alarms</span><span></span></div>
 <div id="rows"></div>
 <div id="details"></div>
 <div id="logs">
@@ -1079,8 +1087,7 @@ function buildReceiver(r, alarmDefs) {
   const trend = h('div', 'trend');
   p.trendNote = h('div', 'note'); p.trendLast = h('div', 'last', '-'); p.spark = h('canvas', 'spark');
   p.spark.title = 'Peak modulation, the last 5 minutes (each point: its highest); red: over the limit in force. Click for details.';
-  const trendEnd = h('div'); trendEnd.append(p.trendLast, p.trendNote);
-  trend.append(p.spark, trendEnd);
+  trend.append(p.spark, p.trendLast, p.trendNote);   // the spark ending on its value, the note under them
   const ann = h('div', 'ann'); p.lamps = {};
   for (const [name, desc, short] of alarmDefs) {
     const l = h('div', 'lamp', short); l.dataset.desc = desc; p.lamps[name] = l; ann.append(l);
@@ -1104,7 +1111,8 @@ function buildReceiver(r, alarmDefs) {
   p.remove = h('button', null, '✕'); p.remove.title = 'Remove this receiver';
   p.remove.onclick = () => confirm(`Remove receiver ${n} (${p.title})?`) && api('remove', {receiver: n});
   btns.append(p.gear, p.remove);
-  row.append(p.stat, stn, txt, tapes, trend, ann, btns);
+  stn.append(txt);   // the RadioText under the meta line, in the station column (as the mock-up)
+  row.append(p.stat, stn, tapes, trend, ann, btns);
 
   // ---- the detail
   const d = p.detail = h('div', 'detail');
@@ -1208,13 +1216,14 @@ function buildReceiver(r, alarmDefs) {
   p.bigMpx.onmouseleave = () => { p.bigMpxX = null; };
   p.exceed.onmousemove = e => { p.exceedX = e.offsetX; if (p.r) drawExceed(p.exceed, p.r.readings.exceed_ccdf, p.r.readings.exceed_khz, p.exceedX, p.markerKhz); };
   p.exceed.onmouseleave = () => { p.exceedX = null; };
+  // as the mock-up: the header cells; spectrum beside exceedance; MPX power full width; the cards in full below
+  const plotCol = (cap, cv, under) => { const col = h('div'); col.append(h('div', 'cap', cap), cv); if (under) col.append(under); return col; };
   const plots = h('div', 'plots');
-  for (const [cap, cv, under] of [['Deviation exceedance · share of samples above · last 15 min valid', p.exceed, p.marker],
-                                  ['MPX power · 60 s window · last 60 min · limit 0 dBr (BS.412)', p.power, null]]) {
-    const col = h('div'); col.append(h('div', 'cap', cap), cv); if (under) col.append(under); plots.append(col);
-  }
-  mpxSide.append(p.smCells, h('div', 'cap', 'MPX spectrum · 0–100 kHz · 500 Hz bins · grey now, amber peak hold'), p.bigMpx, plots);
-  mpxPage.append(p.tabCards.MPX, mpxSide);
+  plots.append(plotCol('MPX spectrum · 0–100 kHz · 500 Hz bins · grey now, amber peak hold', p.bigMpx),
+               plotCol('Deviation exceedance · share of samples above · last 15 min valid', p.exceed, p.marker));
+  mpxSide.append(p.smCells, plots, plotCol('MPX power · 60 s window · last 60 min · limit 0 dBr (BS.412)', p.power));
+  mpxPage.classList.add('mpxpage');
+  mpxPage.append(mpxSide, p.tabCards.MPX);
   const rdsPage = h('div', 'tabpage');
   rdsPage.append(p.tabCards.RDS);
   const audPage = h('div', 'tabpage'), audSide = h('div', 'tabside');
@@ -1960,6 +1969,15 @@ $('#help-btn').onclick = async () => {
   } catch (e) { $('#help-body').textContent = 'FM-Modmon-ms is not answering'; }
 };
 $('#help-close').onclick = () => $('#helpdlg').close();
+// the Tools menu (as the window's): its items are the hidden Antenna tune and Recalibrate
+// gain buttons, with their labels and whether they can be used now
+$('#tools').onclick = e => {
+  e.stopPropagation();
+  const r = $('#tools').getBoundingClientRect();
+  popMenu(r.left, r.bottom + 2, ['#ant', '#cal'].map(id => {
+    const b = $(id); return [b.textContent, b.disabled ? null : () => b.click()];
+  }));
+};
 $('#cal').onclick = () => confirm('Recalibrate the SDR gain now? Every receiver hears gain steps for a few seconds, and the meters restart.') && api('recalibrate');
 $('#zoom').onclick = () => $('#zoom').style.display = 'none';
 // 10 updates a second while the page is visible (as the app), one a second in the background
