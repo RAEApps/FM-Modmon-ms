@@ -6847,6 +6847,24 @@ class MpxSpectrum(QtWidgets.QWidget):
                        QtCore.Qt.AlignRight, text)
 
 
+class PageStack(QtWidgets.QStackedWidget):
+    """A QStackedWidget as tall as the page shown, not its tallest page: else the MPX
+    tab's height (its plots and two cards) stretches every tab, the Audio tab's stereo
+    image with it, past the window."""
+
+    def __init__(self):
+        super().__init__()
+        self.currentChanged.connect(lambda _: self.updateGeometry())
+
+    def sizeHint(self):
+        w = self.currentWidget()
+        return w.sizeHint() if w else super().sizeHint()
+
+    def minimumSizeHint(self):
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w else super().minimumSizeHint()
+
+
 class Goniometer(QtWidgets.QWidget):
     """L/R vectorscope: mono is a vertical line, wide stereo a fuzzy ball,
     out-of-phase content leans horizontal. Auto-scaled to fill the box.
@@ -7689,7 +7707,7 @@ class StationPanel(QtCore.QObject):
         head.addWidget(self.tabs)
         head.addWidget(self.pop_btn)
         layout.addLayout(head)
-        self.pages = QtWidgets.QStackedWidget()
+        self.pages = PageStack()
         self.tabs.currentChanged.connect(self._show_tab)
         layout.addWidget(self.pages)
         overview = QtWidgets.QWidget()
@@ -7937,7 +7955,7 @@ class StationPanel(QtCore.QObject):
         ap.addLayout(self._aud_cards, 1)
         scope_col = QtWidgets.QVBoxLayout()
         self.big_gonio = Goniometer(size=None, history=8, points=None)
-        self.big_gonio.setMinimumSize(300, 300)
+        self.big_gonio.setMinimumSize(240, 240)
         self.big_phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))
         scope_col.addWidget(dim_label('Stereo image · the last 160 ms'))
         scope_col.addWidget(self.big_gonio, 1)
@@ -11133,10 +11151,21 @@ class DetailWindow(QtWidgets.QWidget):
         self.panel, self.on_close = panel, on_close
         box = QtWidgets.QVBoxLayout(self)
         box.setContentsMargins(8, 8, 8, 8)
-        box.addWidget(panel.detail)
+        self.scroll = QtWidgets.QScrollArea()   # (a tab taller than the screen scrolls, not overflows)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setWidget(panel.detail)
+        box.addWidget(self.scroll)
         panel.detail.show()
         self.setWindowTitle(f'{panel.title} \u2013 {APP_NAME}')
-        self.resize(max(panel.detail.sizeHint().width(), main.width(), 1500), panel.detail.sizeHint().height() + 16)
+        hint = panel.detail.sizeHint()
+        room = (main.screen() or QtWidgets.QApplication.primaryScreen()).availableGeometry()
+        self.resize(min(max(hint.width(), main.width(), 1500), room.width()),
+                    min(hint.height() + 24, int(room.height() * 0.9)))
+
+    def release(self):
+        """Take the detail back out (to dock it): the scroll area would otherwise delete it."""
+        return self.scroll.takeWidget()
 
     def closeEvent(self, event):
         if self.on_close:
@@ -11552,6 +11581,7 @@ class MainWindow(QtWidgets.QWidget):
         self.focus(docked[0] if docked else panel)
 
     def _pop_in(self, panel):
+        panel.window.release()
         panel.window = None
         panel.pop_btn.setText('Pop out')
         panel.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')

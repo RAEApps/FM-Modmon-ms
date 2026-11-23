@@ -234,6 +234,13 @@ check('row: the MPX power tape shows', p.tapes['mpx'].text.endswith('dBr'), p.ta
 check('row: the RadioText in the station column, under the meta line (as the mock-up)',
       p.rt.parent() is p.meta.parent() and p.rtplus.parent() is p.meta.parent())
 check('row: the lamps in 5 columns', rm.Annunciator.COLS, 5)
+p.show_tab('MPX')
+mpx_h = p.pages.minimumSizeHint().height()
+p.show_tab('Audio')
+aud_h = p.pages.minimumSizeHint().height()
+check('tabs: as tall as the one shown, not the tallest (the Audio tab not stretched to the MPX tab)',
+      aud_h < mpx_h, (aud_h, mpx_h))
+p.show_tab('Overview')
 
 # ---- IBOC lines from readings
 ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,
