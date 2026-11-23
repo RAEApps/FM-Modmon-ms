@@ -97,6 +97,13 @@ software that reads one of those over TCP (address <this-pc>:7711) can
 decode the groups itself. The feed follows whatever station its receiver
 is tuned to, and closes when the receiver is removed. Alarms and station changes go to
 the event log in the window, the web view and logs/fm-modmon-ms_events_YYYY-MM-DD.log.
+Recording (off until started: the REC chip at the top, or Settings) writes
+each receiver's readings once a minute to
+records/fm-modmon-ms_<MHz>_YYYY-MM-DD.csv: the minute's peaks (modulation,
+AM) as their maximum, the rest as their mean, and the alarms raised in it.
+Event logs and records older than the days set in Settings (90 by default;
+0 keeps them) are deleted at start and each day.
+
 
 First run: the first start (or --setup, or Settings > Run setup again) opens
 a short setup: where the monitor is (which technical rules the alarms check:
@@ -279,6 +286,7 @@ import bisect
 import glob
 import concurrent.futures
 import contextlib
+import csv
 import base64
 import ctypes
 import gc
@@ -459,6 +467,8 @@ WEB_MAX_LISTENERS = 8     # browser audio streams at once, all receivers togethe
 WEB_BATCH = 4096           # browser audio reaches Python in 85 ms batches (it is buffered anyway)
 WEB_SOURCES = {'analog': 0, 'sca67': 1, 'sca92': 2}  # audio sources the browser can play
 RDS_TCP_PORT = 7711        # default RDS feed ports 7711-7714 (receiver 1-4); each is settable
+RECORD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'records')
+KEEP_DAYS = 90             # event logs and measurement records older than this are deleted (0 = kept)
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 APP_NAME = 'FM-Modmon-ms'
 APP_ID = 'fm-modmon-ms.monitor'   # Windows taskbar identity, so it shows our icon, not Python's
@@ -5760,6 +5770,115 @@ class History:
         while self.alarm_log and self.alarm_log[0][0] < t - self.ALARM_LOG_S:
             self.alarm_log.popleft()
 
+class Recorder:
+    """Measurement records: once a minute, each receiver's readings over that minute
+    (from its History's one-a-second points: peaks as their maximum, the rest their
+    mean, blank if none) and the alarms raised in it, appended to
+    <folder>/fm-modmon-ms_<MHz>_YYYY-MM-DD.csv (local time, a file a day). Only
+    while on; switching on starts at the next whole minute."""
+
+    COLUMNS = ('time', 'receiver', 'freq_mhz', 'station', 'seconds') + History.KEYS + ('alarms',)
+
+    def __init__(self, folder=RECORD_DIR):
+        self.folder = folder
+        self.on = False
+        self._minute = None   # the minute being recorded (its start, epoch seconds), or None
+        self.error = None     # the last write failure, until a write works again
+
+    def start(self, now=None):
+        self.on = True
+        self._minute = self._floor(time.time() if now is None else now) + 60  # the first whole minute
+
+    def stop(self):
+        self.on = False
+        self._minute = None
+
+    @staticmethod
+    def _floor(t):
+        return int(t // 60 * 60)
+
+    def tick(self, panels, now=None):
+        """Call often: once a minute is over, write each panel's row for it.
+        Returns the error message when a write fails (once per failure), else None."""
+        if not self.on:
+            return None
+        now = time.time() if now is None else now
+        if self._minute is None or now < self._minute + 61:  # +1 s: the History's last second is in
+            return None
+        t0, self._minute = self._minute, self._floor(now)
+        try:
+            for p in panels:
+                self._write(t0, p)
+        except OSError as e:
+            msg = f'recording: could not write to {self.folder}: {e}'
+            fresh, self.error = msg != self.error, msg
+            return msg if fresh else None
+        self.error = None
+        return None
+
+    def row(self, t0, panel):
+        """The CSV row of `panel` for the minute starting at t0."""
+        h = panel.history
+        t, v = h.slow.view()
+        keep = (t >= t0) & (t < t0 + 60)
+        v = v[keep]
+        cells = []
+        for i, key in enumerate(History.KEYS):
+            col = v[:, i]
+            col = col[~np.isnan(col)]
+            if not len(col):
+                cells.append('')
+            else:
+                cells.append(f'{float(col.max() if key in History.PEAKS else col.mean()):.2f}')
+        raised = set(panel.alarms.active) | {name for when, name, up in h.alarm_log if up and t0 <= when < t0 + 60}
+        freq = panel.station.freq_hz / 1e6
+        return [time.strftime('%Y-%m-%d %H:%M', time.localtime(t0)), panel.slot + 1, f'{freq:.1f}',
+                panel.static_ps() or panel.settings.name.strip(), int(keep.sum())] + cells + [' '.join(sorted(raised))]
+
+    def path(self, t0, freq_hz):
+        return os.path.join(self.folder, f'{APP_NAME.lower()}_{freq_hz / 1e6:.1f}_'
+                                         f'{time.strftime("%Y-%m-%d", time.localtime(t0))}.csv')
+
+    def _write(self, t0, panel):
+        os.makedirs(self.folder, exist_ok=True)
+        path = self.path(t0, panel.station.freq_hz)
+        new = not os.path.exists(path)
+        with open(path, 'a', encoding='utf-8', newline='') as fh:
+            out = csv.writer(fh)
+            if new:
+                out.writerow(self.COLUMNS)
+            out.writerow(self.row(t0, panel))
+
+
+def prune_files(folder, keep_days, today=None):
+    """Delete this app's dated files (name ending _YYYY-MM-DD.log or .csv) in `folder`
+    whose date is keep_days or more before today; keep_days 0 keeps them all.
+    Returns the names deleted."""
+    if keep_days <= 0:
+        return []
+    today = today or datetime.date.today()
+    gone = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return gone
+    for name in names:
+        m = re.fullmatch(re.escape(APP_NAME.lower()) + r'_.*_(\d{4}-\d{2}-\d{2})\.(?:log|csv)', name)
+        if not m:
+            continue
+        try:
+            day = datetime.date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        if (today - day).days >= keep_days:
+            try:
+                os.remove(os.path.join(folder, name))
+                gone.append(name)
+            except OSError:
+                pass
+    return sorted(gone)
+
+
 
 # Alarms that judge the transmission against the rules: only on clean reception
 JUDGED_CLEAN = tuple(d.name for d in ALARM_DEFS if d.clean_only)
@@ -7562,7 +7681,7 @@ class AppSettingsDialog(QtWidgets.QDialog):
 
     RUN_SETUP = 2
 
-    def __init__(self, parent, settings, notifier, sdr='auto', in_use=''):
+    def __init__(self, parent, settings, notifier, sdr='auto', in_use='', record=False, keep_days=KEEP_DAYS):
         super().__init__(parent)
         self.setWindowTitle(f'{APP_NAME} settings')
         self.setMinimumWidth(600)
@@ -7588,7 +7707,22 @@ class AppSettingsDialog(QtWidgets.QDialog):
         self.autostart = QtWidgets.QCheckBox('Start FM-Modmon-ms when I sign in to Windows')
         self.autostart.setChecked(autostart_enabled())
         layout.addWidget(self.autostart)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self.record = QtWidgets.QCheckBox('Record each receiver\'s readings once a minute (CSV, in the records '
+                                          'folder; also the REC chip at the top)')
+        self.record.setChecked(record)
+        layout.addWidget(self.record)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel('Keep event logs and records for'))
+        self.keep_days = QtWidgets.QSpinBox()
+        self.keep_days.setRange(0, 3650)
+        self.keep_days.setSuffix(' days')
+        self.keep_days.setSpecialValueText('ever')
+        self.keep_days.setValue(keep_days)
+        self.keep_days.setToolTip('Older ones are deleted at start and once a day; 0 keeps them all')
+        row.addWidget(self.keep_days)
+        row.addStretch(1)
+        layout.addLayout(row)
+        buttons =QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         setup = buttons.addButton('Run setup again…', QtWidgets.QDialogButtonBox.ResetRole)
         setup.setToolTip('Location and rules, web access and its password, notifications')
         setup.clicked.connect(lambda: self.done(self.RUN_SETUP))
@@ -8227,6 +8361,8 @@ class AppConfig:
     web_port: int = WEB_PORT           # 0 = no web version
     web_bind: str = '0.0.0.0'          # '127.0.0.1' = this PC only
     web_password_hash: str = ''        # hash_password(); '' = controls only in a browser on this PC
+    record: bool = False               # write each receiver's readings once a minute (Recorder)
+    keep_days: int = KEEP_DAYS         # delete event logs and records older than this; 0 = keep them
     detail_all: list = field(default_factory=list)  # detail cards showing all their readings (CARDS keys)
 
     @classmethod
@@ -8248,6 +8384,11 @@ class AppConfig:
         out.web_bind = str(out.web_bind or '0.0.0.0')
         out.web_password_hash = str(out.web_password_hash or '')
         cards = out.detail_all if isinstance(out.detail_all, list) else []
+        out.record = bool(out.record)
+        try:
+            out.keep_days = max(0, min(3650, int(out.keep_days)))
+        except (TypeError, ValueError):
+            out.keep_days = KEEP_DAYS
         out.detail_all = sorted({c for c in cards if isinstance(c, str) and c in dict(CARDS)})
         return out
 
@@ -8977,9 +9118,13 @@ class MainWindow(QtWidgets.QWidget):
         title = QtWidgets.QLabel(APP_NAME)
         title.setObjectName('appTitle')
         top.addWidget(title)
-        self.chip_row = ChipRow(('sdr', 'window', 'rate', 'gain', 'found'), menus=('sdr',))
+        self.chip_row = ChipRow(('sdr', 'window', 'rate', 'gain', 'found', 'rec'), menus=('sdr', 'rec'))
         self.chips = self.chip_row.chips
         self.chips['sdr'].menu_for = self._sdr_menu
+        self.chips['rec'].menu_for = self._record_menu
+        self.recorder = Recorder()
+        self._pruned_on = None  # the day event logs and records were last pruned
+        self._show_recording()
         self.chips['sdr'].setToolTip('The SDR in use: click to switch to another one plugged in')
         self.sdr_found = []    # [(SDRS key, serial, label)] attached at start-up, set by main()
         self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr, _sdr_lost), else None
@@ -8993,7 +9138,8 @@ class MainWindow(QtWidgets.QWidget):
         top.addWidget(self.help_btn)
         self.settings_btn = QtWidgets.QPushButton('\u2699  Settings')
         self.settings_btn.setMinimumHeight(32)
-        self.settings_btn.setToolTip('Notifications (email, webhook) and starting with Windows')
+        self.settings_btn.setToolTip('Notifications (email, webhook), the SDR, starting with Windows, recording '
+                                     'and how long logs are kept')
         self.settings_btn.clicked.connect(self._app_settings)
         top.addWidget(self.settings_btn)
         self.notify_settings = NotifySettings()
@@ -9181,7 +9327,8 @@ class MainWindow(QtWidgets.QWidget):
 
     def _app_settings(self):
         app = self.app_config or AppConfig(setup_done=True)
-        dialog = AppSettingsDialog(self, self.notify_settings, self.notifier, app.sdr, self.sdr_report)
+        dialog = AppSettingsDialog(self, self.notify_settings, self.notifier, app.sdr, self.sdr_report,
+                                   self.recorder.on, app.keep_days)
         result = dialog.exec_()
         if result == AppSettingsDialog.RUN_SETUP:
             self.run_setup()
@@ -9190,6 +9337,14 @@ class MainWindow(QtWidgets.QWidget):
             return
         self._apply_notify(dialog.settings())
         self._apply_sdr(dialog.sdr())
+        self.set_recording(dialog.record.isChecked())
+        days = dialog.keep_days.value()
+        if self.app_config and days != self.app_config.keep_days:
+            self.app_config.keep_days = days
+            self.save()
+            self.log(f'settings: event logs and records kept {f"for {days} days" if days else "for ever"}')
+            self._pruned_on = None
+            self.prune()
         self._apply_autostart(dialog.autostart.isChecked())
 
     def _apply_sdr(self, sdr):
@@ -9201,6 +9356,55 @@ class MainWindow(QtWidgets.QWidget):
         self.save()
         name = 'automatic (the widest window plugged in)' if sdr == 'auto' else f'the {SDRS[sdr].name} when plugged in'
         self.log(f'settings: SDR set to {name}; it changes at the next start')
+    # ------------------------------------------------------------ recording
+    def set_recording(self, on, save=True):
+        """Start or stop the measurement records (Recorder), remembered in the settings."""
+        if on == self.recorder.on:
+            return
+        if on:
+            self.recorder.start()
+        else:
+            self.recorder.stop()
+        self._show_recording()
+        self.log(f'recording: {"on, a line a minute per receiver in " + self.recorder.folder if on else "off"}')
+        if self.app_config and self.app_config.record != on:
+            self.app_config.record = on
+            if save:
+                self.save()
+
+    def _show_recording(self):
+        chip, on = self.chips['rec'], self.recorder.on
+        chip.setText('●  REC' if on else 'REC off  ▾')
+        chip.setStyleSheet('background: #1d2a3a; color: #8ab4f8; border-color: #2e4a6b;' if on else f'color: {DIM};')
+        chip.setToolTip('Recording each receiver\'s readings once a minute: click to stop or open the folder' if on else
+                        'Not recording: click to record each receiver\'s readings once a minute (CSV)')
+        self.chip_row.updateGeometry()
+        self.chip_row.fit()
+
+    def _record_menu(self):
+        menu = QtWidgets.QMenu(self)
+        on = self.recorder.on
+        menu.addAction('Stop recording' if on else 'Start recording (a line a minute per receiver)',
+                       lambda: self.set_recording(not on))
+        menu.addAction('Open the records folder', self._open_records)
+        return menu
+
+    def _open_records(self):
+        os.makedirs(self.recorder.folder, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.recorder.folder))
+
+    def prune(self, today=None):
+        """Delete event logs and records older than the settings' keep_days (once a day)."""
+        today = today or datetime.date.today()
+        if today == self._pruned_on:
+            return
+        self._pruned_on = today
+        days = self.app_config.keep_days if self.app_config else KEEP_DAYS
+        gone = prune_files(LOG_DIR, days, today) + prune_files(self.recorder.folder, days, today)
+        if gone:
+            self.log(f'deleted {len(gone)} event log and record file{"s" * (len(gone) != 1)} '
+                     f'older than {days} days')
+
 
     def _sdr_menu(self):
         """The SDR chip's drop-down: the SDRs found at start-up, to switch to."""
@@ -9729,6 +9933,11 @@ class MainWindow(QtWidgets.QWidget):
                 self.names[p.station.freq_hz] = ps
                 for q in self.panels:
                     q.set_station_name(p.station.freq_hz, ps)
+        failed = self.recorder.tick(self.panels)
+        if failed:
+            self.log(failed)
+        if self._ticks % (60 * UPDATE_HZ) == 0:
+            self.prune()
         self._recalibrate_done()
         while True:
             try:
@@ -10203,6 +10412,8 @@ def main():
     win.sdr_report = sdr_report
     win.sdr_found = args.sdr_found
     win.app_config = app_cfg
+    win.set_recording(app_cfg.record, save=False)
+    win.prune()
     win.set_notify(load_notify(args.config))
     win.save()
     # Windows only knows the frame size once the window exists, so open it
