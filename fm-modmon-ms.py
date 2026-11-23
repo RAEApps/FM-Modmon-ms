@@ -97,6 +97,13 @@ software that reads one of those over TCP (address <this-pc>:7711) can
 decode the groups itself. The feed follows whatever station its receiver
 is tuned to, and closes when the receiver is removed. Alarms and station changes go to
 the event log in the window, the web view and logs/fm-modmon-ms_events_YYYY-MM-DD.log.
+Recording (off until started: the REC chip at the top, or Settings) writes
+each receiver's readings once a minute to
+records/fm-modmon-ms_<MHz>_YYYY-MM-DD.csv: the minute's peaks (modulation,
+AM) as their maximum, the rest as their mean, and the alarms raised in it.
+Event logs and records older than the days set in Settings (90 by default;
+0 keeps them) are deleted at start and each day.
+
 
 First run: the first start (or --setup, or Settings > Run setup again) opens
 a short setup: where the monitor is (which technical rules the alarms check:
@@ -124,6 +131,11 @@ S/N over the noise floor is kept: the least gain within CAL_TOLERANCE_DB of
 the best (once antenna noise dominates, more gain only costs headroom). Gain then stays fixed, so RF
 levels are comparable. "Recalibrate gain" repeats it on the running receivers
 (for example after the SDR window has moved); their meters restart afterwards.
+"Antenna tune" (AntennaLoop, AntennaDialog) holds the gain and measures each
+open station's S/N over the noise floor TUNE_RATE_HZ times a second from the
+live IQ (window_snrs, as calibration does); the score is the weakest station's.
+Each setting tried can be marked and the marks are ranked, with the ADC peaks
+and AM / multipath alongside; alarms are held and recalibration waits meanwhile.
 While running, the wideband samples' peak is watched: when it reaches CAL_CLIP
 (the level calibration counts as overload) in ADC_OVERLOAD_N of
 ADC_OVERLOAD_WINDOW_S seconds, "SDR overload" is logged and notified and the
@@ -279,6 +291,7 @@ import bisect
 import glob
 import concurrent.futures
 import contextlib
+import csv
 import base64
 import ctypes
 import gc
@@ -388,6 +401,11 @@ CAL_CLIP = 0.9            # ...and any sample at this fraction of full scale mea
 CAL_LNA_STATES = range(9, -1, -1)  # SDRplay: tried from least gain to most
 CAL_STEP_DB = 3.0          # one gain stage (RTL-SDR, B210): raised this much at a time
 IQ_TAP_BATCH = 65536       # live calibration reads the SDR in batches this big
+TUNE_RATE_HZ = 5           # antenna tuning: S/N measured this many times a second...
+TUNE_SAMPLES = 1 << 19     # ...each from this many IQ samples (128 spectra of 4096)...
+TUNE_SMOOTH = 0.3          # ...smoothed (each new measurement's weight: about 0.6 s)
+TUNE_CLIP_S = 2.0          # ...the ADC shown as overloaded this long after a sample reached CAL_CLIP
+TUNE_MARKS = 50            # ...and this many marked settings kept
 ADC_BATCH = 16384          # the wideband peak meter reads the SDR in batches this big
 ADC_OVERLOAD_N = 3         # ADC overload: raised once this many of the last...
 ADC_OVERLOAD_WINDOW_S = 10  # ...this many seconds had a peak at CAL_CLIP or above,
@@ -459,6 +477,8 @@ WEB_MAX_LISTENERS = 8     # browser audio streams at once, all receivers togethe
 WEB_BATCH = 4096           # browser audio reaches Python in 85 ms batches (it is buffered anyway)
 WEB_SOURCES = {'analog': 0, 'sca67': 1, 'sca92': 2}  # audio sources the browser can play
 RDS_TCP_PORT = 7711        # default RDS feed ports 7711-7714 (receiver 1-4); each is settable
+RECORD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'records')
+KEEP_DAYS = 90             # event logs and measurement records older than this are deleted (0 = kept)
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 APP_NAME = 'FM-Modmon-ms'
 APP_ID = 'fm-modmon-ms.monitor'   # Windows taskbar identity, so it shows our icon, not Python's
@@ -981,6 +1001,30 @@ def _sdr_direct(gain, center_hz=None):
             dev.close()  # release the SDR before the receiver opens it
 
 
+def window_snrs(x, center_hz, freqs_hz):
+    """One capture of the SDR window: (peak_db, clipped, snrs). peak_db: the
+    ADC's peaks (99.99th percentile, dBFS); clipped: a sample reached
+    CAL_CLIP; snrs: each station's level over the noise floor in dB, its
+    +/-60 kHz against the 20th percentile of the bins inside the SDR's filter."""
+    nfft = 4096
+    win = np.hanning(nfft).astype(np.float32)
+    bin_hz = SAMP_RATE / nfft
+    flat = slice(int(nfft / 2 - MAX_SPAN / 2 / bin_hz), int(nfft / 2 + MAX_SPAN / 2 / bin_hz))  # inside the filter
+    mag = np.abs(x)
+    peak_db = 20 * math.log10(float(np.percentile(mag, 99.99)) + 1e-12)
+    clipped = bool(np.max(mag) >= CAL_CLIP)
+    frames = x[:len(x) // nfft * nfft].reshape(-1, nfft) * win
+    psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(frames, axis=1)) ** 2, axis=0))
+    psd_db = 10 * np.log10(psd + 1e-20)
+    floor = float(np.percentile(psd_db[flat], 20))
+    snrs = []
+    half = int(60e3 / bin_hz)
+    for f in freqs_hz:
+        k = int(round((f - center_hz) / bin_hz)) + nfft // 2
+        snrs.append(10 * math.log10(float(np.mean(psd[k - half:k + half + 1]))) - floor)
+    return peak_db, clipped, snrs
+
+
 def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
     """Choose the gain for receiving freqs_hz with the SDR centred on
     center_hz. rsp is an _Rsp already tuned there.
@@ -993,26 +1037,9 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
     the best average S/N without overload (the least gain within
     CAL_TOLERANCE_DB of the best, since past the point where antenna noise
     dominates more gain only costs headroom), and a one-line report."""
-    nfft = 4096
-    win = np.hanning(nfft).astype(np.float32)
-    bin_hz = SAMP_RATE / nfft
-    flat = slice(int(nfft / 2 - MAX_SPAN / 2 / bin_hz), int(nfft / 2 + MAX_SPAN / 2 / bin_hz))  # inside the filter
-
     def measure():
         rsp.capture(int(SAMP_RATE * 0.05))       # samples from before the gain change
-        x = rsp.capture(int(SAMP_RATE * 0.2))
-        mag = np.abs(x)
-        peak_db = 20 * math.log10(float(np.percentile(mag, 99.99)) + 1e-12)
-        clipped = bool(np.max(mag) >= CAL_CLIP)
-        frames = x[:len(x) // nfft * nfft].reshape(-1, nfft) * win
-        psd = np.fft.fftshift(np.mean(np.abs(np.fft.fft(frames, axis=1)) ** 2, axis=0))
-        psd_db = 10 * np.log10(psd + 1e-20)
-        floor = float(np.percentile(psd_db[flat], 20))
-        snrs = []
-        for f in freqs_hz:
-            k = int(round((f - center_hz) / bin_hz)) + nfft // 2
-            half = int(60e3 / bin_hz)
-            snrs.append(10 * math.log10(float(np.mean(psd[k - half:k + half + 1]))) - floor)
+        peak_db, clipped, snrs = window_snrs(rsp.capture(int(SAMP_RATE * 0.2)), center_hz, freqs_hz)
         return peak_db, clipped, float(np.mean(snrs)), min(snrs)
 
     tried = []  # (gain, peak_db, clipped, snr, worst)
@@ -1076,6 +1103,134 @@ def calibrate_startup(receivers_hz, gain, progress=None):
     with _sdr_direct(gain, center) as rsp:
         rsp.capture(int(SAMP_RATE * 0.1))  # let the tuner settle
         return calibrate_gain(rsp, center, list(receivers_hz), progress)
+
+
+class AntennaTuner:
+    """Antenna tuning: each open station's S/N over the noise floor
+    (window_snrs) at a gain held fixed, so a change in S/N is the antenna's.
+    update() feeds it a capture's measurement; the S/N is smoothed and its
+    best kept (the peak hold). The score is the weakest station's S/N, as the
+    monitor is only as good as its worst station. mark() keeps a snapshot of
+    the score, to compare antennas, lengths or positions. Thread-safe: the
+    measuring thread updates it while the window and web page read it."""
+
+    def __init__(self, gain):
+        self.gain = tuple(gain)
+        self._lock = threading.Lock()
+        self.freqs = []
+        self.snr, self.best = {}, {}   # freq -> smoothed S/N, its best since the peak hold was reset
+        self.best_score = None
+        self.peak_db = None            # the last capture's ADC peaks, dBFS
+        self.updates = 0
+        self.marks = []
+        self._clip_t = None
+        self._now = None
+        self._n = 0
+
+    def update(self, freqs_hz, peak_db, clipped, snrs, now=None):
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if list(freqs_hz) != self.freqs:   # a receiver retuned, added or removed: start again
+                self.freqs = list(freqs_hz)
+                self.snr, self.best, self.best_score = {}, {}, None
+            for f, v in zip(self.freqs, snrs):
+                old = self.snr.get(f)
+                self.snr[f] = v if old is None else old + TUNE_SMOOTH * (v - old)
+                self.best[f] = max(self.best.get(f, -math.inf), self.snr[f])
+            score = self._score()
+            if score is not None and (self.best_score is None or score > self.best_score):
+                self.best_score = score
+            self.peak_db = peak_db
+            if clipped:
+                self._clip_t = now
+            self._now = now
+            self.updates += 1
+
+    def _score(self):
+        return min(self.snr.values()) if self.snr else None
+
+    @property
+    def score(self):
+        with self._lock:
+            return self._score()
+
+    def overloaded(self, now=None):
+        now = time.monotonic() if now is None else now
+        return self._clip_t is not None and now - self._clip_t < TUNE_CLIP_S
+
+    def reset_hold(self):
+        """The peak hold starts again from now (after moving to another antenna, say)."""
+        with self._lock:
+            self.best = dict(self.snr)
+            self.best_score = self._score()
+
+    def mark(self, label='', multipath=None, now=None):
+        """Keep this moment's readings as a named setting. multipath: {freq: AM / multipath %}
+        from the receivers. Returns the mark, or None before the first measurement."""
+        with self._lock:
+            if not self.snr:
+                return None
+            self._n += 1
+            mp = [v for f, v in (multipath or {}).items() if f in self.snr and v is not None]
+            m = {'n': self._n, 'label': label.strip() or f'Mark {self._n}', 'time': time.strftime('%H:%M:%S'),
+                 'score': self._score(), 'weakest': min(self.snr, key=self.snr.get),
+                 'snr': [[f, self.snr[f]] for f in self.freqs],
+                 'multipath': max(mp) if mp else None, 'peak_db': self.peak_db, 'overload': self.overloaded(now)}
+            self.marks = (self.marks + [m])[-TUNE_MARKS:]
+            return m
+
+    def ranked(self):
+        """The marks, best score first."""
+        with self._lock:
+            return sorted(self.marks, key=lambda m: (-m['score'], m['n']))
+
+    def state(self, names=None, multipath=None, now=None):
+        """Everything the window and the web page show; names: {freq: title}."""
+        names, multipath = names or {}, multipath or {}
+        ranked = self.ranked()
+        with self._lock:
+            now = time.monotonic() if now is None else now
+            return {'gain': SDR.gain_text(self.gain), 'updates': self.updates,
+                    'stale': self._now is None or now - self._now > 2.0,
+                    'peak_db': self.peak_db, 'overload': self.overloaded(now), 'clip_dbfs': _dbfs(CAL_CLIP),
+                    'score': self._score(), 'best_score': self.best_score,
+                    'stations': [{'freq': f, 'name': names.get(f, f'{f / 1e6:.1f}'), 'snr': self.snr.get(f),
+                                  'best': self.best.get(f), 'multipath': multipath.get(f)} for f in self.freqs],
+                    'marks': [m | {'weakest': names.get(m['weakest'], f'{m["weakest"] / 1e6:.1f}')}
+                              for m in ranked]}
+
+
+class AntennaLoop:
+    """Antenna tuning running on the monitor: an IqTap on its SDR and a thread
+    measuring the open stations' S/N TUNE_RATE_HZ times a second into an
+    AntennaTuner, at the gain the monitor has (the caller keeps it fixed)."""
+
+    def __init__(self, tb):
+        self.tb = tb
+        self.tuner = AntennaTuner(tb.gain)
+        self.error = None   # the last failure to get samples (the SDR lost, say), None once they flow
+        self.tap = tb.tap_iq()
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='antenna-tune', daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            try:
+                x = self.tap.grab(TUNE_SAMPLES)
+                freqs = [st.freq_hz for st in self.tb.stations]
+                if freqs:
+                    self.tuner.update(freqs, *window_snrs(x, self.tb.center_hz, freqs))
+                self.error = None
+            except RuntimeError as e:   # no samples (the SDR is being reopened): keep trying
+                self.error = str(e)
+            self._stop.wait(max(0.0, 1 / TUNE_RATE_HZ - (time.monotonic() - t0)))
+
+    def stop(self):
+        self._stop.set()
+        self.thread.join(timeout=1.0)
+        self.tb.untap(self.tap)
 
 
 class IqTap(gr.sync_block):
@@ -3422,6 +3577,7 @@ class FmMonitor(gr.top_block):
         self.adc = AdcMeter()  # the wideband peak, for the overload warning
         self._adc_in = _batch(gr.sizeof_gr_complex, ADC_BATCH, 8)
         self.connect(self.src, self._adc_in, self.adc)
+        self._taps = []        # IqTaps on the SDR (tap_iq)
         self.slots = [None] * MAX_RECEIVERS
         self._mix = [blocks.add_ff(), blocks.add_ff()]
         self._silence = [[blocks.null_source(gr.sizeof_float) for _ in range(2)]
@@ -3491,13 +3647,7 @@ class FmMonitor(gr.top_block):
         """Gain calibration on the running receiver (a few seconds; the
         receivers hear the gain steps). Returns calibrate_gain's report; on
         failure the previous gain is restored and the error raised."""
-        tap = IqTap()
-        batch = _batch(gr.sizeof_gr_complex, IQ_TAP_BATCH, 4)
-        self.lock()
-        try:
-            self.connect(self.src, batch, tap)
-        finally:
-            self.unlock()
+        tap = self.tap_iq()
 
         def set_gain(*g):
             SDR.apply_gain(lambda name, v: self.src.set_gain(0, name, v), g)
@@ -3509,14 +3659,35 @@ class FmMonitor(gr.top_block):
             set_gain(*self.gain)
             raise
         finally:
-            self.lock()
-            try:
-                self.disconnect(self.src, batch, tap)
-            finally:
-                self.unlock()
+            self.untap(tap)
         set_gain(*gain)
         self.gain, self.gain_auto, self.cal_center_hz = gain, True, self.center_hz
         return report
+
+    def tap_iq(self):
+        """An IqTap on the SDR's IQ (gain calibration, antenna tuning), kept
+        across the SDR being reopened; untap() it when done."""
+        tap = IqTap()
+        tap.batch = _batch(gr.sizeof_gr_complex, IQ_TAP_BATCH, 4)
+        with self._sdr_lock:
+            self.lock()
+            try:
+                self.connect(*((self.src,) if self.src else ()), tap.batch, tap)
+            finally:
+                self.unlock()
+            self._taps.append(tap)
+        return tap
+
+    def untap(self, tap):
+        with self._sdr_lock:
+            if tap not in self._taps:
+                return
+            self._taps.remove(tap)
+            self.lock()
+            try:
+                self.disconnect(*((self.src,) if self.src else ()), tap.batch, tap)
+            finally:
+                self.unlock()
 
     def detach_sdr(self):
         """Stop the flowgraph and let go of the SDR (before reopening it)."""
@@ -3530,6 +3701,8 @@ class FmMonitor(gr.top_block):
                 if st.iboc:
                     self.disconnect(self.src, st.iboc.blocks[0])
             self.disconnect(self.src, self._adc_in)
+            for tap in self._taps:
+                self.disconnect(self.src, tap.batch)
             self.src = None
             gc.collect()  # the source block closes the device when it goes
 
@@ -3543,6 +3716,8 @@ class FmMonitor(gr.top_block):
                 if st.iboc:
                     self.connect(src, st.iboc.blocks[0])
             self.connect(src, self._adc_in)
+            for tap in self._taps:
+                self.connect(src, tap.batch)
             self.src = src
             self.start()
 
@@ -3939,14 +4114,15 @@ class Tape(QtWidgets.QWidget):
     def sizeHint(self):
         return QtCore.QSize(self.name_w + self.val_w + 160, 16)
 
-    def set_value(self, value, text, state=None, limit=None, band=None):
-        """value None: nothing to show. state: None (normal) | 'warn' | 'alarm' | 'off' (not judged)."""
+    def set_value(self, value, text, state=None, limit=None, band=None, peak=None):
+        """value None: nothing to show. state: None (normal) | 'warn' | 'alarm' | 'off' (not judged).
+        peak: the peak-hold tick's value, held by the caller (else hold=True's last HOLD_S)."""
         now = time.monotonic()
         if self.hold and value is not None and math.isfinite(value):
             self._peaks.append((now, value))
         while self._peaks and now - self._peaks[0][0] > self.HOLD_S:
             self._peaks.popleft()
-        self.peak = max(v for _, v in self._peaks) if self._peaks else None
+        self.peak = peak if peak is not None else max(v for _, v in self._peaks) if self._peaks else None
         if band is not None:
             self.band = band
         self.value, self.text, self.state, self.limit = value, text, state, limit
@@ -5760,6 +5936,115 @@ class History:
         while self.alarm_log and self.alarm_log[0][0] < t - self.ALARM_LOG_S:
             self.alarm_log.popleft()
 
+class Recorder:
+    """Measurement records: once a minute, each receiver's readings over that minute
+    (from its History's one-a-second points: peaks as their maximum, the rest their
+    mean, blank if none) and the alarms raised in it, appended to
+    <folder>/fm-modmon-ms_<MHz>_YYYY-MM-DD.csv (local time, a file a day). Only
+    while on; switching on starts at the next whole minute."""
+
+    COLUMNS = ('time', 'receiver', 'freq_mhz', 'station', 'seconds') + History.KEYS + ('alarms',)
+
+    def __init__(self, folder=RECORD_DIR):
+        self.folder = folder
+        self.on = False
+        self._minute = None   # the minute being recorded (its start, epoch seconds), or None
+        self.error = None     # the last write failure, until a write works again
+
+    def start(self, now=None):
+        self.on = True
+        self._minute = self._floor(time.time() if now is None else now) + 60  # the first whole minute
+
+    def stop(self):
+        self.on = False
+        self._minute = None
+
+    @staticmethod
+    def _floor(t):
+        return int(t // 60 * 60)
+
+    def tick(self, panels, now=None):
+        """Call often: once a minute is over, write each panel's row for it.
+        Returns the error message when a write fails (once per failure), else None."""
+        if not self.on:
+            return None
+        now = time.time() if now is None else now
+        if self._minute is None or now < self._minute + 61:  # +1 s: the History's last second is in
+            return None
+        t0, self._minute = self._minute, self._floor(now)
+        try:
+            for p in panels:
+                self._write(t0, p)
+        except OSError as e:
+            msg = f'recording: could not write to {self.folder}: {e}'
+            fresh, self.error = msg != self.error, msg
+            return msg if fresh else None
+        self.error = None
+        return None
+
+    def row(self, t0, panel):
+        """The CSV row of `panel` for the minute starting at t0."""
+        h = panel.history
+        t, v = h.slow.view()
+        keep = (t >= t0) & (t < t0 + 60)
+        v = v[keep]
+        cells = []
+        for i, key in enumerate(History.KEYS):
+            col = v[:, i]
+            col = col[~np.isnan(col)]
+            if not len(col):
+                cells.append('')
+            else:
+                cells.append(f'{float(col.max() if key in History.PEAKS else col.mean()):.2f}')
+        raised = set(panel.alarms.active) | {name for when, name, up in h.alarm_log if up and t0 <= when < t0 + 60}
+        freq = panel.station.freq_hz / 1e6
+        return [time.strftime('%Y-%m-%d %H:%M', time.localtime(t0)), panel.slot + 1, f'{freq:.1f}',
+                panel.static_ps() or panel.settings.name.strip(), int(keep.sum())] + cells + [' '.join(sorted(raised))]
+
+    def path(self, t0, freq_hz):
+        return os.path.join(self.folder, f'{APP_NAME.lower()}_{freq_hz / 1e6:.1f}_'
+                                         f'{time.strftime("%Y-%m-%d", time.localtime(t0))}.csv')
+
+    def _write(self, t0, panel):
+        os.makedirs(self.folder, exist_ok=True)
+        path = self.path(t0, panel.station.freq_hz)
+        new = not os.path.exists(path)
+        with open(path, 'a', encoding='utf-8', newline='') as fh:
+            out = csv.writer(fh)
+            if new:
+                out.writerow(self.COLUMNS)
+            out.writerow(self.row(t0, panel))
+
+
+def prune_files(folder, keep_days, today=None):
+    """Delete this app's dated files (name ending _YYYY-MM-DD.log or .csv) in `folder`
+    whose date is keep_days or more before today; keep_days 0 keeps them all.
+    Returns the names deleted."""
+    if keep_days <= 0:
+        return []
+    today = today or datetime.date.today()
+    gone = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return gone
+    for name in names:
+        m = re.fullmatch(re.escape(APP_NAME.lower()) + r'_.*_(\d{4}-\d{2}-\d{2})\.(?:log|csv)', name)
+        if not m:
+            continue
+        try:
+            day = datetime.date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        if (today - day).days >= keep_days:
+            try:
+                os.remove(os.path.join(folder, name))
+                gone.append(name)
+            except OSError:
+                pass
+    return sorted(gone)
+
+
 
 # Alarms that judge the transmission against the rules: only on clean reception
 JUDGED_CLEAN = tuple(d.name for d in ALARM_DEFS if d.clean_only)
@@ -7562,7 +7847,7 @@ class AppSettingsDialog(QtWidgets.QDialog):
 
     RUN_SETUP = 2
 
-    def __init__(self, parent, settings, notifier, sdr='auto', in_use=''):
+    def __init__(self, parent, settings, notifier, sdr='auto', in_use='', record=False, keep_days=KEEP_DAYS):
         super().__init__(parent)
         self.setWindowTitle(f'{APP_NAME} settings')
         self.setMinimumWidth(600)
@@ -7588,7 +7873,22 @@ class AppSettingsDialog(QtWidgets.QDialog):
         self.autostart = QtWidgets.QCheckBox('Start FM-Modmon-ms when I sign in to Windows')
         self.autostart.setChecked(autostart_enabled())
         layout.addWidget(self.autostart)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self.record = QtWidgets.QCheckBox('Record each receiver\'s readings once a minute (CSV, in the records '
+                                          'folder; also the REC chip at the top)')
+        self.record.setChecked(record)
+        layout.addWidget(self.record)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel('Keep event logs and records for'))
+        self.keep_days = QtWidgets.QSpinBox()
+        self.keep_days.setRange(0, 3650)
+        self.keep_days.setSuffix(' days')
+        self.keep_days.setSpecialValueText('ever')
+        self.keep_days.setValue(keep_days)
+        self.keep_days.setToolTip('Older ones are deleted at start and once a day; 0 keeps them all')
+        row.addWidget(self.keep_days)
+        row.addStretch(1)
+        layout.addLayout(row)
+        buttons =QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         setup = buttons.addButton('Run setup again…', QtWidgets.QDialogButtonBox.ResetRole)
         setup.setToolTip('Location and rules, web access and its password, notifications')
         setup.clicked.connect(lambda: self.done(self.RUN_SETUP))
@@ -8227,6 +8527,8 @@ class AppConfig:
     web_port: int = WEB_PORT           # 0 = no web version
     web_bind: str = '0.0.0.0'          # '127.0.0.1' = this PC only
     web_password_hash: str = ''        # hash_password(); '' = controls only in a browser on this PC
+    record: bool = False               # write each receiver's readings once a minute (Recorder)
+    keep_days: int = KEEP_DAYS         # delete event logs and records older than this; 0 = keep them
     detail_all: list = field(default_factory=list)  # detail cards showing all their readings (CARDS keys)
 
     @classmethod
@@ -8248,6 +8550,11 @@ class AppConfig:
         out.web_bind = str(out.web_bind or '0.0.0.0')
         out.web_password_hash = str(out.web_password_hash or '')
         cards = out.detail_all if isinstance(out.detail_all, list) else []
+        out.record = bool(out.record)
+        try:
+            out.keep_days = max(0, min(3650, int(out.keep_days)))
+        except (TypeError, ValueError):
+            out.keep_days = KEEP_DAYS
         out.detail_all = sorted({c for c in cards if isinstance(c, str) and c in dict(CARDS)})
         return out
 
@@ -8840,6 +9147,132 @@ class WebView:
         return Handler
 
 
+class AntennaDialog(QtWidgets.QDialog):
+    """Antenna tuning (MainWindow.antenna, an AntennaLoop): each open
+    station's S/N over the noise floor live, with its best so far (the peak
+    hold), the score (the weakest station's), the ADC peaks, each station's
+    AM / multipath, and the marked settings ranked. Closing it ends tuning."""
+    SNR_MAX = 60.0   # dB, the bars' full scale
+
+    def __init__(self, main):
+        super().__init__(main)
+        self.main = main
+        self.setWindowTitle(f'Antenna tune - {APP_NAME}')
+        self.setMinimumWidth(600)
+        lay = QtWidgets.QVBoxLayout(self)
+        intro = QtWidgets.QLabel(
+            'Adjust the antenna (length, position, direction) a little at a time and watch the score: the weakest '
+            'station\'s S/N over the noise floor. The white tick on each bar is its best so far. The gain stays '
+            'where it is until this window closes, so every reading compares with every other. Mark each setting '
+            'you try, then go back to the best. A better antenna can bring multipath or overload with it: watch '
+            'AM / multipath and the ADC peaks too. The receivers\' alarms are held while tuning.')
+        intro.setWordWrap(True)
+        intro.setStyleSheet('color: #9aa0a6;')
+        lay.addWidget(intro)
+        self.score = QtWidgets.QLabel('-')
+        self.score.setStyleSheet('font-size: 20pt; font-weight: 600; color: #e3e4e6;')
+        lay.addWidget(self.score)
+        self.status = QtWidgets.QLabel('')
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        self.rows = QtWidgets.QGridLayout()
+        self.rows.setColumnStretch(0, 1)
+        lay.addLayout(self.rows)
+        self._rows = {}   # freq -> (Tape, AM / multipath label)
+        marks = QtWidgets.QHBoxLayout()
+        self.label = QtWidgets.QLineEdit()
+        self.label.setPlaceholderText('what this setting is, e.g. dipole 75 cm, loop facing NE')
+        self.label.returnPressed.connect(self._mark)
+        marks.addWidget(self.label, 1)
+        mark = QtWidgets.QPushButton('Mark')
+        mark.setObjectName('primary')
+        mark.setToolTip('Keep this moment\'s readings under that name, to compare with other settings')
+        mark.clicked.connect(self._mark)
+        marks.addWidget(mark)
+        hold = QtWidgets.QPushButton('Reset peak hold')
+        hold.setToolTip('Start the best-so-far ticks again from now (after changing to another antenna, say)')
+        hold.clicked.connect(main.antenna_reset_hold)
+        marks.addWidget(hold)
+        lay.addLayout(marks)
+        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(['Setting', 'Score', 'Weakest', 'AM / multipath', 'ADC peaks', 'Marked'])
+        self.table.verticalHeader().hide()
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        self.table.setMinimumHeight(150)
+        lay.addWidget(self.table, 1)
+        stop = QtWidgets.QPushButton('Stop tuning')
+        stop.clicked.connect(self.close)
+        lay.addWidget(stop, 0, QtCore.Qt.AlignRight)
+        self._marks_sig = None
+
+    def _mark(self):
+        self.main.antenna_mark(self.label.text())
+        self.label.clear()
+
+    def refresh(self, s):
+        """s: AntennaTuner.state()."""
+        if s['score'] is None:
+            self.score.setText('Score: measuring…')
+        else:
+            best = s['best_score']
+            below = 0.0 if best is None or abs(s['score'] - best) < 0.05 else s['score'] - best
+            self.score.setText(f'Score {s["score"]:.1f} dB' + (f'   (best {best:.1f}, now {below:+.1f})'
+                                                            if best is not None else ''))
+        adc = 'ADC peaks -' if s['peak_db'] is None else f'ADC peaks {s["peak_db"]:.0f} dBFS'
+        if s['overload']:
+            text, colour = (f'{adc}: OVERLOAD, so the readings are false. Too much signal: try less antenna, or '
+                            'recalibrate the gain once tuning is done.', RED)
+        elif s['stale']:
+            text, colour = f'No samples from the SDR. {adc}.', AMBER
+        else:
+            text, colour = f'Gain held at {s["gain"]} · {adc}', '#9aa0a6'
+        self.status.setText(text)
+        self.status.setStyleSheet(f'color: {colour};')
+        freqs = [st['freq'] for st in s['stations']]
+        if list(self._rows) != freqs:
+            for tape, mp in self._rows.values():
+                for w in (tape, mp):
+                    self.rows.removeWidget(w)
+                    w.deleteLater()
+            self._rows = {}
+            for i, f in enumerate(freqs):
+                tape = Tape('', 0, self.SNR_MAX, name_w=150, val_w=70)
+                mp = QtWidgets.QLabel()
+                mp.setMinimumWidth(150)
+                self.rows.addWidget(tape, i, 0)
+                self.rows.addWidget(mp, i, 1)
+                self._rows[f] = tape, mp
+        for st in s['stations']:
+            tape, mp = self._rows[st['freq']]
+            tape.name = st['name']
+            weakest = st['snr'] is not None and st['snr'] == s['score'] and len(freqs) > 1
+            tape.set_value(st['snr'], '-' if st['snr'] is None else f'{st["snr"]:.1f} dB',
+                           'off' if s['stale'] else 'warn' if s['overload'] or weakest else None,
+                           peak=st['best'])
+            v = st['multipath']
+            mp.setText('AM / multipath -' if v is None else f'AM / multipath {v:.1f}%')
+            mp.setStyleSheet(f'color: {AMBER if v is not None and v >= PEAK_AM_PCT else "#9aa0a6"};')
+        sig = json.dumps(_finite(s['marks']))
+        if sig != self._marks_sig:
+            self._marks_sig = sig
+            self.table.setRowCount(len(s['marks']))
+            for i, m in enumerate(s['marks']):
+                cells = (m['label'], f'{m["score"]:.1f} dB', m['weakest'],
+                         '-' if m['multipath'] is None else f'{m["multipath"]:.1f}%',
+                         ('-' if m['peak_db'] is None else f'{m["peak_db"]:.0f} dBFS')
+                         + (' OVERLOAD' if m['overload'] else ''), m['time'])
+                for j, text in enumerate(cells):
+                    item = QtWidgets.QTableWidgetItem(text)
+                    if i == 0 and len(s['marks']) > 1:
+                        item.setForeground(QtGui.QColor(GREEN))
+                    self.table.setItem(i, j, item)
+
+    def closeEvent(self, event):
+        self.main.antenna_stop()
+        super().closeEvent(event)
+
+
 class DetailWindow(QtWidgets.QWidget):
     """A receiver's detail view popped out of the main window (so a wall display
     can show several side by side); closing it puts the detail back."""
@@ -8977,9 +9410,13 @@ class MainWindow(QtWidgets.QWidget):
         title = QtWidgets.QLabel(APP_NAME)
         title.setObjectName('appTitle')
         top.addWidget(title)
-        self.chip_row = ChipRow(('sdr', 'window', 'rate', 'gain', 'found'), menus=('sdr',))
+        self.chip_row = ChipRow(('sdr', 'window', 'rate', 'gain', 'found', 'rec'), menus=('sdr', 'rec'))
         self.chips = self.chip_row.chips
         self.chips['sdr'].menu_for = self._sdr_menu
+        self.chips['rec'].menu_for = self._record_menu
+        self.recorder = Recorder()
+        self._pruned_on = None  # the day event logs and records were last pruned
+        self._show_recording()
         self.chips['sdr'].setToolTip('The SDR in use: click to switch to another one plugged in')
         self.sdr_found = []    # [(SDRS key, serial, label)] attached at start-up, set by main()
         self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr, _sdr_lost), else None
@@ -8993,7 +9430,8 @@ class MainWindow(QtWidgets.QWidget):
         top.addWidget(self.help_btn)
         self.settings_btn = QtWidgets.QPushButton('\u2699  Settings')
         self.settings_btn.setMinimumHeight(32)
-        self.settings_btn.setToolTip('Notifications (email, webhook) and starting with Windows')
+        self.settings_btn.setToolTip('Notifications (email, webhook), the SDR, starting with Windows, recording '
+                                     'and how long logs are kept')
         self.settings_btn.clicked.connect(self._app_settings)
         top.addWidget(self.settings_btn)
         self.notify_settings = NotifySettings()
@@ -9010,6 +9448,14 @@ class MainWindow(QtWidgets.QWidget):
         self.cal_btn.clicked.connect(self._recalibrate)
         top.addWidget(self.cal_btn)
         self._cal = None  # {'thread', 'result' | 'error', 'was'} while recalibrating
+        self.ant_btn = QtWidgets.QPushButton('Antenna tune')
+        self.ant_btn.setMinimumHeight(32)
+        self.ant_btn.setToolTip('Tune the antenna: each station\'s S/N live at a fixed gain, to compare lengths, '
+                                'positions or antennas')
+        self.ant_btn.clicked.connect(self.antenna_start)
+        top.addWidget(self.ant_btn)
+        self.antenna = None      # an AntennaLoop while tuning
+        self.antenna_dlg = None  # its AntennaDialog
         self.add_btn = QtWidgets.QPushButton('+  Add receiver')
         self.add_btn.setObjectName('primary')
         self.add_btn.setMinimumHeight(32)
@@ -9181,7 +9627,8 @@ class MainWindow(QtWidgets.QWidget):
 
     def _app_settings(self):
         app = self.app_config or AppConfig(setup_done=True)
-        dialog = AppSettingsDialog(self, self.notify_settings, self.notifier, app.sdr, self.sdr_report)
+        dialog = AppSettingsDialog(self, self.notify_settings, self.notifier, app.sdr, self.sdr_report,
+                                   self.recorder.on, app.keep_days)
         result = dialog.exec_()
         if result == AppSettingsDialog.RUN_SETUP:
             self.run_setup()
@@ -9190,6 +9637,14 @@ class MainWindow(QtWidgets.QWidget):
             return
         self._apply_notify(dialog.settings())
         self._apply_sdr(dialog.sdr())
+        self.set_recording(dialog.record.isChecked())
+        days = dialog.keep_days.value()
+        if self.app_config and days != self.app_config.keep_days:
+            self.app_config.keep_days = days
+            self.save()
+            self.log(f'settings: event logs and records kept {f"for {days} days" if days else "for ever"}')
+            self._pruned_on = None
+            self.prune()
         self._apply_autostart(dialog.autostart.isChecked())
 
     def _apply_sdr(self, sdr):
@@ -9201,6 +9656,55 @@ class MainWindow(QtWidgets.QWidget):
         self.save()
         name = 'automatic (the widest window plugged in)' if sdr == 'auto' else f'the {SDRS[sdr].name} when plugged in'
         self.log(f'settings: SDR set to {name}; it changes at the next start')
+    # ------------------------------------------------------------ recording
+    def set_recording(self, on, save=True):
+        """Start or stop the measurement records (Recorder), remembered in the settings."""
+        if on == self.recorder.on:
+            return
+        if on:
+            self.recorder.start()
+        else:
+            self.recorder.stop()
+        self._show_recording()
+        self.log(f'recording: {"on, a line a minute per receiver in " + self.recorder.folder if on else "off"}')
+        if self.app_config and self.app_config.record != on:
+            self.app_config.record = on
+            if save:
+                self.save()
+
+    def _show_recording(self):
+        chip, on = self.chips['rec'], self.recorder.on
+        chip.setText('●  REC' if on else 'REC off  ▾')
+        chip.setStyleSheet('background: #1d2a3a; color: #8ab4f8; border-color: #2e4a6b;' if on else f'color: {DIM};')
+        chip.setToolTip('Recording each receiver\'s readings once a minute: click to stop or open the folder' if on else
+                        'Not recording: click to record each receiver\'s readings once a minute (CSV)')
+        self.chip_row.updateGeometry()
+        self.chip_row.fit()
+
+    def _record_menu(self):
+        menu = QtWidgets.QMenu(self)
+        on = self.recorder.on
+        menu.addAction('Stop recording' if on else 'Start recording (a line a minute per receiver)',
+                       lambda: self.set_recording(not on))
+        menu.addAction('Open the records folder', self._open_records)
+        return menu
+
+    def _open_records(self):
+        os.makedirs(self.recorder.folder, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.recorder.folder))
+
+    def prune(self, today=None):
+        """Delete event logs and records older than the settings' keep_days (once a day)."""
+        today = today or datetime.date.today()
+        if today == self._pruned_on:
+            return
+        self._pruned_on = today
+        days = self.app_config.keep_days if self.app_config else KEEP_DAYS
+        gone = prune_files(LOG_DIR, days, today) + prune_files(self.recorder.folder, days, today)
+        if gone:
+            self.log(f'deleted {len(gone)} event log and record file{"s" * (len(gone) != 1)} '
+                     f'older than {days} days')
+
 
     def _sdr_menu(self):
         """The SDR chip's drop-down: the SDRs found at start-up, to switch to."""
@@ -9508,7 +10012,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _recalibrate(self):
         """Run the gain calibration on the running receivers, off the GUI thread."""
-        if self._cal or self._recovery:
+        if self._cal or self._recovery or self.antenna:
             return
         cal = self._cal = {'was': SDR.gain_text(self.tb.gain)}
 
@@ -9542,6 +10046,59 @@ class MainWindow(QtWidgets.QWidget):
             p.station.sca_meter.reset()
             p.alarms.hold()
         self._update_window()
+
+    # ------------------------------------------------------------ antenna tuning
+    def antenna_start(self):
+        """Start antenna tuning (the window, or the web page's): the gain is held until it ends."""
+        if self.antenna:
+            if self.antenna_dlg:
+                self.antenna_dlg.raise_()
+                self.antenna_dlg.activateWindow()
+            return
+        if self._cal or self._recovery:
+            return
+        self.antenna = AntennaLoop(self.tb)
+        self.log(f'antenna tuning started, gain held at {SDR.gain_text(self.tb.gain)}; alarms held while tuning')
+        self.antenna_dlg = AntennaDialog(self)
+        self.antenna_dlg.show()
+        self._update_window()
+
+    def antenna_stop(self):
+        loop, self.antenna = self.antenna, None
+        if not loop:
+            return
+        loop.stop()
+        best = loop.tuner.ranked()
+        self.log('antenna tuning ended' + (f'; best setting {best[0]["label"]!r}, score {best[0]["score"]:.1f} dB'
+                                           f' ({len(best)} marked)' if best else ''))
+        dlg, self.antenna_dlg = self.antenna_dlg, None
+        if dlg:
+            dlg.close()     # (its closeEvent finds tuning already stopped)
+            dlg.deleteLater()
+        for p in self.panels:
+            p.alarms.hold()  # the last antenna change isn't the station's fault
+        self._update_window()
+
+    def antenna_mark(self, label=''):
+        if not self.antenna:
+            return None
+        m = self.antenna.tuner.mark(label, {p.station.freq_hz: p.readings.get('am_pct') for p in self.panels})
+        if m:
+            self.log(f'antenna tuning: marked {m["label"]!r}, score {m["score"]:.1f} dB')
+        return m
+
+    def antenna_reset_hold(self):
+        if self.antenna:
+            self.antenna.tuner.reset_hold()
+
+    def _antenna_state(self):
+        if not self.antenna:
+            return None
+        state = self.antenna.tuner.state({p.station.freq_hz: p.title for p in self.panels},
+                                         {p.station.freq_hz: p.readings.get('am_pct') for p in self.panels})
+        if self.antenna.error and not state['stale']:
+            state['stale'] = True
+        return state
 
     def _add_receiver(self):
         freq = self._candidate()
@@ -9608,7 +10165,11 @@ class MainWindow(QtWidgets.QWidget):
         lost = bool(self._recovery)
         self.chips['gain'].setStyleSheet('background: #3a1d1f; color: #ff8a8a; border-color: #6b2a2e;'
                                          if lost or self.overload.active else '')
-        self.cal_btn.setEnabled(not lost and not self._cal)
+        self.cal_btn.setEnabled(not lost and not self._cal and not self.antenna)
+        self.cal_btn.setToolTip('Not while tuning the antenna: the gain is held until it ends' if self.antenna else
+                                f'Set the {SDR.name} gain for the stations being received now (takes a few '
+                                'seconds; the meters restart afterwards)')
+        self.ant_btn.setEnabled(not lost and not self._cal)
         for p in self.panels:
             p.combo.setEnabled(not lost)
             if lost:
@@ -9714,8 +10275,9 @@ class MainWindow(QtWidgets.QWidget):
                 self.log(f'RDS feed TCP {p.feed.port} (receiver {p.slot + 1}): '
                          f'{"client connected" if n > was else "client disconnected"}, {n} now')
                 self._feed_clients[p.slot] = n
-            if self.overload.active:
-                p.alarms.hold()   # the SDR's overload falsifies every reading: not the stations' fault
+            if self.overload.active or self.antenna:
+                p.alarms.hold()   # the SDR's overload falsifies every reading, and antenna changes aren't the
+                                  # stations' fault
             for desc, raised, detail in p.refresh():
                 self._alarm_event(p, desc, raised, detail)
             alert = p.station.iboc.status['alert'] if p.station.iboc else None
@@ -9729,6 +10291,14 @@ class MainWindow(QtWidgets.QWidget):
                 self.names[p.station.freq_hz] = ps
                 for q in self.panels:
                     q.set_station_name(p.station.freq_hz, ps)
+        self._recalibrate_done()
+        if self.antenna_dlg:
+            self.antenna_dlg.refresh(self._antenna_state())
+        failed = self.recorder.tick(self.panels)
+        if failed:
+            self.log(failed)
+        if self._ticks % (60 * UPDATE_HZ) == 0:
+            self.prune()
         self._recalibrate_done()
         while True:
             try:
@@ -9746,6 +10316,7 @@ class MainWindow(QtWidgets.QWidget):
             'chips': [self.chips[k].text().rstrip(' ▾') for k in ('sdr', 'window', 'rate', 'gain', 'found')],
             'add': {'enabled': self.add_btn.isEnabled(), 'tip': self.add_btn.toolTip()},
             'calibrating': bool(self._cal),
+            'antenna': self._antenna_state(),
             'audio_formats': [{'key': f, 'label': WEB_FORMATS[f]['label'], 'canplay': WEB_FORMATS[f]['canplay']}
                               for f in (web.formats if self.ffmpeg else [])],
             'listeners': web.listeners(), 'max_listeners': WEB_MAX_LISTENERS,
@@ -9793,12 +10364,30 @@ class MainWindow(QtWidgets.QWidget):
 
     def _web_command(self, action, args):
         """One control from the web page, done as the matching control in the window would."""
-        if self._recovery and action in ('add', 'remove', 'select', 'recalibrate'):
+        if self._recovery and action in ('add', 'remove', 'select', 'recalibrate', 'antenna'):
             raise ValueError('the SDR is being reopened; try again when it is back')
         if action == 'recalibrate':
             if self._cal:
                 raise ValueError('the gain is being calibrated already')
+            if self.antenna:
+                raise ValueError('not while tuning the antenna: the gain is held until tuning ends')
             self._recalibrate()
+            return None
+        if action == 'antenna':
+            if not args.get('on'):
+                self.antenna_stop()
+            elif self._cal:
+                raise ValueError('the gain is being calibrated; try again when it is done')
+            else:
+                self.antenna_start()
+            return None
+        if action in ('antenna_mark', 'antenna_hold'):
+            if not self.antenna:
+                raise ValueError('antenna tuning is not running')
+            if action == 'antenna_hold':
+                self.antenna_reset_hold()
+            elif not self.antenna_mark(str(args.get('label', ''))[:80]):
+                raise ValueError('nothing measured yet')
             return None
         if action == 'add':
             if len(self.panels) >= MAX_RECEIVERS or self._candidate() is None:
@@ -10203,6 +10792,8 @@ def main():
     win.sdr_report = sdr_report
     win.sdr_found = args.sdr_found
     win.app_config = app_cfg
+    win.set_recording(app_cfg.record, save=False)
+    win.prune()
     win.set_notify(load_notify(args.config))
     win.save()
     # Windows only knows the frame size once the window exists, so open it

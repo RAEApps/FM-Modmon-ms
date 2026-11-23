@@ -237,6 +237,31 @@ canvas.mpx { cursor: pointer; }
 #mpx-big { display: block; width: calc(100% - 32px); height: min(60vh, 420px); margin: 0 16px; border-radius: 6px; }
 #mpx-readouts { margin: 8px 16px 0; color: var(--muted); text-align: center; }
 #mpx-readouts b { color: var(--text); }
+#antwin { max-width: 720px; }
+#antwin .help-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+#antwin .help-head h2 { margin: 0; }
+#antwin .intro { color: var(--muted); margin: 0 0 8px; }
+#ant-score { font-size: 26px; font-weight: 600; color: var(--bright); }
+#ant-score small { font-size: 14px; font-weight: normal; color: var(--muted); }
+#ant-status { color: var(--muted); margin: 2px 0 8px; }
+#ant-status.red { color: var(--red); } #ant-status.amber { color: var(--amber); }
+.ant-row { display: grid; grid-template-columns: minmax(0, 140px) minmax(0, 1fr) 64px; gap: 8px; align-items: center; margin: 4px 0 0; }
+.ant-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.ant-row .val { text-align: right; font-weight: 600; color: var(--bright); }
+.ant-row .val.amber { color: var(--amber); }
+.ant-row .mp { grid-column: 2 / span 2; font-size: 12px; color: var(--muted); margin-top: -2px; }
+.ant-row .mp.amber { color: var(--amber); }
+.antbar { position: relative; height: 12px; background: var(--track); border-radius: 3px; }
+.antbar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--normal); border-radius: 3px; }
+.antbar .fill.amber { background: var(--amber); } .antbar .fill.off { background: #5d6167; }
+.antbar .tick { position: absolute; top: -3px; bottom: -3px; width: 3px; margin-left: -1px; background: var(--bright); }
+.ant-mark { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 6px; }
+.ant-mark input { flex: 1; min-width: 160px; }
+#ant-marks { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 8px; }
+#ant-marks th { text-align: left; color: var(--muted); font-weight: 600; padding: 3px 6px; }
+#ant-marks td { padding: 2px 6px; color: #c4c7cc; }
+#ant-marks tr.best td { color: #69db7c; }
+#ant-marks-wrap { max-height: 220px; overflow: auto; background: var(--field); border-radius: 6px; }
 #helpdlg .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 0; }
 #helpdlg .help-head h2 { margin: 0; }
 #help-toc { padding: 6px 16px; color: var(--muted); }
@@ -292,6 +317,7 @@ canvas.mpx { cursor: pointer; }
     <span id="signin"><input type="password" placeholder="password" autocomplete="current-password"><button class="primary">Sign in</button><span class="err"></span></span>
   </span>
   <button id="help-btn" title="Help: using this page, the guide and the command-line options">?</button>
+  <button id="ant" disabled title="Tune the antenna: each station's S/N live at a fixed gain, to compare lengths, positions or antennas">Antenna tune</button>
   <button id="cal" disabled title="Set the SDR gain for the stations being received now (takes a few seconds; the meters restart afterwards)">&#x27F2;&nbsp; Recalibrate gain</button>
   <button id="add" class="primary" disabled>+&nbsp; Add receiver</button>
 </header>
@@ -341,6 +367,24 @@ canvas.mpx { cursor: pointer; }
   <canvas id="stereo-scope"></canvas>
   <div id="stereo-phase"></div>
   <div id="stereo-readouts"></div>
+</dialog>
+<dialog id="antwin">
+  <div class="help-head"><h2>Antenna tune</h2><button id="ant-close">Close</button></div>
+  <p class="intro">Adjust the antenna (length, position, direction) a little at a time and watch the score: the weakest
+  station's S/N over the noise floor. The white tick on each bar is its best so far. The gain stays where it is until
+  tuning stops, so every reading compares with every other. Mark each setting you try, then go back to the best. A
+  better antenna can bring multipath or overload with it: watch AM / multipath and the ADC peaks too. The tone, when
+  on, rises a semitone for each dB of score. The receivers' alarms are held while tuning.</p>
+  <div id="ant-score">-</div>
+  <div id="ant-status"></div>
+  <div id="ant-rows"></div>
+  <div class="ant-mark">
+    <input id="ant-label" maxlength="80" placeholder="what this setting is, e.g. dipole 75 cm">
+    <button id="ant-markbtn" class="primary">Mark</button><button id="ant-hold">Reset peak hold</button>
+  </div>
+  <label><input type="checkbox" id="ant-tone"> Tone (pitch follows the score; for tuning without looking)</label>
+  <div id="ant-marks-wrap"><table id="ant-marks"><thead><tr><th>Setting</th><th>Score</th><th>Weakest</th><th>AM / multipath</th><th>ADC peaks</th><th>Marked</th></tr></thead><tbody></tbody></table></div>
+  <div class="buttons"><button id="ant-stop">Stop tuning</button></div>
 </dialog>
 <dialog id="helpdlg">
   <div class="help-head"><h2>FM-Modmon-ms help</h2><button id="help-close">Close</button></div>
@@ -1406,10 +1450,11 @@ function render(s) {
   const chips = $('#chips'), sig = JSON.stringify(s.chips);
   if (chips._sig !== sig) { chips._sig = sig; chips.replaceChildren(...s.chips.map(c => h('span', 'chip', c))); chips.style.display = 'contents'; }
   const cal = $('#cal');
-  cal.disabled = !control || s.calibrating;
+  cal.disabled = !control || s.calibrating || !!s.antenna;
   setText(cal, s.calibrating ? '⟲  Calibrating…' : '⟲  Recalibrate gain');
   const add = $('#add');
   add.disabled = !control || !s.add.enabled; add.title = s.add.tip || '';
+  renderAntenna(s);
   // receivers: add new ones in receiver order, drop removed ones
   const want = new Set(s.receivers.map(r => r.receiver));
   for (const [n, p] of recv) if (!want.has(n)) { p.stop(); p.row.remove(); p.detail.remove(); recv.delete(n); }
@@ -1436,6 +1481,87 @@ function render(s) {
     }).catch(() => {});
   }
 }
+
+// ---------------------------------------------------------------- antenna tuning
+const ANT_MAX = 60;   // dB, the bars' full scale (as the app)
+const antTone = {ctx: null, osc: null, gain: null,
+  set(score) {   // a semitone a dB: 220 Hz at 10 dB; silent with no score
+    if (score == null || !$('#ant-tone').checked || !$('#antwin').open) { this.stop(); return; }
+    if (!this.ctx) {
+      try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+    }
+    if (!this.osc) {
+      this.osc = this.ctx.createOscillator(); this.gain = this.ctx.createGain();
+      this.gain.gain.value = 0.06; this.osc.connect(this.gain).connect(this.ctx.destination); this.osc.start();
+    }
+    const f = 220 * Math.pow(2, (Math.min(Math.max(score, 0), 50) - 10) / 12);
+    this.osc.frequency.setTargetAtTime(f, this.ctx.currentTime, 0.08);
+  },
+  stop() { if (this.osc) { try { this.osc.stop(); } catch (e) {} this.osc.disconnect(); this.osc = null; } },
+};
+function renderAntenna(s) {
+  const a = s.antenna, btn = $('#ant'), dlg = $('#antwin');
+  btn.disabled = a ? false : (!control || s.calibrating);
+  setText(btn, a ? 'Antenna tune · on' : 'Antenna tune');
+  btn.classList.toggle('primary', !!a);
+  $('#ant-markbtn').disabled = $('#ant-hold').disabled = $('#ant-stop').disabled = !control || !a;
+  if (!a) { antTone.stop(); if (dlg.open) { setText($('#ant-score'), 'Tuning has stopped'); setText($('#ant-status'), ''); } return; }
+  if (!dlg.open) return;
+  const sc = $('#ant-score');
+  if (a.score == null) sc.replaceChildren('Score: measuring…');
+  else sc.replaceChildren(`Score ${a.score.toFixed(1)} dB `,
+    h('small', null, a.best_score == null ? '' : `best ${a.best_score.toFixed(1)}, now ${sgn(Math.abs(a.score - a.best_score) < 0.05 ? 0 : a.score - a.best_score)}`));
+  const adc = a.peak_db == null ? 'ADC peaks -' : `ADC peaks ${a.peak_db.toFixed(0)} dBFS`, st = $('#ant-status');
+  st.className = a.overload ? 'red' : a.stale ? 'amber' : '';
+  setText(st, a.overload ? `${adc}: OVERLOAD, so the readings are false. Too much signal: try less antenna, or recalibrate the gain once tuning is done.`
+              : a.stale ? `No samples from the SDR. ${adc}.` : `Gain held at ${a.gain} · ${adc}`);
+  const rows = $('#ant-rows'), sig = JSON.stringify(a.stations.map(x => x.freq));
+  if (rows._sig !== sig) {
+    rows._sig = sig;
+    rows.replaceChildren(...a.stations.map(() => {
+      const r = h('div', 'ant-row'), bar = h('div', 'antbar');
+      bar.append(h('div', 'fill'), h('div', 'tick'));
+      r.append(h('span', 'name'), bar, h('span', 'val'), h('span', 'mp'));
+      return r;
+    }));
+  }
+  a.stations.forEach((x, i) => {
+    const r = rows.children[i], pct = v => Math.min(Math.max(v / ANT_MAX, 0), 1) * 100 + '%';
+    const weakest = x.snr != null && x.snr === a.score && a.stations.length > 1;
+    const cls = a.stale ? 'off' : (a.overload || weakest) ? 'amber' : '';
+    setText($('.name', r), x.name);
+    const fill = $('.fill', r); fill.style.width = x.snr == null ? '0' : pct(x.snr); fill.className = 'fill ' + cls;
+    const tick = $('.tick', r); tick.style.display = x.best == null ? 'none' : ''; if (x.best != null) tick.style.left = pct(x.best);
+    const val = $('.val', r); setText(val, x.snr == null ? '-' : x.snr.toFixed(1) + ' dB'); val.className = 'val ' + (cls === 'amber' ? 'amber' : '');
+    const mp = $('.mp', r); setText(mp, x.multipath == null ? 'AM / multipath -' : `AM / multipath ${x.multipath.toFixed(1)}%`);
+    mp.className = 'mp' + (x.multipath != null && x.multipath >= s.clean[0] ? ' amber' : '');
+  });
+  const body = $('#ant-marks tbody'), msig = JSON.stringify(a.marks);
+  if (body._sig !== msig) {
+    body._sig = msig;
+    body.replaceChildren(...a.marks.map((m, i) => {
+      const tr = h('tr', i === 0 && a.marks.length > 1 ? 'best' : null);
+      for (const t of [m.label, m.score.toFixed(1) + ' dB', m.weakest, m.multipath == null ? '-' : m.multipath.toFixed(1) + '%',
+                       (m.peak_db == null ? '-' : m.peak_db.toFixed(0) + ' dBFS') + (m.overload ? ' OVERLOAD' : ''), m.time])
+        tr.append(h('td', null, t));
+      return tr;
+    }));
+    if (!a.marks.length) { const tr = h('tr'), td = h('td', null, 'no settings marked yet'); td.colSpan = 6; tr.append(td); body.append(tr); }
+  }
+  antTone.set(a.stale ? null : a.score);
+}
+$('#ant').onclick = async () => {
+  if (!(state && state.antenna) && !(await api('antenna', {on: true}))) return;
+  $('#antwin').showModal(); poll(true);
+};
+$('#ant-close').onclick = () => { $('#antwin').close(); };
+$('#antwin').addEventListener('close', () => antTone.stop());
+$('#ant-stop').onclick = async () => { if (await api('antenna', {on: false})) $('#antwin').close(); };
+$('#ant-hold').onclick = () => api('antenna_hold');
+const antMark = async () => { if (await api('antenna_mark', {label: $('#ant-label').value})) $('#ant-label').value = ''; };
+$('#ant-markbtn').onclick = antMark;
+$('#ant-label').addEventListener('keydown', e => { if (e.key === 'Enter') antMark(); });
+$('#ant-tone').onchange = () => { if (state && state.antenna) antTone.set(state.antenna.score); if (antTone.ctx) antTone.ctx.resume(); };
 
 let polling = false;
 async function poll(now) {
