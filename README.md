@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/2ee09cf4-8ef9-4e7f-abff-613bd7426aa1
 
 Per station, refreshed 10× a second:
 
-- **Modulation** – peak +/− (flagged when lopsided), peak deviation, over-100% / over-110%
+- **Modulation** – peak +/− (flagged when lopsided), over-100% / over-110%
   counts, the ITU-R SM.1268 over-deviation share over 15 minutes, the share of time
   reception was valid for peak readings, L, R, L+R, L−R, ITU-R BS.412 MPX power, and an
   MPX spectrum to 100 kHz
@@ -35,7 +35,8 @@ Per station, refreshed 10× a second:
   above 100 kHz, pilot level, frequency and AM, RDS injection and its phase against the
   pilot, SCA 67 / 92 kHz injection (and whether an SCA carries audio, data, a tone or
   nothing), and IBOC sideband level
-- **Loudness** – ITU-R BS.1770 / EBU R128 momentary, short-term, integrated and true peak
+- **Loudness** – ITU-R BS.1770 / EBU R128 momentary, short-term, integrated and true peak,
+  loudness range (EBU Tech 3342) and max momentary / short-term (EBU Tech 3341)
 - **Stereo image** – levels, balance, correlation, width and a goniometer
 - **RDS** – PI, PS, RT, RT+ (Alarm tags in red), PTY / PTYN, flags, AF, ECC, ODA, CT,
   group rate and loss, group types
@@ -64,15 +65,26 @@ while one of its alarms waits to be acknowledged (see Alarms).
 Click a row to select its receiver: its detail view opens right under that row (double-click
 to give it its own window). The player in the header always plays the selected receiver, with
 that receiver's audio source: Listen starts it, and selecting another receiver while listening
-switches the audio to that one (the web page's player does the same in the browser). The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
-Audio cards, listing what a station doesn't carry once instead of as dashes, and a History
-tab: the readings as stacked strips over 1 minute to 1 hour with one cursor across them.
-Under it, the Alarms tab lists each alarm once, with how long it lasted.
+switches the audio to that one (the web page's player does the same in the browser).
+The detail view has tabs:
 
-Each card shows its essential readings; "All" shows the rest (remembered, the same for every
-receiver; the web page remembers its own choice per browser), and a hidden reading shows
-anyway, marked ▲, while it is out of range, with one line above the cards listing everything
-out of range (what doesn't fit is counted, "+n more"). Click any reading, bar, graph's (i) or alarm lamp, a station row's bars or
+- **Overview** – the Modulation, Multiplex, RDS and Audio cards with their essential
+  readings, listing what a station doesn't carry once instead of as dashes. A hidden reading
+  shows anyway, marked ▲, while it is out of range, with one line above the cards listing
+  everything out of range (what doesn't fit is counted, "+n more").
+- **MPX** – the Modulation and Multiplex cards in full beside the ITU-R SM.1268 views: a
+  header line (peaks, MPX power and the hour's highest, the share over 75 and 77 kHz and over
+  the limit + 2 kHz, the valid time), a large MPX spectrum with peak hold, the deviation
+  exceedance plot (the share of samples over each level, log scale, under the mouse) and MPX
+  power over the last hour with its highest marked. A click on the small spectrum opens it.
+- **RDS** – the RDS card in full.
+- **Audio** – the Audio card in full (with loudness range and max momentary / short-term),
+  a large goniometer and the phase meter. A click on the small goniometer opens it.
+- **History** – the readings as stacked strips over 1 minute to 1 hour with one cursor across
+  them.
+
+The tab is the same for every receiver (the web page remembers its own per browser). Under
+the detail, the Alarms tab lists each alarm once, with how long it lasted. Click any reading, bar, graph's (i) or alarm lamp, a station row's bars or
 peak trend, or a History strip's name, for what it is, how it's measured, what it means
 right now and the rule or standard behind it.
 

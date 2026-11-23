@@ -5,11 +5,12 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
 
 - Python: radioconda's, `C:\ProgramData\radioconda\python.exe` (has GNU Radio, gr-rds, SoapySDR).
 - Run: `C:\ProgramData\radioconda\python.exe fm-modmon-ms.py` (`--help` for options).
+- All suites in parallel (~2 min, slowest first; name words filter): `tests\run_all.py [words] [-j N]`.
 - Test (no SDR needed; synthetic transmitter): `tests\verify_meas.py` and `tests\rules_test.py`;
   both exit non-zero on a wrong reading. Run both after touching measurements or alarms.
   `tests\setup_test.py` covers the setup wizard, password hashing and Credential Manager.
   `tests\radiovis_test.py` covers the RadioDNS slideshow against local fake servers.
-  `tests\state_test.py` covers the panel's plain readings, alarm states and History.
+  `tests\state_test.py` covers the panel's plain readings, alarm states, History, the detail tabs and LRA.
   `tests\centre_test.py` covers where the SDR centres (off DC, off IQ images, inside the IF filter).
   `tests\rds_feed_test.py` covers the RDS group TCP feed (a stalled client never blocks the decoder).
   `tests\gain_test.py` covers the band scan's and gain calibration's ADC headroom (a simulated, clipping RSP1A,
