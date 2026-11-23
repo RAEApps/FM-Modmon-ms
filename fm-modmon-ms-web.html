@@ -99,8 +99,10 @@ header .grow { flex: 1; }
 .tape .lim::before { content: ''; position: absolute; left: -3.5px; top: -1px; border: 3.5px solid transparent; border-top: 4px solid var(--red); }
 .tape .zero { position: absolute; top: -3px; bottom: -3px; width: 1px; background: #5d6167; }
 .tape .v { text-align: right; font-weight: 700; white-space: nowrap; color: var(--bright); }
-.trend { display: grid; gap: 1px; min-width: 0; }
-.trend .note { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; }
+.trend { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; min-width: 0; }
+.trend .note { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.trend .last { font: 600 13px Consolas, monospace; color: var(--bright); }
+.trend canvas.spark { height: 34px; }
 canvas.spark { width: 100%; height: 26px; display: block; }
 .ann { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; }
 .lamp { font: 600 9px/1 Consolas, monospace; text-align: center; padding: 4px 0; border-radius: 2px; background: #2b2d31; color: #9aa0a6; cursor: help; }
@@ -129,10 +131,15 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 #banner .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #banner .t b { color: var(--pc); }
 #banner .when { color: #b8bdc4; }
-#alarms tr.unack td:nth-child(4) { font-weight: 700; }
+#alarms tr.unack td:nth-child(5) { font-weight: 700; }
 .lamp[data-s=pending] { background: #372f29; color: var(--amber); }
 .lamp[data-s=suppressed] { background: repeating-linear-gradient(135deg, #2b2d31 0 3px, #372f29 3px 6px); color: var(--amber); }
 .lamp[data-s=off] { background: transparent; color: #5d6167; box-shadow: inset 0 0 0 1px #34373d; }
+.lamp[data-s=shelved] { background: transparent; color: #9aa0a6; outline: 1px dotted #9aa0a6; outline-offset: -1px; }
+#ctxmenu { position: fixed; z-index: 50; display: none; flex-direction: column; background: var(--card); border: 1px solid var(--card-b); border-radius: 3px; padding: 3px; }
+#ctxmenu button { background: transparent; border: none; text-align: left; padding: 4px 12px; color: var(--bright); }
+#ctxmenu button:hover:not(:disabled) { background: var(--btn); }
+#ctxmenu button:disabled { color: var(--dim); }
 .rbtn { display: grid; gap: 2px; }
 .rbtn button { padding: 0 4px; border-color: transparent; background: transparent; color: var(--muted); line-height: 20px; }
 .rbtn button:hover:not(:disabled) { border-color: var(--btn-b); color: var(--text); }
@@ -159,8 +166,11 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 .tabcards .card { width: 300px; }
 .tabside { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .tabside .plots { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.smstrip { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.smstrip span { color: var(--bright); font-weight: 600; } .smstrip span.red { color: var(--red); } .smstrip span.amber { color: var(--amber); }
+.smcells { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--card-b); }
+.smcells > div { display: grid; gap: 1px; padding: 4px 12px; border-right: 1px solid var(--card-b); }
+.smcells .k, .smcells .n, .smcells .u { color: var(--dim); font-size: 11px; }
+.smcells .v { font: 13px Consolas, monospace; color: var(--bright); }
+.marker { color: var(--accent); font: 11px Consolas, monospace; }
 canvas.bigmpx { width: 100%; height: 260px; }
 canvas.tabplot { width: 100%; height: 200px; }
 canvas.biggonio { width: 360px; height: 360px; max-width: 100%; }
@@ -168,6 +178,8 @@ canvas.biggonio { width: 360px; height: 360px; max-width: 100%; }
 .card-head { display: flex; align-items: center; gap: 6px; }
 .card-title { flex: 1; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
 .card-head .x { color: var(--dim); font-size: 11px; }
+.card-head .tablink { color: var(--accent); font-size: 11px; text-decoration: none; }
+.tabcards .card-head .tablink { display: none; }
 .card-head button { padding: 0 8px; }
 .kv { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); column-gap: 8px; row-gap: 2px; }
 .kv.one { grid-template-columns: auto minmax(0, 1fr); }
@@ -237,7 +249,11 @@ canvas.gonio { width: 104px; height: 104px; flex: none; cursor: pointer; }
 .tabs button { background: transparent; border: none; color: var(--muted); padding: 2px 10px; border-radius: 3px; }
 .tabs button.on { background: var(--btn); color: var(--bright); }
 .tabs button.red { color: var(--red); }
-#alarms, #log { background: var(--field); border-radius: 3px; height: 110px; overflow: auto; }
+#alarms, #log { background: var(--field); border-radius: 3px; height: var(--log-h, 160px); min-height: 60px; overflow: auto; resize: vertical; }
+.logbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.logbar .tabs { margin: 0 auto 0 0; }
+#filter-box { color: var(--dim); font-size: 13px; }
+#log-filter { width: 200px; }
 #log { padding: 6px 8px; font: 13px Consolas, monospace; color: #b8bdc4; white-space: pre; }
 #alarms table { border-collapse: collapse; width: 100%; font-size: 13px; }
 #alarms th { text-align: left; color: var(--muted); font-weight: 600; padding: 3px 8px; position: sticky; top: 0; background: var(--field); }
@@ -255,7 +271,7 @@ dialog h2 { margin: 0 0 12px; font-size: 16px; color: var(--accent); }
 .form label.k { text-align: right; color: var(--muted); }
 fieldset { grid-column: 1 / span 2; border: 1px solid var(--btn-b); border-radius: 3px; }
 legend { color: var(--accent); }
-.alarm-grid { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+.alarm-grid { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; }
 .alarm-grid input[type=number] { width: 64px; }
 .alarm-grid .limit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .alarm-grid > label { white-space: nowrap; }
@@ -354,15 +370,18 @@ canvas.mpx { cursor: pointer; }
   <button id="cal" disabled title="Set the SDR gain for the stations being received now (takes a few seconds; the meters restart afterwards)">Recalibrate gain</button>
   <button id="add" class="primary" disabled>+&nbsp; Add receiver</button>
 </header>
-<div class="colhead"><span></span><span>Station</span><span>Text · RT+ · flags</span><span>Now · peak hold · limit ▼</span><span>Trend · 5 min</span><span>Alarms</span><span></span></div>
+<div class="colhead"><span></span><span>Station</span><span>Text · RT+ · flags</span><span>Levels · MOD peak hold 2 s</span><span>Peak mod · 5 min</span><span>Alarms</span><span></span></div>
 <div id="rows"></div>
 <div id="details"></div>
 <div id="logs">
   <div id="banner" role="alert"><span class="prio"></span><span class="t"></span>
     <button id="ack-one" title="Acknowledge the alarm shown">Acknowledge</button><button id="ack-all">Acknowledge all</button>
     <label title="A tone in this browser while a priority 1 alarm waits to be acknowledged"><input type="checkbox" id="beep"> Sound</label></div>
-  <div class="tabs"><button id="tab-alarms" class="on">Alarms</button><button id="tab-events">Events</button></div>
-  <div id="alarms"><table><thead><tr><th>Pri</th><th>Raised</th><th>Station</th><th>Alarm</th><th>Duration</th><th>Cleared</th><th>Ack</th><th>Measured</th></tr></thead><tbody></tbody></table></div>
+  <div class="logbar"><div class="tabs"><button id="tab-alarms" class="on">Alarms</button><button id="tab-events">Events</button></div>
+    <label id="filter-box">Filter <input id="log-filter" type="search" placeholder="alarm, station, text"
+      title="Show only the alarms that hold every word typed here"></label>
+    <button id="export" title="Save every alarm of this session as a CSV file">Export CSV</button></div>
+  <div id="alarms"><table><thead><tr><th>Pri</th><th>Raised</th><th>Rx</th><th>Station</th><th>Alarm</th><th>Duration</th><th>Cleared</th><th>Ack</th><th>Measured</th></tr></thead><tbody></tbody></table></div>
   <div id="log" style="display:none"></div>
 </div>
 
@@ -783,7 +802,7 @@ function placeTab(p) {
     if (p.cardEls[key].parentNode !== home || home.lastChild !== p.cardEls[key]) home.append(p.cardEls[key]);
 }
 // the MPX tab's deviation exceedance: the share of samples over each level, log scale (ExceedancePlot)
-function drawExceed(cv, ccdf, limitKhz, mouseX) {
+function drawExceed(cv, ccdf, limitKhz, mouseX, markerKhz) {
   const [c, w, hh] = canvasCtx(cv);
   c.clearRect(0, 0, w, hh);
   const L = 40, T = 6, R = w - 8, B = hh - 16, LO = 60, STEP = 0.5, N = ccdf ? ccdf.length : 120, HI = LO + N * STEP, DEC = 7;
@@ -810,6 +829,11 @@ function drawExceed(cv, ccdf, limitKhz, mouseX) {
   let first = true;
   ccdf.forEach((s, i) => { if (s > 0) { const X = x(LO + i * STEP), Y = y(s); first ? c.moveTo(X, Y) : c.lineTo(X, Y); first = false; } });
   c.stroke();
+  if (markerKhz != null) {   // the placed marker: a line, and a square where it meets the curve
+    const mx = x(markerKhz), ms = shareAt(ccdf, markerKhz);
+    c.strokeStyle = '#8ab4f8'; c.lineWidth = 1; c.beginPath(); c.moveTo(mx, T); c.lineTo(mx, B); c.stroke();
+    if (ms) { c.fillStyle = '#8ab4f8'; c.fillRect(mx - 3, y(ms) - 3, 6, 6); }
+  }
   if (mouseX != null && mouseX >= L && mouseX <= R) {
     const k = LO + (mouseX - L) / (R - L) * (HI - LO), s = ccdf[Math.min(Math.max(Math.round((k - LO) / STEP), 0), N - 1)];
     c.strokeStyle = '#8ab4f8'; c.lineWidth = 1; c.beginPath(); c.moveTo(mouseX, T); c.lineTo(mouseX, B); c.stroke();
@@ -817,6 +841,14 @@ function drawExceed(cv, ccdf, limitKhz, mouseX) {
     c.fillText(`${k.toFixed(1)} kHz (${(k / 0.75).toFixed(0)}%): ` +
                (s ? `${s.toExponential(1)} of samples over (${(s * 1e6).toFixed(2)} ppm)` : 'none over'), R - 4, T + 2);
   }
+}
+// the share of samples above `khz` (ExceedancePlot.share_at), and the marker's readout (marker_text)
+const shareAt = (ccdf, khz) => ccdf ? ccdf[Math.min(Math.max(Math.round((khz - 60) / 0.5), 0), ccdf.length - 1)] : null;
+function markerText(ccdf, khz) {
+  const sh = shareAt(ccdf, khz), head = `Marker ${khz.toFixed(1)} kHz · ${(khz / 0.75).toFixed(1)}%   `;
+  if (sh == null) return head + 'no valid reception yet';
+  return head + (sh ? `${sh.toExponential(1)} of samples above (${(sh * 1e6).toFixed(2)} ppm)` : 'no samples above')
+         + '   · click the plot to move it';
 }
 // the MPX tab's MPX power over the last hour, the highest of each 10 s (MpxPowerPlot): 0 dBr dashed,
 // the hour's highest boxed, its average dashed; returns {max, mean} for the header line
@@ -832,7 +864,10 @@ function drawPower(cv, vals) {
   c.fillStyle = C.axis; c.font = '11px "Segoe UI", sans-serif'; c.textAlign = 'right'; c.textBaseline = 'middle';
   for (const d of [-12, -6, 0, 6]) c.fillText(d > 0 ? `+${d}` : d < 0 ? `−${-d}` : '0', L - 4, y(d));
   c.textAlign = 'center'; c.textBaseline = 'top';
-  for (const m of [60, 45, 30, 15, 0]) c.fillText(m ? `−${m} min` : 'now', x((n - 1) * (1 - m / 60)), B + 2);
+  for (const m of [60, 45, 30, 15, 0]) {   // clock times, as the app
+    c.textAlign = m === 60 ? 'left' : m ? 'center' : 'right';
+    c.fillText(new Date(Date.now() - m * 60000).toTimeString().slice(0, 5), x((n - 1) * (1 - m / 60)), B + 2);
+  }
   c.setLineDash([4, 3]); c.strokeStyle = C.red; c.beginPath(); c.moveTo(L, y(0)); c.lineTo(R, y(0)); c.stroke(); c.setLineDash([]);
   const pts = (vals || []).map((v, i) => [i, v]).filter(([, v]) => v != null);
   if (!pts.length) {
@@ -857,16 +892,20 @@ function drawTabViews(p, r) {
     p.mpxHold = !db ? null : p.mpxHold && p.mpxHold.length === db.length ? db.map((d, i) => Math.max(d, p.mpxHold[i] - fall)) : db.slice();
     p.mpxDb = db;
     drawMpx(p.bigMpx, db, {hold: p.mpxHold, cursor: p.bigMpxX});
-    drawExceed(p.exceed, rd.exceed_ccdf, rd.exceed_khz, p.exceedX);
-    const hour = drawPower(p.power, r.mpx_hour), parts = [];
-    if (fin(rd.pos_pct)) parts.push('Peak ', [`+${fx(rd.pos_pct)} / −${fx(rd.neg_pct)} %`, lv.pos_pct || lv.neg_pct || 'on'], '  ·  ');
-    if (fin(rd.mpx_dbr)) parts.push('MPX power ', [`${rd.mpx_dbr >= 0 ? '+' : ''}${fx(rd.mpx_dbr)} dBr`, 'on'],
-                                   hour ? ` (highest ${hour.max >= 0 ? '+' : ''}${fx(hour.max)} in the hour)  ·  ` : '  ·  ');
-    for (const [k, khz] of [['over75', 75], ['over77', 77]])
-      if (rd[k] != null) parts.push(`over ${khz} kHz `, [`${fx(rd[k] * 1e6, 2)} ppm`, 'on'], '  ·  ');
-    if (rd.exceed_frac != null) parts.push(`over the limit + 2 kHz (${fx(rd.exceed_khz)}) `, [`${fx(rd.exceed_frac * 1e6, 2)} ppm`, lv.exceed_frac || 'on'], '  ·  ');
-    parts.push(`${fx((rd.exceed_valid_s || 0) / 60, 0)} of 15 min valid`);
-    setParts(p.smStrip, parts);
+    drawExceed(p.exceed, rd.exceed_ccdf, rd.exceed_khz, p.exceedX, p.markerKhz);
+    setText(p.marker, markerText(rd.exceed_ccdf, p.markerKhz));
+    drawPower(p.power, r.mpx_hour);
+    // the header cells, as the app's sm_cells (sent ready-made, so both say the same)
+    const sig = JSON.stringify(r.sm_cells || []);
+    if (p.smCells._sig !== sig) {
+      p.smCells._sig = sig;
+      p.smCells.replaceChildren(...(r.sm_cells || []).map(([k, v, u, note, level]) => {
+        const cell = h('div'), val = h('div');
+        val.append(h('span', 'v' + (level ? ' ' + (level === 'alarm' ? 'alarm' : 'warn') : ''), v), h('span', 'u', ' ' + u));
+        cell.append(h('div', 'k', k), val, h('div', 'n', note));
+        return cell;
+      }));
+    }
   } else if (detailTab === 'Audio') {
     drawGonio(p.bigGonio, r.gonio, p.gonioFrames);
     if (r.gonio) { p.gonioFrames.push(r.gonio); if (p.gonioFrames.length > 9) p.gonioFrames.shift(); }
@@ -972,10 +1011,30 @@ function kv(names, cols, wide = []) {
   }
   return {el, vals};
 }
-function card(title, extra) {
+// a small right-click menu: items [[label, action or null (greyed)]]; any click closes it
+function popMenu(x, y, items) {
+  let m = $('#ctxmenu');
+  if (!m) { m = h('div'); m.id = 'ctxmenu'; document.body.append(m);
+            document.addEventListener('click', () => { m.style.display = 'none'; }); }
+  m.replaceChildren(...items.map(([label, act]) => {
+    const b = h('button', null, label); b.disabled = !act || !control;
+    b.onclick = ev => { ev.stopPropagation(); m.style.display = 'none'; act(); };
+    return b;
+  }));
+  m.style.display = 'flex';
+  m.style.left = Math.min(x, innerWidth - m.offsetWidth - 8) + 'px';
+  m.style.top = Math.min(y, innerHeight - m.offsetHeight - 8) + 'px';
+}
+function card(title, extra, tab) {
+  // tab: the tab that shows it in full, linked from its head on Overview (as the app's _card_head)
   const el = h('div', 'card'), head = h('div', 'card-head');
   head.append(h('span', 'card-title', title));
   if (extra) head.append(extra);
+  if (tab) {
+    const a = h('a', 'tablink', tab + ' tab'); a.href = '#'; a.title = `All of its readings, in the ${tab} tab`;
+    a.onclick = e => { e.preventDefault(); e.stopPropagation(); showTab(tab); };
+    head.append(a);
+  }
   el.append(head);
   return el;
 }
@@ -1011,23 +1070,28 @@ function buildReceiver(r, alarmDefs) {
   txt.append(p.rt, p.sub);
   const tapes = h('div', 'tapes');
   p.tapes = {mod: makeTape('MOD', 0, 130, {band: [85, 100], hold: true}), rf: makeTape('RF', -90, -10, {band: [-60, -10]}),
-             am: makeTape('AM', 0, 40, {band: [0, state.clean[0]]})};
+             am: makeTape('AM', 0, 40, {band: [0, state.clean[0]]}), mpx: makeTape('MPX', -12, 6, {band: [-6, 0]})};
+  p.tapes.mpx.el.title = 'MPX power (ITU-R BS.412), 60 s integration, against 0 dBr (red notch). Click for details.';
   p.tapes.mod.el.title = 'Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force (red notch); the grey band is the normal range. Click for details.';
   p.tapes.rf.el.title = 'RF level at the SDR. Click for details.';
   p.tapes.am.el.title = 'AM on the carrier: multipath or a transmitter fault. Click for details.';
   for (const t of Object.values(p.tapes)) tapes.append(t.el);
   const trend = h('div', 'trend');
-  p.trendNote = h('div', 'note'); p.spark = h('canvas', 'spark');
+  p.trendNote = h('div', 'note'); p.trendLast = h('div', 'last', '-'); p.spark = h('canvas', 'spark');
   p.spark.title = 'Peak modulation, the last 5 minutes (each point: its highest); red: over the limit in force. Click for details.';
-  trend.append(p.trendNote, p.spark);
+  const trendEnd = h('div'); trendEnd.append(p.trendLast, p.trendNote);
+  trend.append(p.spark, trendEnd);
   const ann = h('div', 'ann'); p.lamps = {};
   for (const [name, desc, short] of alarmDefs) {
     const l = h('div', 'lamp', short); l.dataset.desc = desc; p.lamps[name] = l; ann.append(l);
     l.onclick = () => explainAlarm(p, name, l);   // (the row selects the receiver too)
-    l.oncontextmenu = e => {   // right-click: acknowledge this alarm
+    l.oncontextmenu = e => {   // right-click: acknowledge, shelve or unshelve this alarm (as the app's lamp menu)
       e.preventDefault(); e.stopPropagation();
-      const ids = waitingFor(n, name);
-      if (ids.length) api('ack', {ids}); else toast(`${short}: nothing to acknowledge`);
+      const ids = waitingFor(n, name), items = [[`Acknowledge ${short}`, ids.length ? () => api('ack', {ids}) : null]];
+      if (l.dataset.s === 'shelved') items.push([`Unshelve ${short}`, () => api('shelve', {receiver: n, alarm: name, seconds: 0})]);
+      else for (const [sec, words] of state.shelve_choices)
+        items.push([`Shelve ${short} for ${words}`, l.dataset.s === 'off' ? null : () => api('shelve', {receiver: n, alarm: name, seconds: sec})]);
+      popMenu(e.clientX, e.clientY, items);
     };
   }
   p.stat = h('div', 'stat'); p.stat.append(h('span', 'prio'), h('span'));
@@ -1080,7 +1144,7 @@ function buildReceiver(r, alarmDefs) {
   const add = ({el, vals}) => { Object.assign(p.vals, vals); return el; };
   // modulation
   p.limitNote = readable(h('span', 'x'), 'Limit');
-  const mod = card('Modulation', p.limitNote);
+  const mod = card('Modulation', p.limitNote, 'MPX');
   p.peak = {pos: makeTape('+ peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110}),
             neg: makeTape('− peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110})};
   p.hist = readable(h('canvas', 'hist'), 'Peak distribution');
@@ -1089,7 +1153,7 @@ function buildReceiver(r, alarmDefs) {
              add(kv(['Limit', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
                        'Valid time', 'Over-deviation (15 min)'], 1, ['Valid time', 'Over-deviation (15 min)'])));
   // multiplex
-  const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'));
+  const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'), 'MPX');
   p.mpx = h('canvas', 'mpx'); p.mpx.title = 'Click for the MPX tab'; p.mpx.onclick = () => showTab('MPX');
   p.mpxT = {snr: makeTape('S/N', 0, 70, {band: [30, 70], nameW: 50, valW: 110}), pilot: makeTape('Pilot', 6, 12, {band: [8, 10], nameW: 50, valW: 110}),
             offset: makeTape('Offset', -3000, 3000, {origin: 0, band: [-1000, 1000], nameW: 50, valW: 110})};
@@ -1100,7 +1164,7 @@ function buildReceiver(r, alarmDefs) {
                     ['RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'])), p.absMpx);
   // RDS
   p.rdsNote = h('span', 'x');
-  const rds = card('RDS', p.rdsNote);
+  const rds = card('RDS', p.rdsNote, 'RDS');
   p.rdsSpark = readable(h('canvas', 'spark'), 'RDS rate');
   p.absRds = h('div', 'absent');
   rds.append(p.rdsSpark, add(kv(['PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'], 1,
@@ -1108,7 +1172,7 @@ function buildReceiver(r, alarmDefs) {
   // audio
   const reset = h('button', null, 'reset I'); reset.title = 'Start the integrated loudness again';
   reset.onclick = () => api('reset_integrated', {receiver: n});
-  const audio = card('Audio', reset);
+  const audio = card('Audio', reset, 'Audio');
   p.lufsSpark = readable(h('canvas', 'spark'), 'Loudness trend');
   const st = h('div', 'stereo'), side = h('div');
   p.gonio = h('canvas', 'gonio'); p.gonio.title = 'Click for the Audio tab'; p.gonio.onclick = () => showTab('Audio');
@@ -1128,20 +1192,28 @@ function buildReceiver(r, alarmDefs) {
   const tabCards = () => h('div', 'tabcards');
   p.tabCards = {MPX: tabCards(), RDS: tabCards(), Audio: tabCards()};
   const mpxPage = h('div', 'tabpage'), mpxSide = h('div', 'tabside');
-  p.smStrip = h('div', 'smstrip');
+  p.smCells = h('div', 'smcells'); p.markerKhz = 76; p.marker = h('div', 'marker');
   p.bigMpx = readable(h('canvas', 'bigmpx'), 'MPX spectrum');
-  p.exceed = readable(h('canvas', 'tabplot'), 'Deviation exceedance');
+  p.exceed = h('canvas', 'tabplot');   // (a click places the marker, so no explanation on click)
+  p.exceed.title = READ['Deviation exceedance'].what + ' Click to place the marker.';
+  p.exceed.style.cursor = 'crosshair';
+  p.exceed.onclick = e => {
+    const L = 40, R = p.exceed.clientWidth - 8;
+    if (e.offsetX < L || e.offsetX > R) return;
+    p.markerKhz = Math.round((60 + (e.offsetX - L) / (R - L) * 60) / 0.5) * 0.5;
+    if (p.r) drawTabViews(p, p.r);
+  };
   p.power = readable(h('canvas', 'tabplot'), 'MPX power, last hour');
   p.bigMpx.onmousemove = e => { p.bigMpxX = e.offsetX; if (p.r) drawMpx(p.bigMpx, p.mpxDb, {hold: p.mpxHold, cursor: p.bigMpxX}); };
   p.bigMpx.onmouseleave = () => { p.bigMpxX = null; };
-  p.exceed.onmousemove = e => { p.exceedX = e.offsetX; if (p.r) drawExceed(p.exceed, p.r.readings.exceed_ccdf, p.r.readings.exceed_khz, p.exceedX); };
+  p.exceed.onmousemove = e => { p.exceedX = e.offsetX; if (p.r) drawExceed(p.exceed, p.r.readings.exceed_ccdf, p.r.readings.exceed_khz, p.exceedX, p.markerKhz); };
   p.exceed.onmouseleave = () => { p.exceedX = null; };
   const plots = h('div', 'plots');
-  for (const [cap, cv] of [['Deviation exceedance · share of samples over · 15 min valid', p.exceed],
-                           ['MPX power · 60 s integration · last hour', p.power]]) {
-    const col = h('div'); col.append(h('div', 'cap', cap), cv); plots.append(col);
+  for (const [cap, cv, under] of [['Deviation exceedance · share of samples above · last 15 min valid', p.exceed, p.marker],
+                                  ['MPX power · 60 s window · last 60 min · limit 0 dBr (BS.412)', p.power, null]]) {
+    const col = h('div'); col.append(h('div', 'cap', cap), cv); if (under) col.append(under); plots.append(col);
   }
-  mpxSide.append(p.smStrip, h('div', 'cap', 'MPX spectrum · 0–100 kHz · peak hold'), p.bigMpx, plots);
+  mpxSide.append(p.smCells, h('div', 'cap', 'MPX spectrum · 0–100 kHz · 500 Hz bins · grey now, amber peak hold'), p.bigMpx, plots);
   mpxPage.append(p.tabCards.MPX, mpxSide);
   const rdsPage = h('div', 'tabpage');
   rdsPage.append(p.tabCards.RDS);
@@ -1159,7 +1231,8 @@ function buildReceiver(r, alarmDefs) {
   for (const [name, t] of Object.entries(p.tapeOf)) readable(t.el, name);
   // the row's tapes and trend (their own tooltips)
   for (const [name, el] of [['Peak modulation', p.tapes.mod.el], ['RF level', p.tapes.rf.el],
-                            ['AM / multipath', p.tapes.am.el], ['Peak trend', p.spark]]) el.dataset.r = name;
+                            ['AM / multipath', p.tapes.am.el], ['MPX power', p.tapes.mpx.el],
+                            ['Peak trend', p.spark]]) el.dataset.r = name;
   p.tapeOf['Peak modulation'] = p.tapes.mod;
   d.addEventListener('click', e => {
     const el = e.target.closest('[data-r]');
@@ -1240,9 +1313,14 @@ function updateReceiver(p, r) {
   // row: station, text, tapes, trend, annunciator
   if (rd.ps != null) setText(p.ps, rd.ps);
   p.dyn.style.display = rd.ps_dynamic ? '' : 'none';
+  // PI, stereo, pilot, RDS ok or its loss (the exact rate and PTY: the RDS card), as the app's _meta_text
   const meta = [rd.pi ? [rd.pi, 'lit'] : 'no RDS'];
-  if (rd.pi) { if (rd.pty) meta.push(' · ' + rd.pty); meta.push(` · RDS ${fx(rd.rds_rate)}/s`); }
   if (rd.stereo_mode) meta.push(' · ' + rd.stereo_mode);
+  if (rd.stereo_mode !== 'mono' && fin(rd.pilot_pct)) meta.push(' · ', [`pilot ${fx(rd.pilot_pct)}%`, lv.pilot_pct ? 'warn' : null]);
+  if (rd.pi) {
+    const loss = rd.rds_loss_pct;
+    meta.push(' · ', loss == null || loss < 1 ? 'RDS ok' : [`RDS loss ${fx(loss, 0)}%`, loss > 10 ? 'warn' : null]);
+  }
   meta.push(` · Rx ${r.receiver}` + (r.name ? ' ' + r.name : ''));
   setParts(p.meta, meta);
   p.meta.title = r.status;
@@ -1261,6 +1339,8 @@ function updateReceiver(p, r) {
     p.tapes.mod.set(peak, `+${fx(rd.pos_pct, 0)} / −${fx(rd.neg_pct, 0)}%`, ms, limit, [85, limit]);
     p.tapes.rf.set(rd.rf_dbfs, num(rd.rf_dbfs, 'dBFS', 0), rd.rf_dbfs < -75 ? 'alarm' : null);
     p.tapes.am.set(rd.am_pct, fx(rd.am_pct) + '%', lv.am_pct);
+    const dbr = fin(rd.mpx_dbr) ? rd.mpx_dbr : null;
+    p.tapes.mpx.set(dbr, dbr == null ? '-' : `${sgn(dbr)} dBr`, dbr > 0 ? 'warn' : null, 0);
     p.tapes.rf.el.title = `RF level ${num(rd.rf_dbfs, 'dBFS')}, MPX S/N ${num(rd.snr_db, 'dB')}. Click for details.`;
     for (const k of ['pos', 'neg']) {
       const v = rd[k + '_pct']; let s = lv[k + '_pct'];
@@ -1278,8 +1358,9 @@ function updateReceiver(p, r) {
   }
   const tr = r.trends || {}, alarms = rd.alarms || {}, notes = r.notes || {};
   const over = rd.over100_min;
-  setParts(p.trendNote, over == null ? 'peak modulation' : over ? ['peak modulation · ', [`${over}/min over 100%`, 'warn']]
-                                                         : `peak modulation · ${over}/min over 100%`);
+  setParts(p.trendNote, over == null ? '' : over ? [[`${over} over 100%/min`, 'warn']] : `${over} over 100%/min`);
+  const lastPeak = (tr.peak || []).filter(v => v != null && v > -998).pop();
+  setParts(p.trendLast, lastPeak == null ? '-' : [[`${fx(lastPeak, 0)}%`, limit != null && lastPeak > limit ? 'warn' : null]]);
   drawSpark(p.spark, tr.peak, 70, 125, limit, alarms.OVERMOD === 'suppressed' ? C.amber : C.red);
   const prios = (r.settings || {}).priorities || {};
   for (const [name, lamp] of Object.entries(p.lamps)) {
@@ -1492,9 +1573,18 @@ function openSettings(n) {
     const lab = h('label'); const cb = h('input'); cb.type = 'checkbox'; cb.dataset.alarm = name; cb.checked = s.alarms[name] !== false;
     lab.append(cb, ' ' + desc[0].toUpperCase() + desc.slice(1)); ag.append(lab);
     const row = rows[name];
-    if (!row) { ag.append(h('span'), h('span')); continue; }
-    const box = h('span', 'limit-row'); box.append(...row[1]);
-    ag.append(h('span', null, row[0]), box);
+    if (!row) ag.append(h('span'), h('span'));
+    else { const box = h('span', 'limit-row'); box.append(...row[1]); ag.append(h('span', null, row[0]), box); }
+    // its on and off delays (SILENCE's on-delay is the "for" beside its level)
+    const [on, off] = (s.delays || {})[name] || [0, 0], dl = h('span', 'limit-row');
+    for (const [which, v] of name === 'SILENCE' ? [['off', off]] : [['on', on], ['off', off]]) {
+      const i = h('input'); i.type = 'number'; i.min = 0; i.max = state.alarm_delay_max_s; i.step = 1; i.value = v;
+      i.dataset.delay = name; i.dataset.which = which; i.style.width = '56px';
+      i.title = which === 'on' ? 'On-delay: how long the condition must hold before it raises'
+                               : 'Off-delay: how long the condition must be gone before it clears';
+      dl.append(which + ' ', i, ' s ');
+    }
+    ag.append(dl);
   }
   for (const id of ['min_snr_db', 'silence_lufs', 'silence_s']) $('#s-' + id).value = s[id];
   const limitInputs = [...ag.querySelectorAll('input[data-limit]')];
@@ -1518,6 +1608,11 @@ function openSettings(n) {
       service_names: $('#s-names').value.trim(),
       rds_feed: $('#s-feed').checked, rds_port: num('port'),
       alarms: Object.fromEntries([...ag.querySelectorAll('input[data-alarm]')].map(cb => [cb.dataset.alarm, cb.checked])),
+      delays: Object.fromEntries(state.alarm_defs.map(([name]) => {
+        const v = which => { const i = ag.querySelector(`input[data-delay="${name}"][data-which="${which}"]`);
+                             return i ? Number(i.value) : num('silence_s'); };
+        return [name, [v('on'), v('off')]];
+      })),
       min_snr_db: num('min_snr_db'), silence_lufs: num('silence_lufs'), silence_s: num('silence_s'), rules: $('#s-rules').value,
       ...Object.fromEntries(R.limits.map(([id]) => [id, num(id)])),
     };
@@ -1594,7 +1689,7 @@ function renderAlarms(s) {
       const tr = h('tr', [e.end == null ? 'on' : '', e.acked == null ? 'unack' : ''].join(' ').trim() || null);
       const pri = h('td'); pri.append(prioMark(e), ' ' + e.priority); tr.append(pri);
       if (e.end == null) tr.style.setProperty('--pc', s.priority_colours[e.priority]);
-      for (const text of [clock(e.start, true), e.station, e.desc,
+      for (const text of [clock(e.start, true), e.slot == null ? '' : String(e.slot + 1), e.station, e.desc,
                           duration((e.end ?? s.now) - e.start) + (e.end == null ? ' …' : ''),
                           e.end == null ? 'raised' : clock(e.end)]) {
         const td = h('td', null, text); td.title = text; tr.append(td);
@@ -1605,7 +1700,8 @@ function renderAlarms(s) {
       tr.append(ack, det);
       return tr;
     }));
-    if (!eps.length) { const tr = h('tr'); const td = h('td', null, 'no alarms this session'); td.colSpan = 8; tr.append(td); body.append(tr); }
+    if (!eps.length) { const tr = h('tr'); const td = h('td', null, 'no alarms this session'); td.colSpan = 9; tr.append(td); body.append(tr); }
+    filterAlarms();
   }
   const n = eps.filter(e => e.end == null).length, waiting = eps.filter(e => e.acked == null), tab = $('#tab-alarms');
   const parts = [n ? `${n} raised` : '', waiting.length ? `${waiting.length} to acknowledge` : ''].filter(Boolean);
@@ -1665,7 +1761,40 @@ function showLog(which) {
   $('#log').style.display = which === 'events' ? '' : 'none';
   $('#tab-alarms').classList.toggle('on', which === 'alarms');
   $('#tab-events').classList.toggle('on', which === 'events');
+  $('#filter-box').style.display = $('#export').style.display = which === 'alarms' ? '' : 'none';
 }
+// the filter (every word, any case, as AlarmTable.set_filter) and the CSV export (as AlarmTable.export_csv)
+function filterAlarms() {
+  const words = $('#log-filter').value.toLowerCase().split(/\s+/).filter(Boolean);
+  for (const tr of $('#alarms tbody').children)
+    tr.style.display = words.every(w => tr.textContent.toLowerCase().includes(w)) ? '' : 'none';
+}
+$('#log-filter').oninput = filterAlarms;
+$('#export').onclick = () => {
+  if (!state) return;
+  const when = t => t == null ? '' : new Date(t * 1000).toLocaleString('sv-SE');
+  const q = v => { const t = String(v ?? ''); return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+  const rows = [['priority', 'raised', 'cleared', 'duration_s', 'receiver', 'station', 'alarm', 'name', 'measured',
+                 'acknowledged', 'acknowledged_by']];
+  for (const e of state.alarm_episodes)
+    rows.push([e.priority, when(e.start), when(e.end), e.end == null ? '' : Math.round(e.end - e.start),
+               e.slot == null ? '' : e.slot + 1, e.station, e.desc, e.name, e.detail, when(e.acked), e.acked_by]);
+  const a = h('a');
+  a.href = URL.createObjectURL(new Blob([rows.map(r => r.map(q).join(',')).join('\r\n') + '\r\n'], {type: 'text/csv'}));
+  a.download = `fm-modmon-ms_alarms_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.csv`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+// the log's height: dragged at its corner, remembered in this browser
+try { const lh = localStorage.getItem('fm-modmon-ms-log-h'); if (lh) document.documentElement.style.setProperty('--log-h', lh); } catch (e) {}
+new ResizeObserver(entries => {
+  for (const en of entries) {
+    if (en.target.style.display === 'none' || !en.target.style.height) continue;
+    const lh = en.target.style.height;
+    document.documentElement.style.setProperty('--log-h', lh);
+    for (const el of [$('#alarms'), $('#log')]) if (el !== en.target) el.style.height = lh;
+    try { localStorage.setItem('fm-modmon-ms-log-h', lh); } catch (e) {}
+  }
+}).observe($('#alarms'));
 $('#tab-alarms').onclick = () => showLog('alarms');
 $('#tab-events').onclick = () => showLog('events');
 

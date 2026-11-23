@@ -50,7 +50,7 @@ check('reset empties everything', len(h.series('pos_pct')[0]) == 0 and not h.ala
 real_time = rm.time
 clock = {'t': 1000.0}
 fake = types.SimpleNamespace(monotonic=lambda: clock['t'], time=real_time.time, strftime=real_time.strftime,
-                             sleep=real_time.sleep)
+                             localtime=real_time.localtime, sleep=real_time.sleep)
 
 
 def panel(seconds=6.0, run=None, **mpx):
@@ -145,8 +145,8 @@ check('the MPX tab holds the Modulation and MPX cards', p.card_widgets['mod'].pa
       and p.card_widgets['mpx'].parent() is p._mpx_cards.parentWidget(), p.card_widgets['mod'].parent())
 settle(p, n=2)
 check('the large spectrum follows the panel', np.array_equal(p.big_mpx._db, p.readings['mpx_db']))
-check('the SM.1268 strip shows the peaks, MPX power and the valid time',
-      'Peak' in p.sm_strip.text() and 'dBr' in p.sm_strip.text() and 'min valid' in p.sm_strip.text(), p.sm_strip.text())
+check('the SM.1268 header shows the peaks, MPX power and the measured time',
+      'Peak' in p.sm_strip.text() and 'dBr' in p.sm_strip.text() and 'Measured' in p.sm_strip.text(), p.sm_strip.text())
 db = p.readings['mpx_db']
 p.big_mpx.set_data(db - 20)          # everything 20 dB lower: the hold falls slowly from the old trace
 check('peak hold falls MPX_HOLD_DECAY_DB per update', np.allclose(p.big_mpx._hold, db - rm.MPX_HOLD_DECAY_DB),
@@ -204,6 +204,33 @@ check('LRA: the relative gate leaves out the quiet passages', abs(am._loudness_r
 check('LRA text: settling for its first minute, then plain',
       rm.loudness_range_text(9.96, 30) == '10.0 LU  (settling)' and rm.loudness_range_text(9.96, 90) == '10.0 LU'
       and rm.loudness_range_text(None, 90) == '-')
+
+# ---- the row: RDS word, the trend's end value; the MPX tab's header cells
+check('row: RDS ok, then its loss once noticeable, amber over 10%',
+      (rm.rds_state_text(None, 'A'), rm.rds_state_text(0.4, 'A'), rm.rds_state_text(6, 'A'),
+       'A' in rm.rds_state_text(30, 'A')), ('RDS ok', 'RDS ok', 'RDS loss 6%', True))
+check('row: the trend ends on its newest peak, amber over the limit',
+      (rm.trend_last_text([90, float('nan'), 97, float('nan')], 100), 'span' in rm.trend_last_text([104], 100),
+       rm.trend_last_text([float('nan')], 100)), ('97%', True, '-'))
+cells = rm.sm_cells({'pos_pct': 101.2, 'neg_pct': 98.4, 'over75': 4.1e-5, 'over77': 6e-7, 'exceed_frac': 6e-7,
+                     'exceed_khz': 77.0, 'mpx_dbr': -0.6, 'am_pct': 0.2, 'exceed_valid_s': 872, 'levels': {}},
+                    (-0.1, time.time()))
+check('MPX tab header: the SM.1268 cells, the limit + 2 kHz one only when not 77 kHz', [c[0] for c in cells],
+      ['Peak deviation, + / −', 'Over 75 kHz', 'Over 77 kHz', 'MPX power, 60 s', 'Multipath', 'Measured'])
+check('MPX tab header: values and notes',
+      (cells[0][1], cells[0][3], cells[2][3], cells[3][3][:15], cells[5][1], cells[5][4]),
+      ('+101.2 / −98.4', '75.9 / 73.8 kHz', 'within SM.1268 (1 ppm)', 'max -0.1 dBr at', '14:32', 'warn'))
+p.show_tab('MPX')
+settle(p, n=2)
+check('MPX tab header: shown as cells', 'Peak deviation' in p.sm_strip.text() and 'Measured' in p.sm_strip.text(),
+      p.sm_strip.text())
+check('MPX tab: the marker read out under the exceedance plot', p.marker_label.text().startswith('Marker 76.0 kHz'),
+      p.marker_label.text())
+check('Overview links: hidden on the other tabs', not any(lk.isVisible() for lk in p._tab_links))
+p.show_tab('Overview')
+check('web: the header cells sent too', [c[0] for c in p.web_state(None, None, 0)['sm_cells']][:1],
+      ['Peak deviation, + / −'])
+check('row: the MPX power tape shows', p.tapes['mpx'].text.endswith('dBr'), p.tapes['mpx'].text)
 
 # ---- IBOC lines from readings
 ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,

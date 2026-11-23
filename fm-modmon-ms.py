@@ -4589,6 +4589,8 @@ QFrame#row[selected="true"][unacked="true"] { background: %p1_tint%; border: 1px
 QFrame#row[selected="true"] QComboBox#freq { color: %accent%; }
 QFrame#detail { background: %window%; border: 1px solid %accent_line%; border-radius: %radius%; }
 QLabel#colHead { color: %label%; font-size: %size_label%; font-weight: 600; letter-spacing: 1px; }
+QFrame#smCell { border: none; border-right: 1px solid %line%; }
+QSplitter#consoleSplit::handle { background: %line%; height: 3px; margin: 2px 200px; }
 QComboBox#freq { font-family: Consolas; font-size: %size_primary%; font-weight: 600; padding: 0 4px;
                  border-color: transparent; background: transparent; }
 QComboBox#freq:hover { border-color: %outline%; }
@@ -4881,7 +4883,7 @@ class Meter(QtWidgets.QWidget):
 # Widths of a station row's fixed columns (the text column takes the rest); the
 # column headings above the rows use the same widths.
 ROW_COLS = (('status', '', 26), ('station', 'Station', 250), ('text', 'Text · RT+ · flags', 0),
-            ('tapes', 'Now · peak hold · limit ▼', 300), ('trend', 'Trend · 5 min', 176),
+            ('tapes', 'Levels · MOD peak hold 2 s', 300), ('trend', 'Peak mod · 5 min', 176),
             ('alarms', 'Alarms', 216))
 TAPE_COLOURS = {None: NORMAL, 'warn': '#f0a35e', 'alarm': RED, 'off': '#5d6167'}
 
@@ -5118,13 +5120,16 @@ ALARM_JUDGED = {
 }
 
 
-def alarm_when(d, hold):
-    """When an alarm raises and clears, in a sentence or two; hold: its seconds (SILENCE: the receiver's)."""
-    text = ('It raises and clears at once.' if not hold else
-            f'It raises once its condition has held {hold:g} s, and clears once it has been gone {hold:g} s.')
+def alarm_when(d, on, off=None):
+    """When an alarm raises and clears, in a sentence or two; on / off: its delays in seconds
+    (the receiver's settings; off None: the same as on)."""
+    off = on if off is None else off
+    raises = 'at once' if not on else f'once its condition has held {on:g} s'
+    clears = 'at once' if not off else f'once it has been gone {off:g} s'
+    text = ('It raises and clears at once.' if not on and not off else f'It raises {raises}, and clears {clears}.')
     if d.name in ALARM_JUDGED:
         text += (f' {ALARM_JUDGED[d.name]} While it is not judged it counts as clear, so a raised alarm '
-                 f'clears {hold:g} s later.')
+                 f'clears {off:g} s later.')
     return text
 
 
@@ -5532,7 +5537,8 @@ class Annunciator(QtWidgets.QWidget):
             'cleared_unack': ('#111214', None, None, False),
             'pending': ('#372f29', '#f0a35e', None, False),
             'suppressed': ('#2b2d31', '#f0a35e', None, True),
-            'off': (None, '#5d6167', '#34373d', False)}
+            'off': (None, '#5d6167', '#34373d', False),
+            'shelved': (None, '#9aa0a6', '#9aa0a6', False)}
     PRIORITY_STATES = ('unack', 'raised', 'cleared_unack')
     MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, the SDR just re-adjusted, no readings yet, '
                                        'or not enough held yet)',
@@ -5541,7 +5547,8 @@ class Annunciator(QtWidgets.QWidget):
              'cleared_unack': 'raised and since cleared, not acknowledged (right-click to acknowledge)',
              'pending': 'its condition holds; raises once its delay has run',
              'suppressed': 'not judged now: reception not clean or not valid enough (it counts as clear meanwhile)',
-             'off': 'switched off for this receiver (Settings)'}
+             'off': 'switched off for this receiver (Settings)',
+             'shelved': 'shelved: silenced for a set time (right-click to unshelve)'}
 
     def __init__(self):
         super().__init__()
@@ -5605,7 +5612,9 @@ class Annunciator(QtWidgets.QWidget):
                 p.drawRoundedRect(rect, 2, 2)
             if outline:
                 width = 1.5 if state == 'cleared_unack' else 1
-                p.setPen(QtGui.QPen(QtGui.QColor(outline), width, QtCore.Qt.SolidLine if fill else QtCore.Qt.DashLine))
+                line = (QtCore.Qt.SolidLine if fill else QtCore.Qt.DotLine if state == 'shelved' else
+                        QtCore.Qt.DashLine)
+                p.setPen(QtGui.QPen(QtGui.QColor(outline), width, line))
                 p.setBrush(QtCore.Qt.NoBrush)
                 p.drawRoundedRect(rect.adjusted(0.75, 0.75, -0.75, -0.75), 2, 2)
             if state == 'unack':       # the white ring: someone needs to look at it
@@ -5881,7 +5890,10 @@ class ExceedancePlot(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.ccdf, self.limit_khz, self.valid_s, self.mouse_x = None, None, 0.0, None
+        self.marker_khz = 76.0      # the placed marker (a click moves it): read out under the plot
+        self.on_marker = None       # on_marker(): the marker moved
         self.setMinimumSize(320, 220)
+        self.setCursor(QtCore.Qt.CrossCursor)
         self.setMouseTracking(True)
 
     def set_data(self, ccdf, limit_khz, valid_s):
@@ -5902,6 +5914,26 @@ class ExceedancePlot(QtWidgets.QWidget):
             return None
         i = min(max(round((khz - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ), 0), len(self.ccdf) - 1)
         return self.ccdf[i]
+
+    def marker_text(self):
+        """The marker's readout: its level and the share of samples above it."""
+        khz = self.marker_khz
+        share = self.share_at(khz)
+        head = f'Marker {khz:.1f} kHz · {khz / (MAX_DEV / 1e5):.1f}%   '
+        if share is None:
+            return head + 'no valid reception yet'
+        return head + ('no samples above' if not share else
+                       f'{share:.1e} of samples above ({share * 1e6:.2f} ppm)') + '   · click the plot to move it'
+
+    def mousePressEvent(self, event):
+        f = self._frame()
+        if event.button() == QtCore.Qt.LeftButton and f.left() <= event.pos().x() <= f.right():
+            hi_khz = self._khz(EXCEED_BINS)
+            khz = EXCEED_LO_KHZ + (event.pos().x() - f.left()) / f.width() * (hi_khz - EXCEED_LO_KHZ)
+            self.marker_khz = round(khz / EXCEED_BIN_KHZ) * EXCEED_BIN_KHZ
+            self.update()
+            if self.on_marker:
+                self.on_marker()
 
     def mouseMoveEvent(self, event):
         self.mouse_x = event.pos().x()
@@ -5952,6 +5984,13 @@ class ExceedancePlot(QtWidgets.QWidget):
         if pts:
             p.setPen(QtGui.QPen(QtGui.QColor(THEME['bright']), 1.5))
             p.drawPolyline(QtGui.QPolygonF(pts))
+        if self.marker_khz is not None:     # the placed marker: a line, and a square where it meets the curve
+            mx = x(self.marker_khz)
+            p.setPen(QtGui.QPen(QtGui.QColor(ACCENT), 1))
+            p.drawLine(QtCore.QPointF(mx, f.top()), QtCore.QPointF(mx, f.bottom()))
+            share = self.share_at(self.marker_khz)
+            if share:
+                p.fillRect(QtCore.QRectF(mx - 3, y(share) - 3, 6, 6), QtGui.QColor(ACCENT))
         if self.mouse_x is not None and f.left() <= self.mouse_x <= f.right():
             khz = EXCEED_LO_KHZ + (self.mouse_x - f.left()) / f.width() * (hi_khz - EXCEED_LO_KHZ)
             share = self.share_at(khz)
@@ -5961,6 +6000,84 @@ class ExceedancePlot(QtWidgets.QWidget):
                     + ('none over' if not share else f'{share:.1e} of samples over ({share * 1e6:.2f} ppm)'))
             p.drawText(QtCore.QRectF(f.left() + 6, f.top() + 2, f.width() - 12, fm_.height()),
                        QtCore.Qt.AlignRight, text)
+
+
+def sm_cells(r, hour=None):
+    """The MPX tab's header, DEVA-style: [(name, value, unit, note, level)], what ITU-R
+    SM.1268 reports at a glance. hour: (max dBr, its time) over the last hour, or None."""
+    lv = r.get('levels', {})
+    cells = []
+    if r.get('pos_pct') is not None:
+        pos, neg = r['pos_pct'], r['neg_pct']
+        cells.append(('Peak deviation, + / −', f'+{pos:.1f} / −{neg:.1f}', '%',
+                      f'{pos * MAX_DEV / 1e5:.1f} / {neg * MAX_DEV / 1e5:.1f} kHz',
+                      lv.get('pos_pct') or lv.get('neg_pct')))
+    if r.get('over75') is not None:
+        cells.append(('Over 75 kHz', f"{r['over75'] * 1e6:.2f}", 'ppm', 'of samples, 15 min valid', None))
+    if r.get('over77') is not None:
+        over = r['over77'] > EXCEED_FRACTION
+        cells.append(('Over 77 kHz', f"{r['over77'] * 1e6:.2f}", 'ppm',
+                      ('over' if over else 'within') + ' SM.1268 (1 ppm)', 'warn' if over else None))
+    if r.get('exceed_frac') is not None and r.get('exceed_khz') and abs(r['exceed_khz'] - 77) > 0.05:
+        cells.append(('Over the limit + 2 kHz', f"{r['exceed_frac'] * 1e6:.2f}", 'ppm',
+                      f"over {r['exceed_khz']:.1f} kHz", lv.get('exceed_frac')))
+    dbr = r.get('mpx_dbr')
+    if dbr is not None and math.isfinite(dbr):
+        note = ('limit 0 dBr (BS.412)' if not hour else
+                f'max {hour[0]:+.1f} dBr at {time.strftime("%H:%M", time.localtime(hour[1]))}')
+        cells.append(('MPX power, 60 s', f'{dbr:+.1f}', 'dBr', note, 'warn' if dbr > 0 else None))
+    if r.get('am_pct') is not None:
+        cells.append(('Multipath', f"{r['am_pct']:.1f}", '%', 'AM on the carrier', lv.get('am_pct')))
+    valid = int(r.get('exceed_valid_s') or 0)
+    cells.append(('Measured', f'{valid // 60}:{valid % 60:02d}', 'min:s', f'valid, of {EXCEED_MIN_S // 60:.0f} min',
+                  None if valid >= EXCEED_MIN_S else 'warn'))
+    return cells
+
+
+class SummaryCells(QtWidgets.QWidget):
+    """A row of readings, each its name, value and unit, and a note under them (the
+    MPX tab's header, as DEVA's measurement header)."""
+
+    def __init__(self):
+        super().__init__()
+        self.box = QtWidgets.QHBoxLayout(self)
+        self.box.setContentsMargins(0, 0, 0, 0)
+        self.box.setSpacing(0)
+        self.box.addStretch(1)
+        self.cells = []
+        self._shown = None
+
+    def set_cells(self, cells):
+        if cells == self._shown:
+            return
+        self._shown = cells
+        while len(self.cells) < len(cells):
+            frame = QtWidgets.QFrame()
+            frame.setObjectName('smCell')
+            v = QtWidgets.QVBoxLayout(frame)
+            v.setContentsMargins(12, 4, 12, 4)
+            v.setSpacing(1)
+            labels = [QtWidgets.QLabel() for _ in range(3)]
+            labels[0].setStyleSheet(f'color: {DIM}; font-size: {TYPE["label"]};')
+            labels[1].setStyleSheet(f'font-family: Consolas; font-size: {TYPE["reading"]};')
+            labels[1].setTextFormat(QtCore.Qt.RichText)
+            labels[2].setStyleSheet(f'color: {DIM}; font-size: {TYPE["label"]};')
+            for label in labels:
+                v.addWidget(label)
+            self.box.insertWidget(len(self.cells), frame)
+            self.cells.append((frame, labels))
+        for i, (frame, labels) in enumerate(self.cells):
+            frame.setVisible(i < len(cells))
+            if i < len(cells):
+                name, value, unit, note, level = cells[i]
+                labels[0].setText(name)
+                labels[1].setText(f'<span style="color:{LEVEL_COLOURS.get(level, TEXT_LIT)}">{_html(value)}</span>'
+                                  f' <span style="color:{DIM}; font-size:{TYPE["label"]}">{_html(unit)}</span>')
+                labels[2].setText(note)
+
+    def text(self):
+        """Every cell's words, for tests and accessibility."""
+        return '  ·  '.join(' '.join(str(x) for x in c[:4]) for c in (self._shown or []))
 
 
 class MpxPowerPlot(QtWidgets.QWidget):
@@ -6009,8 +6126,10 @@ class MpxPowerPlot(QtWidgets.QWidget):
             p.drawText(QtCore.QRectF(0, y(db) - fm_.height() / 2, f.left() - 4, fm_.height()),
                        QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f'{db:+d}'.replace('-', '−') if db else '0')
         for m in (60, 45, 30, 15, 0):
-            p.drawText(QtCore.QRectF(x(now - m * 60) - 30, f.bottom() + 2, 60, fm_.height()), QtCore.Qt.AlignHCenter,
-                       f'−{m} min' if m else 'now')
+            align = QtCore.Qt.AlignRight if not m else QtCore.Qt.AlignLeft if m == 60 else QtCore.Qt.AlignHCenter
+            box = QtCore.QRectF(x(now - m * 60) - (60 if not m else 0 if m == 60 else 30), f.bottom() + 2, 60,
+                                fm_.height())
+            p.drawText(box, align, time.strftime('%H:%M', time.localtime(now - m * 60)))
         p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
         p.drawLine(QtCore.QPointF(f.left(), y(0)), QtCore.QPointF(f.right(), y(0)))
         s = self.summary()
@@ -6275,9 +6394,13 @@ class AlarmTable(QtWidgets.QTableWidget):
     """The alarms of this session, one row per alarm (raised to cleared) with how
     long it lasted, newest first: its priority's shape and number, the ones still
     raised in their priority's colour, their time running. Every alarm waits to be
-    acknowledged (ISA-18.2), raised or cleared: click its Ack cell, or right-click."""
-    COLS = ('Pri', 'Raised', 'Station', 'Alarm', 'Duration', 'Cleared', 'Ack', 'Measured')
-    ACK_COL = 6
+    acknowledged (ISA-18.2), raised or cleared: click its Ack cell, or right-click.
+    A filter shows only the alarms whose text holds every word of it; export_csv()
+    writes them all."""
+    COLS = ('Pri', 'Raised', 'Rx', 'Station', 'Alarm', 'Duration', 'Cleared', 'Ack', 'Measured')
+    ACK_COL = 7
+    CSV_COLS = ('priority', 'raised', 'cleared', 'duration_s', 'receiver', 'station', 'alarm', 'name', 'measured',
+                'acknowledged', 'acknowledged_by')
     KEEP = 500   # episodes kept, besides any still waiting to be acknowledged
 
     def __init__(self):
@@ -6290,8 +6413,9 @@ class AlarmTable(QtWidgets.QTableWidget):
         self.setWordWrap(False)
         hh = self.horizontalHeader()
         hh.setStretchLastSection(True)
-        for i, w in enumerate((40, 130, 120, 200, 100, 70, 150)):
+        for i, w in enumerate((40, 130, 30, 120, 200, 100, 70, 150)):
             self.setColumnWidth(i, w)
+        self.filter_words = []
         self.verticalHeader().setDefaultSectionSize(20)
         # {'id', 'key', 'slot', 'name', 'priority', 'station', 'desc', 'start', 'end' (None while raised),
         #  'detail', 'acked' (None until acknowledged), 'acked_by'}
@@ -6372,6 +6496,25 @@ class AlarmTable(QtWidgets.QTableWidget):
         menu.exec_(self.viewport().mapToGlobal(pos))
         menu.deleteLater()
 
+    def set_filter(self, text):
+        """Show only the alarms whose cells hold every word of `text` (any case)."""
+        self.filter_words = text.lower().split()
+        self.redraw()
+
+    def export_csv(self, path):
+        """Write every alarm of the session to `path` as CSV, oldest first; returns how many."""
+        def when(t):
+            return '' if t is None else time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))
+        with open(path, 'w', newline='', encoding='utf-8') as fh:
+            w = csv.writer(fh)
+            w.writerow(self.CSV_COLS)
+            for e in self.episodes:
+                w.writerow((e['priority'], when(e['start']), when(e['end']),
+                            '' if e['end'] is None else round(e['end'] - e['start']),
+                            '' if e['slot'] is None else e['slot'] + 1, e['station'], e['desc'], e['name'],
+                            e['detail'], when(e['acked']), e['acked_by']))
+        return len(self.episodes)
+
     def redraw(self):
         """Fill the table (and keep the running durations going): call once a second."""
         now = time.time()
@@ -6383,7 +6526,7 @@ class AlarmTable(QtWidgets.QTableWidget):
             ack = ('Acknowledge' if unacked else
                    time.strftime('%H:%M:%S', time.localtime(e['acked'])) + f' · {e["acked_by"]}')
             cells = (str(e['priority']), time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(e['start'])),
-                     e['station'], e['desc'],
+                     '' if e['slot'] is None else str(e['slot'] + 1), e['station'], e['desc'],
                      duration_text((now if on else e['end']) - e['start']) + (' …' if on else ''),
                      'raised' if on else time.strftime('%H:%M:%S', time.localtime(e['end'])), ack, e['detail'])
             colour = QtGui.QColor(PRIORITY_COLOURS[e['priority']] if on else '#b8bdc4')
@@ -6399,10 +6542,13 @@ class AlarmTable(QtWidgets.QTableWidget):
                     item.setData(QtCore.Qt.UserRole, (e['priority'], on))
                     item.setIcon(priority_icon(e['priority'], filled=on))
                 font = item.font()
-                if font.bold() != (unacked and c in (0, 3)):
-                    font.setBold(unacked and c in (0, 3))
+                if font.bold() != (unacked and c in (0, 4)):
+                    font.setBold(unacked and c in (0, 4))
                     item.setFont(font)
                 item.setForeground(QtGui.QColor(ACCENT) if c == self.ACK_COL and unacked else colour)
+            hide = bool(self.filter_words) and not all(w in ' '.join(cells).lower() for w in self.filter_words)
+            if self.isRowHidden(r) != hide:
+                self.setRowHidden(r, hide)
 
 
 def banner_episode(waiting):
@@ -6529,6 +6675,24 @@ def _num(v, unit, fmt='.1f'):
 
 
 LRA_SETTLE_S = 60   # loudness range isn't meaningful before this much programme (EBU Tech 3342)
+
+
+def rds_state_text(loss_pct, amber):
+    """The row's RDS word: 'RDS ok', or its group loss once it is noticeable (amber over 10%)."""
+    if loss_pct is None or loss_pct < 1:
+        return 'RDS ok'
+    text = f'RDS loss {loss_pct:.0f}%'
+    return f'<b style="color:{amber}">{text}</b>' if loss_pct > 10 else text
+
+
+def trend_last_text(peaks, limit):
+    """The newest peak of the row's trend, as the number its line ends on (amber over the limit)."""
+    vals = np.asarray(peaks, float)
+    vals = vals[np.isfinite(vals)]
+    if not len(vals):
+        return '-'
+    v = float(vals[-1])
+    return f'<span style="color:{AMBER}">{v:.0f}%</span>' if limit is not None and v > limit else f'{v:.0f}%'
 
 
 def loudness_range_text(lra, seconds):
@@ -6760,6 +6924,10 @@ RULES = {
 }
 
 
+ALARM_DELAY_MAX_S = 600   # the longest on or off delay an alarm can have
+SHELVE_CHOICES = ((15 * 60, '15 minutes'), (3600, '1 hour'), (8 * 3600, '8 hours'), (24 * 3600, '24 hours'))
+
+
 @dataclass
 class ReceiverSettings:
     """One receiver's settings; saved with it in fm-modmon-ms_config.json."""
@@ -6775,6 +6943,8 @@ class ReceiverSettings:
     audio_source: str = 'analog'     # an AUDIO_SOURCES key
     alarms: dict = field(default_factory=lambda: {name: True for name, *_ in ALARM_DEFS})
     priorities: dict = field(default_factory=lambda: {d.name: d.priority for d in ALARM_DEFS})  # 1-3 per alarm
+    # [on-delay, off-delay] seconds per alarm (SILENCE's on-delay is silence_s)
+    delays: dict = field(default_factory=lambda: {d.name: [d.hold, d.hold] for d in ALARM_DEFS})
     silence_lufs: float = -45.0      # momentary loudness below this is silence
     silence_s: int = 10              # for this long
     min_snr_db: float = 15.0         # MPX S/N below this (or RF < -75 dBFS) is carrier low
@@ -6826,6 +6996,15 @@ class ReceiverSettings:
                 return d.priority
             return p if p in PRIORITY_NAMES else d.priority
         out.priorities = {d.name: prio(d) for d in ALARM_DEFS}
+        delays = out.delays if isinstance(out.delays, dict) else {}
+
+        def delay(d):
+            try:
+                on, off = (int(min(max(float(v), 0), ALARM_DELAY_MAX_S)) for v in delays[d.name])
+            except (KeyError, TypeError, ValueError):
+                return [d.hold, d.hold]
+            return [on, off]
+        out.delays = {d.name: delay(d) for d in ALARM_DEFS}
         out.name = str(out.name or '')
         out.rds_feed = bool(out.rds_feed)
 
@@ -6837,6 +7016,7 @@ class ReceiverSettings:
                 setattr(out, name, getattr(default, name))
         number('volume_pct', 0, 200, int)
         number('silence_s', 2, 300, int)
+        out.delays['SILENCE'][0] = out.silence_s
         number('silence_lufs', -70, -10)
         number('min_snr_db', 0, 60)
         number('rds_port', 0, 65535, int)
@@ -6853,6 +7033,11 @@ class ReceiverSettings:
 
     def to_dict(self):
         return asdict(self)
+
+    def delay(self, name):
+        """(on-delay, off-delay) in seconds for alarm `name`."""
+        on, off = self.delays[name]
+        return (self.silence_s if name == 'SILENCE' else on), off
 
     def preset(self, country):
         """The rule set in force: 'ised', 'fcc' or 'custom'."""
@@ -6871,8 +7056,11 @@ ALARM_BEEP_S = 4   # with the alarm sound on (Settings): a tone this often while
 
 
 class StationAlarms:
-    """Raises an alarm once its condition has held for its delay, and clears it
-    the same way, so brief dips don't flap. update() returns what changed."""
+    """Raises an alarm once its condition has held for its on-delay, and clears it
+    once it has been gone for its off-delay, so brief dips don't flap (the Inovonics
+    551 and DEVA monitors set the two apart; release longer than trigger). update()
+    returns what changed. A shelved alarm is silenced until a set time: its condition
+    counts as gone meanwhile (ISA-18.2 shelving)."""
 
     def __init__(self):
         self.reset()
@@ -6880,6 +7068,7 @@ class StationAlarms:
     def reset(self):
         self.active = set()
         self.unacked = set()   # raised (or raised and since cleared) and not acknowledged: set by MainWindow
+        self.shelved = {}      # alarm -> time.time() its shelving ends (kept across retuning, not restarts)
         self._pending = {}
         self.seen_pilot = self.seen_rds = False
         self._t0 = time.monotonic()
@@ -6894,24 +7083,41 @@ class StationAlarms:
         """The alarms whose change (raise or clear) waits for its delay."""
         return set(self._pending)
 
+    def shelve(self, name, seconds):
+        """Silence `name` for `seconds` (0: unshelve it)."""
+        if seconds > 0:
+            self.shelved[name] = time.time() + seconds
+        else:
+            self.shelved.pop(name, None)
+
+    def shelved_now(self):
+        """{alarm: when its shelving ends} for the alarms shelved now (the expired ones forgotten)."""
+        now = time.time()
+        for name in [n for n, until in self.shelved.items() if until <= now]:
+            del self.shelved[name]
+        return dict(self.shelved)
+
     def ready(self):
         """False during the grace period after (re)tuning, while the meters
         still hold some of the previous station's signal."""
         return time.monotonic() - self._t0 >= ALARM_GRACE_S
 
     def update(self, conditions, holds=None):
-        """[(name, description, raised)] for the alarms raised or cleared now."""
+        """[(name, description, raised)] for the alarms raised or cleared now. holds:
+        {alarm: seconds, or (on-delay, off-delay)} (default: its AlarmDef's, both ways)."""
         now = time.monotonic()
         changes = []
         if now - self._t0 < ALARM_GRACE_S:
             return changes
+        shelved = self.shelved_now()
         for name, _, desc, hold, *_ in ALARM_DEFS:
             hold = (holds or {}).get(name, hold)
-            want = bool(conditions.get(name))
+            on, off = hold if isinstance(hold, (tuple, list)) else (hold, hold)
+            want = bool(conditions.get(name)) and name not in shelved
             if want == (name in self.active):
                 self._pending.pop(name, None)
                 continue
-            if now - self._pending.setdefault(name, now) >= hold:
+            if now - self._pending.setdefault(name, now) >= (on if want else off):
                 del self._pending[name]
                 (self.active.add if want else self.active.discard)(name)
                 changes.append((name, desc, want))
@@ -7282,6 +7488,7 @@ class StationPanel(QtCore.QObject):
         self.status_cell.setFixedWidth(widths['status'])
         row.addWidget(self.status_cell)
         self.on_ack = None   # on_ack(panel, alarm name or None for all): set by MainWindow
+        self.on_shelve = None   # on_shelve(panel, alarm name, seconds): set by MainWindow (the event log)
         self.row.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.row.customContextMenuRequested.connect(
             lambda pos: self._ack_menu(None, self.row.mapToGlobal(pos)))
@@ -7356,6 +7563,7 @@ class StationPanel(QtCore.QObject):
             'mod': Tape('MOD', 0, 130, band=(85, 100), hold=True),
             'rf': Tape('RF', -90, -10, band=(-60, -10)),
             'am': Tape('AM', 0, 40, band=(0, PEAK_AM_PCT)),
+            'mpx': Tape('MPX', -12, 6, band=(-6, 0)),
         }
         self.tapes['mod'].setToolTip('Peak modulation +/−: bar, 2 s peak hold (tick) and the limit in force '
                                      '(red notch); the grey band is the normal range. Click for details.')
@@ -7363,6 +7571,8 @@ class StationPanel(QtCore.QObject):
         self.tapes['am'].setToolTip('AM on the carrier: multipath or a transmitter fault. Over-modulation is '
                                     f'not judged above {PEAK_AM_PCT:g}%, the other technical rules above '
                                     f'{CLEAN_AM_PCT:g}%. Click for details.')
+        self.tapes['mpx'].setToolTip('MPX power (ITU-R BS.412), 60 s integration, against 0 dBr (red notch). '
+                                     'Click for details.')
         tapes = QtWidgets.QWidget()
         tapes.setFixedWidth(widths['tapes'])
         tb = QtWidgets.QVBoxLayout(tapes)
@@ -7376,16 +7586,23 @@ class StationPanel(QtCore.QObject):
         self.trend_note = QtWidgets.QLabel('')
         self.trend_note.setStyleSheet('color: #9aa0a6; font-size: 8pt;')
         self.trend_note.setTextFormat(QtCore.Qt.RichText)
-        self.spark = Spark(70, 125, limit=100)
+        self.trend_last = QtWidgets.QLabel('-')    # the newest point's value: the line tied to a number
+        self.trend_last.setStyleSheet('font-family: Consolas; font-size: 12pt; font-weight: 600;')
+        self.trend_last.setTextFormat(QtCore.Qt.RichText)
+        self.spark = Spark(70, 125, limit=100, height=34)
         self.spark.setToolTip('Peak modulation, the last 5 minutes (each point: its highest); '
                               'red: over the limit in force. Click for details.')
         trend = QtWidgets.QWidget()
         trend.setFixedWidth(widths['trend'])
-        tr = QtWidgets.QVBoxLayout(trend)
+        tr = QtWidgets.QHBoxLayout(trend)
         tr.setContentsMargins(0, 0, 0, 0)
-        tr.setSpacing(1)
-        tr.addWidget(self.trend_note)
-        tr.addWidget(self.spark)
+        tr.setSpacing(6)
+        tr.addWidget(self.spark, 1)
+        end = QtWidgets.QVBoxLayout()
+        end.setSpacing(0)
+        end.addWidget(self.trend_last)
+        end.addWidget(self.trend_note)
+        tr.addLayout(end)
         row.addWidget(trend)
         self._trend_t = -math.inf
         self.web_trends = {}    # the sparklines and histogram for the web page
@@ -7511,6 +7728,7 @@ class StationPanel(QtCore.QObject):
         self.absent = {}        # card: its 'not on air' line
         self.readout_widgets = {}   # reading (READOUTS): the widget showing it (value label, tape, meter, graph)
         self.detail_all = set()     # the cards showing all their readings: those of the tab shown (TAB_CARDS)
+        self._tab_links = []        # each card's link to its tab (shown on Overview)
         self._extra = {}            # reading: more widgets shown only in its card's tab (besides the label/value rows)
         self.info = ReadoutInfo(self.detail)
         # the readings out of range now, each a link to its explanation (shown whatever the cards show)
@@ -7650,25 +7868,29 @@ class StationPanel(QtCore.QObject):
         mp.addLayout(self._mpx_cards, 5)
         right = QtWidgets.QVBoxLayout()
         right.setSpacing(6)
-        self.sm_strip = QtWidgets.QLabel('')
-        self.sm_strip.setTextFormat(QtCore.Qt.RichText)
-        self.sm_strip.setWordWrap(True)
+        self.sm_strip = SummaryCells()
         right.addWidget(self.sm_strip)
         self.big_mpx = MpxSpectrum(hold=True)
         self.big_mpx.setMinimumHeight(200)
         self.big_mpx.setToolTip('Grey: now. Amber: peak hold, falling '
                                 f'{MPX_HOLD_DECAY_DB * UPDATE_HZ:g} dB/s. dB re a 100% (75 kHz) sine, 500 Hz bins')
-        right.addWidget(dim_label('MPX spectrum · 0–100 kHz · peak hold'))
+        right.addWidget(dim_label('MPX spectrum · 0–100 kHz · 500 Hz bins · grey now, amber peak hold'))
         right.addWidget(self.big_mpx, 3)
         graphs = QtWidgets.QHBoxLayout()
         graphs.setSpacing(8)
         self.exceed_plot, self.power_plot = ExceedancePlot(), MpxPowerPlot()
-        for cap, w in (('Deviation exceedance · share of samples over · 15 min valid', self.exceed_plot),
-                       ('MPX power · 60 s integration · last hour', self.power_plot)):
+        self.marker_label = QtWidgets.QLabel('')
+        self.marker_label.setStyleSheet(f'color: {ACCENT}; font-family: Consolas; font-size: {TYPE["label"]};')
+        self.exceed_plot.on_marker = lambda: self.marker_label.setText(self.exceed_plot.marker_text())
+        for cap, w, under in (('Deviation exceedance · share of samples above · last 15 min valid',
+                               self.exceed_plot, self.marker_label),
+                              ('MPX power · 60 s window · last 60 min · limit 0 dBr (BS.412)', self.power_plot, None)):
             col = QtWidgets.QVBoxLayout()
             col.setSpacing(2)
             col.addWidget(dim_label(cap))
             col.addWidget(w, 1)
+            if under:
+                col.addWidget(under)
             graphs.addLayout(col, 1)
         right.addLayout(graphs, 2)
         mp.addLayout(right, 6)
@@ -7719,14 +7941,28 @@ class StationPanel(QtCore.QObject):
         self.annunciator.on_click = self._explain_alarm
         # the station row (the press still selects the receiver)
         for name, w in (('Peak modulation', self.tapes['mod']), ('RF level', self.tapes['rf']),
-                        ('AM / multipath', self.tapes['am']), ('Peak trend', self.spark)):
+                        ('AM / multipath', self.tapes['am']), ('MPX power', self.tapes['mpx']),
+                        ('Peak trend', self.spark)):
             self._clickable(name, w, tip=False)
         self._collapse({})
 
     def _card_head(self, key, extra):
-        """A card's head: its own note or button (its readings beyond the essentials
-        are in its tab: TAB_CARDS)."""
-        return extra
+        """A card's head: its own note or button, then (on Overview) a link to the tab
+        that shows it in full (TAB_CARDS)."""
+        tab = next(t for t, keys in self.TAB_CARDS.items() if key in keys)
+        link = QtWidgets.QLabel(f'<a href="#" style="color:{ACCENT}; text-decoration:none">{tab} tab</a>')
+        link.setStyleSheet(f'font-size: {TYPE["label"]};')
+        link.setToolTip(f'All of its readings, in the {tab} tab')
+        link.linkActivated.connect(lambda _=None, t=tab: self.show_tab(t))
+        self._tab_links.append(link)
+        head = QtWidgets.QWidget()
+        box = QtWidgets.QHBoxLayout(head)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(8)
+        if extra is not None:
+            box.addWidget(extra)
+        box.addWidget(link)
+        return head
 
     def show_tab(self, name):
         """Show the detail tab `name` (one of TABS)."""
@@ -7744,6 +7980,8 @@ class StationPanel(QtCore.QObject):
             if key in full:
                 getattr(self, box).addWidget(self.card_widgets[key])
         self.detail_all = set(full)
+        for link in self._tab_links:
+            link.setVisible(name == 'Overview')
         self.pages.setCurrentIndex(index)
         self._collapse(self.readings)
         if name == 'History':
@@ -7758,34 +7996,18 @@ class StationPanel(QtCore.QObject):
             self.big_mpx.set_data(r.get('mpx_db'))
             self.exceed_plot.set_data(r.get('exceed_ccdf'), r.get('exceed_khz'), r.get('exceed_valid_s'))
             self.power_plot.set_data(*self.history.series('mpx_dbr', MpxPowerPlot.SPAN_S))
-            self.sm_strip.setText(self._sm_strip(r))
+            self.sm_strip.set_cells(self._sm_cells(r))
+            self.marker_label.setText(self.exceed_plot.marker_text())
         elif name == 'Audio':
             st = self.station
             self.big_gonio.set_data(st.audio_meter.scope)
             corr = r.get('correlation')
             self.big_phase.set_value(corr, '-' if corr is None else f'{corr:+.2f}')
 
-    def _sm_strip(self, r):
-        """The MPX tab's header line: what SM.1268 reports, at a glance."""
-        def b(text, level=None):
-            return f'<b style="color:{LEVEL_COLOURS.get(level, TEXT_LIT)}">{_html(text)}</b>'
-        lv = r.get('levels', {})
-        parts = []
-        if r.get('pos_pct') is not None:
-            parts.append('Peak ' + b(f"+{r['pos_pct']:.1f} / −{r['neg_pct']:.1f} %",
-                                     lv.get('pos_pct') or lv.get('neg_pct')))
+    def _sm_cells(self, r):
+        """The MPX tab's header cells (sm_cells), with the hour's MPX power maximum."""
         s = self.power_plot.summary()
-        if r.get('mpx_dbr') is not None:
-            parts.append('MPX power ' + b(f"{r['mpx_dbr']:+.1f} dBr")
-                         + (f' (highest {s[0]:+.1f} in the hour)' if s else ''))
-        for key, khz in (('over75', 75), ('over77', 77)):
-            if r.get(key) is not None:
-                parts.append(f'over {khz} kHz ' + b(f'{r[key] * 1e6:.2f} ppm'))
-        if r.get('exceed_frac') is not None:
-            parts.append(f"over the limit + 2 kHz ({r['exceed_khz']:.1f}) "
-                         + b(f"{r['exceed_frac'] * 1e6:.2f} ppm", lv.get('exceed_frac')))
-        parts.append(f"{(r.get('exceed_valid_s') or 0) / 60:.0f} of {EXCEED_MIN_S / 60:.0f} min valid")
-        return f'<span style="color:{DIM}">' + '  ·  '.join(parts) + '</span>'
+        return sm_cells(r, s[:2] if s else None)
 
     def _clickable(self, name, *widgets, tip=True):
         """tip: False keeps the widgets' own tooltips (they end 'Click for details.')."""
@@ -7860,6 +8082,15 @@ class StationPanel(QtCore.QObject):
             one = menu.addAction(f'Acknowledge {Annunciator.SHORT[name]}')
             one.setEnabled(name in self.alarms.unacked)
             one.triggered.connect(lambda: self.on_ack and self.on_ack(self, name))
+            if name in self.alarms.shelved_now():
+                menu.addAction(f'Unshelve {Annunciator.SHORT[name]}').triggered.connect(
+                    lambda: self.shelve(name, 0))
+            else:
+                shelf = menu.addMenu(f'Shelve {Annunciator.SHORT[name]} for')
+                shelf.setToolTipsVisible(True)
+                for seconds, words in SHELVE_CHOICES:
+                    shelf.addAction(words).triggered.connect(lambda _=False, sec=seconds: self.shelve(name, sec))
+                shelf.setEnabled(self.settings.alarms.get(name, True))
         every = menu.addAction(f'Acknowledge all on this receiver ({len(waiting)})' if waiting else
                                'Nothing on this receiver to acknowledge')
         every.setEnabled(bool(waiting))
@@ -7867,17 +8098,26 @@ class StationPanel(QtCore.QObject):
         menu.exec_(pos)
         menu.deleteLater()
 
+    def shelve(self, name, seconds):
+        """Shelve alarm `name` for `seconds` (0: unshelve), and say so in the event log."""
+        self.alarms.shelve(name, seconds)
+        if self.on_shelve:
+            self.on_shelve(self, name, seconds)
+
     def _explain_alarm(self, name, rect):
         d = next(a for a in ALARM_DEFS if a.name == name)
         state = self.annunciator.states.get(name, 'waiting')
         word = {'clear': 'clear', 'waiting': 'not judged yet', 'unack': 'RAISED, not acknowledged',
                 'raised': 'RAISED, acknowledged', 'cleared_unack': 'cleared, not acknowledged', 'pending': 'pending',
-                'suppressed': 'not judged now', 'off': 'off'}[state]
+                'suppressed': 'not judged now', 'off': 'off', 'shelved': 'shelved'}[state]
         prio = self.settings.priorities.get(name, d.priority)
         colour = (PRIORITY_COLOURS[prio] if state in Annunciator.PRIORITY_STATES else
                   {'pending': AMBER, 'suppressed': AMBER}.get(state, '#b8bdc4'))
         word += f' · priority {prio} ({PRIORITY_NAMES[prio]})'
-        when = alarm_when(d, self.settings.silence_s if name == 'SILENCE' else d.hold)
+        when = alarm_when(d, *self.settings.delay(name))
+        until = self.alarms.shelved_now().get(name)
+        if until:
+            when += f' Shelved until {time.strftime("%H:%M", time.localtime(until))}.'
         now = Annunciator.MEANS[state]
         now = now[0].upper() + now[1:] + '.'
         if self.annunciator.notes.get(name):
@@ -8583,6 +8823,10 @@ class StationPanel(QtCore.QObject):
         self.tapes['rf'].setToolTip(f"RF level {_num(r['rf_dbfs'], 'dBFS')}, MPX S/N {_num(r['snr_db'], 'dB')}. "
                                     'Click for details.')
         self.tapes['am'].set_value(r['am_pct'], f"{r['am_pct']:.1f}%", lv.get('am_pct'))
+        dbr = r.get('mpx_dbr')
+        ok = dbr is not None and math.isfinite(dbr)
+        self.tapes['mpx'].set_value(dbr if ok else None, f'{dbr:+.1f} dBr' if ok else '-',
+                                    'warn' if ok and dbr > 0 else None, limit=0.0)
 
     def _show_detail_tapes(self, r):
         lv = r['levels']
@@ -8658,14 +8902,17 @@ class StationPanel(QtCore.QObject):
         self.absent['rds'].setVisible(bool(rds))
 
     def _meta_text(self, r):
-        """The row's second line: PI, PTY, RDS rate, stereo, receiver number."""
-        parts = [f"<b style=\"color:#e6e7ea\">{r['pi']}</b>" if r['pi'] else 'no RDS']
-        if r['pi']:
-            if r['pty']:
-                parts.append(_html(r['pty']))
-            parts.append(f"RDS {r['rds_rate']:.1f}/s")
+        """The row's second line: PI, stereo, pilot, RDS ok or its loss, receiver number
+        (the exact RDS rate and PTY are in the RDS card)."""
+        parts = [f"<b style=\"color:{TEXT_LIT}\">{r['pi']}</b>" if r['pi'] else 'no RDS']
         if r.get('stereo_mode'):
             parts.append(r['stereo_mode'])
+        pilot = r.get('pilot_pct')
+        if r.get('stereo_mode') != 'mono' and pilot is not None and math.isfinite(pilot):
+            text = f'pilot {pilot:.1f}%'
+            parts.append(f'<b style="color:{AMBER}">{text}</b>' if r['levels'].get('pilot_pct') else text)
+        if r['pi']:
+            parts.append(rds_state_text(r.get('rds_loss_pct'), AMBER))
         parts.append(f'Rx {self.slot + 1}' + (f' {_html(self.settings.name)}' if self.settings.name else ''))
         return ' · '.join(parts)
 
@@ -8678,9 +8925,12 @@ class StationPanel(QtCore.QObject):
         condition holds, its delay is running) or 'clear'."""
         out = {}
         pending = self.alarms.pending()
+        shelved = self.alarms.shelved_now()
         for name, *_ in ALARM_DEFS:
             if not self.settings.alarms.get(name, True):
                 out[name] = 'off'
+            elif name in shelved:
+                out[name] = 'shelved'
             elif name in self.alarms.active:
                 out[name] = 'unack' if name in self.alarms.unacked else 'raised'
             elif name in self.alarms.unacked:
@@ -8757,7 +9007,7 @@ class StationPanel(QtCore.QObject):
                 'DATA': not carrier and any(k.startswith('SCA') or rate > 5 for k in self._data_lost),
             }
             changes = self.alarms.update({k: v and cfg.alarms.get(k, True) for k, v in conditions.items()},
-                                         holds={'SILENCE': cfg.silence_s})
+                                         holds={d.name: cfg.delay(d.name) for d in ALARM_DEFS})
             if changes:
                 for name, _, raised in changes:
                     self.history.log_alarm(time.time(), name, raised)
@@ -8832,9 +9082,9 @@ class StationPanel(QtCore.QObject):
                                    if len(tr['peaks']) else [])
         self.spark.set_data(tr['peak'], limit, AMBER if r.get('alarms', {}).get('OVERMOD') == 'suppressed' else RED)
         over = r.get('over100_min')
-        self.trend_note.setText('peak modulation' + ('' if over is None else
-                                                     f' \u00b7 {over}/min over 100%' if not over else
-                                                     f' \u00b7 <b style="color:{AMBER}">{over}/min over 100%</b>'))
+        self.trend_note.setText('' if over is None else f'{over} over 100%/min' if not over else
+                                f'<b style="color:{AMBER}">{over} over 100%/min</b>')
+        self.trend_last.setText(trend_last_text(tr['peak'], limit))
         if self.history_view.isVisible():
             self.history_view.refresh()
         if self.detail.isVisible():
@@ -8905,6 +9155,15 @@ class StationPanel(QtCore.QObject):
 
     MPX_HOUR_STEP_S = 10   # the web page's hour of MPX power: one point per this many seconds
 
+    def _hour_max(self):
+        """(max dBr, its time) of MPX power over the last hour, or None."""
+        t, v = self.history.series('mpx_dbr', MpxPowerPlot.SPAN_S)
+        ok = np.isfinite(v)
+        if not ok.any():
+            return None
+        i = int(np.argmax(np.where(ok, v, -np.inf)))
+        return float(v[i]), float(t[i])
+
     def web_mpx_hour(self):
         """MPX power over the last hour for the web page's MPX tab: the highest of each
         MPX_HOUR_STEP_S up to now, oldest first (None where there is none); None if empty."""
@@ -8957,6 +9216,7 @@ class StationPanel(QtCore.QObject):
             'readings': self.web_readings(), 'notes': self._alarm_notes(self.readings) if self.readings else {},
             'trends': self.web_trends,
             'mpx_hour': self.web_mpx_hour(),
+            'sm_cells': sm_cells(self.readings, self._hour_max()),
             'mpx': None if mpx is None else _Finite(np.round(np.nan_to_num(mpx), 1).tolist()),
             'gonio': None if scope is None else [_Finite(np.round(np.nan_to_num(x[-400::2]), 4).tolist()) for x in scope],
             'status': self.feed_label.text(),
@@ -9740,7 +10000,7 @@ class ReceiverDialog(QtWidgets.QDialog):
 
         alarms = QtWidgets.QGroupBox('Alarms')
         grid = QtWidgets.QGridLayout(alarms)
-        self.alarm_checks, self.priority_boxes = {}, {}
+        self.alarm_checks, self.priority_boxes, self.delay_spins = {}, {}, {}
         for i, d in enumerate(ALARM_DEFS):
             box = QtWidgets.QCheckBox(d.desc[0].upper() + d.desc[1:])
             box.setChecked(settings.alarms.get(d.name, True))
@@ -9756,6 +10016,32 @@ class ReceiverDialog(QtWidgets.QDialog):
             prio.setEnabled(box.isChecked())
             self.priority_boxes[d.name] = prio
             grid.addWidget(prio, i, 3)
+            on_s, off_s = settings.delay(d.name)
+            delays = QtWidgets.QHBoxLayout()
+            delays.setSpacing(4)
+            on = None
+            if d.name != 'SILENCE':   # (its on-delay is the "for" beside its level)
+                on = QtWidgets.QSpinBox()
+                on.setRange(0, ALARM_DELAY_MAX_S)
+                on.setSuffix(' s')
+                on.setValue(on_s)
+                on.setToolTip(f'On-delay: how long the condition must hold before it raises (default {d.hold} s)')
+                delays.addWidget(QtWidgets.QLabel('on'))
+                delays.addWidget(on)
+            off = QtWidgets.QSpinBox()
+            off.setRange(0, ALARM_DELAY_MAX_S)
+            off.setSuffix(' s')
+            off.setValue(off_s)
+            off.setToolTip(f'Off-delay: how long the condition must be gone before it clears (default {d.hold} s)')
+            delays.addWidget(QtWidgets.QLabel('off'))
+            delays.addWidget(off)
+            delays.addStretch(1)
+            for w in (on, off):
+                if w:
+                    box.toggled.connect(w.setEnabled)
+                    w.setEnabled(box.isChecked())
+            self.delay_spins[d.name] = (on, off)
+            grid.addLayout(delays, i, 4)
 
         def spin(value, lo, hi, suffix, decimals=0):
             w = QtWidgets.QDoubleSpinBox()
@@ -9874,6 +10160,8 @@ class ReceiverDialog(QtWidgets.QDialog):
             'rds_port': 0 if self.port.value() == self.default_port else self.port.value(),
             'alarms': {name: box.isChecked() for name, box in self.alarm_checks.items()},
             'priorities': {name: box.currentData() for name, box in self.priority_boxes.items()},
+            'delays': {name: [on.value() if on else int(self.silence_s.value()), off.value()]
+                       for name, (on, off) in self.delay_spins.items()},
             'silence_lufs': self.silence_lufs.value(),
             'silence_s': int(self.silence_s.value()),
             'min_snr_db': self.min_snr.value(),
@@ -10019,6 +10307,9 @@ def smtp_password():
     return os.environ.get('FM_MODMON_SMTP_PASSWORD') or credential_read(SMTP_CREDENTIAL)
 
 
+LOG_MIN_H = 120   # the alarm and event log's least height (banner, tabs and a row or two)
+
+
 @dataclass
 class AppConfig:
     """App-wide settings, chosen in Setup; saved in the settings file's "app" section.
@@ -10032,6 +10323,7 @@ class AppConfig:
     record: bool = False               # write each receiver's readings once a minute (Recorder)
     alarm_sound: bool = False          # a tone while a priority 1 alarm waits to be acknowledged
     keep_days: int = KEEP_DAYS         # delete event logs and records older than this; 0 = keep them
+    log_height: int = 200              # the alarm and event log's height (dragged with its splitter)
 
     @classmethod
     def from_dict(cls, d):
@@ -10057,6 +10349,10 @@ class AppConfig:
             out.keep_days = max(0, min(3650, int(out.keep_days)))
         except (TypeError, ValueError):
             out.keep_days = KEEP_DAYS
+        try:
+            out.log_height = max(LOG_MIN_H, min(2000, int(out.log_height)))
+        except (TypeError, ValueError):
+            out.log_height = 200
         return out
 
     def to_dict(self):
@@ -11043,7 +11339,6 @@ class MainWindow(QtWidgets.QWidget):
         box.addStretch(1)
         self.selected = None
         self.scroll = ReceiverScroll(receivers)
-        layout.addWidget(self.scroll, 1)   # spare height goes to the receivers, not the event log
         events, events_box = card()
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -11060,13 +11355,39 @@ class MainWindow(QtWidgets.QWidget):
         logs = QtWidgets.QStackedWidget()
         logs.addWidget(self.alarm_table)
         logs.addWidget(self.log_view)
-        logs.setFixedHeight(104)
         self.log_tabs.currentChanged.connect(logs.setCurrentIndex)
+        self.log_filter = QtWidgets.QLineEdit()
+        self.log_filter.setPlaceholderText('alarm, station, text')
+        self.log_filter.setClearButtonEnabled(True)
+        self.log_filter.setFixedWidth(200)
+        self.log_filter.setToolTip('Show only the alarms that hold every word typed here')
+        self.log_filter.textChanged.connect(self.alarm_table.set_filter)
+        self.export_btn = QtWidgets.QPushButton('Export CSV')
+        self.export_btn.setToolTip('Save every alarm of this session as a CSV file')
+        self.export_btn.clicked.connect(self._export_alarms)
+        self.log_tabs.currentChanged.connect(lambda i: [w.setVisible(i == 0) for w in (self.log_filter, self.export_btn)])
+        log_bar = QtWidgets.QHBoxLayout()
+        log_bar.setSpacing(8)
+        log_bar.addWidget(self.log_tabs)
+        log_bar.addStretch(1)
+        log_bar.addWidget(QtWidgets.QLabel('Filter'))
+        log_bar.addWidget(self.log_filter)
+        log_bar.addWidget(self.export_btn)
         events_box.addWidget(self.banner)
-        events_box.addWidget(self.log_tabs, 0, QtCore.Qt.AlignLeft)
-        events_box.addWidget(logs)
-        events.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
-        layout.addWidget(events)
+        events_box.addLayout(log_bar)
+        events_box.addWidget(logs, 1)
+        events.setMinimumHeight(LOG_MIN_H)
+        # the receivers over the log, the line between them dragged to share the height (remembered)
+        self.split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.split.setObjectName('consoleSplit')
+        self.split.setChildrenCollapsible(False)
+        self.split.addWidget(self.scroll)
+        self.split.addWidget(events)
+        self.split.setStretchFactor(0, 1)    # spare height goes to the receivers, not the log
+        self.split.setStretchFactor(1, 0)
+        self.split.setSizes([10000, (self.app_config or AppConfig()).log_height])
+        self.split.splitterMoved.connect(self._log_resized)
+        layout.addWidget(self.split, 1)
         for slot, st in enumerate(tb.slots):
             if st:
                 self._add_panel(slot, st, (settings or {}).get(slot))
@@ -11103,6 +11424,7 @@ class MainWindow(QtWidgets.QWidget):
         panel.slot = slot
         panel.settings = settings or ReceiverSettings()
         panel.on_ack = self._ack_panel
+        panel.on_shelve = self._on_shelve
         panel.set_source(panel.settings.audio_source)
         st.audio_source = panel.settings.audio_source
         st.apply_settings(panel.settings)
@@ -11231,6 +11553,29 @@ class MainWindow(QtWidgets.QWidget):
     def save(self):
         if self.config_path:
             save_config(self.config_path, self.panels, self.notify_settings, self.app_config)
+
+    def _log_resized(self, *_):
+        """Remember the log's height (saved a second after the drag ends)."""
+        if self.app_config is None:
+            return
+        self.app_config.log_height = max(LOG_MIN_H, self.split.sizes()[1])
+        if not hasattr(self, '_log_save'):
+            self._log_save = QtCore.QTimer(self)
+            self._log_save.setSingleShot(True)
+            self._log_save.timeout.connect(self.save)
+        self._log_save.start(1000)
+
+    def _export_alarms(self):
+        default = os.path.join(LOG_DIR, f'{APP_NAME.lower()}_alarms_{time.strftime("%Y-%m-%d_%H%M")}.csv')
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, 'Export the alarm log', default, 'CSV files (*.csv)')
+        if not path:
+            return
+        try:
+            n = self.alarm_table.export_csv(path)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, 'Export the alarm log', f'Could not write {path}:\n{e}')
+            return
+        self.log(f'alarm log exported: {n} alarms to {path}')
 
 
     # ------------------------------------------------------------ notifications
@@ -12032,6 +12377,11 @@ class MainWindow(QtWidgets.QWidget):
         else:
             QtWidgets.QApplication.beep()
 
+    def _on_shelve(self, panel, name, seconds, by='this PC'):
+        short = Annunciator.SHORT[name]
+        self.log(f'{panel.title}: {short} ' + (f'shelved for {duration_text(seconds)} ({by})' if seconds else
+                                               f'unshelved ({by})'))
+
     def _ack_panel(self, panel, name=None):
         """Acknowledge a receiver's alarms waiting (name: only that one)."""
         key = (panel.slot, panel.station.freq_hz)
@@ -12123,6 +12473,8 @@ class MainWindow(QtWidgets.QWidget):
                                for e in self._web_episodes()],
             'alarm_waiting': [e['id'] for e in self.alarm_table.unacked()],
             'priority_colours': PRIORITY_COLOURS, 'priority_names': PRIORITY_NAMES,
+            'shelve_choices': [[sec, words] for sec, words in SHELVE_CHOICES],
+            'alarm_delay_max_s': ALARM_DELAY_MAX_S,
             'alarm_beep_s': ALARM_BEEP_S,
             'now': time.time(),
             'peak_hist': [PeakHistogram.LO, PeakHistogram.HI, PeakHistogram.STEP],
@@ -12228,6 +12580,14 @@ class MainWindow(QtWidgets.QWidget):
             self._on_source(panel, panel.source.itemData(i))
         elif action == 'reset_integrated':
             panel.station.audio_meter.reset_integrated()
+        elif action == 'shelve':
+            name, seconds = args.get('alarm'), args.get('seconds')
+            if name not in Annunciator.SHORT:
+                raise ValueError('no such alarm')
+            if seconds not in (0, *(sec for sec, _ in SHELVE_CHOICES)):
+                raise ValueError('shelve for one of: ' + ', '.join(w for _, w in SHELVE_CHOICES))
+            panel.alarms.shelve(name, seconds)
+            self._on_shelve(panel, name, seconds, 'web')
         elif action == 'settings':
             got = args.get('settings')
             if not isinstance(got, dict):
@@ -12766,6 +13126,7 @@ def main():
     win.sdr_found = args.sdr_found
     win.sdr_inventory = args.sdr_inventory
     win.app_config = app_cfg
+    win.split.setSizes([10000, app_cfg.log_height])   # the log's remembered height
     win.set_recording(app_cfg.record, save=False)
     win.prune()
     win.set_notify(load_notify(args.config))
