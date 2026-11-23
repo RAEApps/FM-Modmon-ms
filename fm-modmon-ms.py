@@ -101,8 +101,8 @@ Recording (off until started: the REC chip at the top, or Settings) writes
 each receiver's readings once a minute to
 records/fm-modmon-ms_<MHz>_YYYY-MM-DD.csv: the minute's peaks (modulation,
 AM) as their maximum, the rest as their mean, and the alarms raised in it.
-Event logs and records older than the days set in Settings (90 by default;
-0 keeps them) are deleted at start and each day.
+Event logs and records are kept unless Settings sets how many days to keep
+them: then older ones are deleted at start and each day.
 
 
 First run: the first start (or --setup, or Settings > Run setup again) opens
@@ -468,7 +468,7 @@ WEB_BATCH = 4096           # browser audio reaches Python in 85 ms batches (it i
 WEB_SOURCES = {'analog': 0, 'sca67': 1, 'sca92': 2}  # audio sources the browser can play
 RDS_TCP_PORT = 7711        # default RDS feed ports 7711-7714 (receiver 1-4); each is settable
 RECORD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'records')
-KEEP_DAYS = 90             # event logs and measurement records older than this are deleted (0 = kept)
+KEEP_DAYS = 0              # event logs and measurement records older than this many days are deleted (0 = kept)
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 APP_NAME = 'FM-Modmon-ms'
 APP_ID = 'fm-modmon-ms.monitor'   # Windows taskbar identity, so it shows our icon, not Python's

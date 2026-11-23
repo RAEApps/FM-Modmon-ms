@@ -98,8 +98,8 @@ station and day, local time): the minute's peak modulation and AM as their maxim
 readings (RF, S/N, carrier offset, pilot, RDS, MPX power, loudness, correlation) as their
 mean, and the alarms raised in that minute. The chip's menu opens the folder.
 
-Event logs and records older than 90 days are deleted at start and once a day; *Settings*
-changes how long they're kept (0 keeps them all).
+Event logs and records are kept until you set, in *Settings*, how many days to keep them; older
+ones are then deleted at start and once a day (0, the default, keeps them all).
 
 > The monitor is a measurement aid, not a type-approved modulation monitor. Carrier
 > offset includes the SDR's own tuning error, and levels depend on gain calibration.
