@@ -2,6 +2,7 @@
 fm-modmon-ms_config.json
 *_config.json
 logs/
+records/
 *.log
 
 # Secrets

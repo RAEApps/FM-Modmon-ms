@@ -14,7 +14,15 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\rds_feed_test.py` covers the RDS group TCP feed (a stalled client never blocks the decoder).
   `tests\gain_test.py` covers the band scan's and gain calibration's ADC headroom (a simulated, clipping RSP1A,
   and a one-gain-stage SDR).
+  `tests\record_test.py` covers the on-demand measurement records (`Recorder`, the REC chip) and
+  `prune_files` (old event logs and records deleted after `keep_days`).
+  `tests\notify_test.py` covers `Notifier` (email to a fake SMTP server, each webhook format, batching,
+  retries) — `_deliver`'s retries default binds `NOTIFY_RETRY_S` at class definition: patch `__defaults__`.
+  `tests\web_test.py` covers the web server (GETs, POST checks, sign-in, sessions, the command queue).
+  `tests\recovery_test.py` covers SDR loss: the watchdog, reopening in place, and the B210's restart.
   `tests\sdr_test.py` covers the SDR profiles (`SDRS`: RSP1A, RSP1B, RTL-SDR, B210) and a station at each one's rate.
+  `tests\antenna_test.py` covers antenna tuning (`window_snrs`, `AntennaTuner`, `AntennaLoop` on a
+  synthetic flowgraph, the window and web controls).
 - `tests\inventory_test.py` covers the SDR inventory and profiler (a simulated radio; no SDR needed).
   On hardware: `fm-modmon-ms.py --scan-sdrs` and `--profile-sdr SERIAL --config <a copy>` (a built-in kind
   is printed beside its built-in profile, not saved).

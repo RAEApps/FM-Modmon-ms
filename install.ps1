@@ -181,7 +181,7 @@ function Install-Monitor {
     Copy-Item (Join-Path $root 'examples\*') (Join-Path $appDir 'examples') -Recurse -Force
     Copy-Item (Join-Path $root 'tools\*') (Join-Path $appDir 'tools') -Recurse -Force
     Copy-Item (Join-Path $root 'install.ps1') $InstallDir -Force   # for updates and uninstalling
-    # Settings and event logs are written beside the script: let users change them.
+    # Settings, event logs and records are written beside the script: let users change them.
     & icacls.exe $appDir /grant '*S-1-5-32-545:(OI)(CI)M' /T /Q | Out-Null
     if ($ref -eq 'main') { (Get-Date).ToString('yyyy.MM.dd') } else { $ref.Substring(0, 7) }
 }
@@ -347,7 +347,7 @@ function Uninstall-All {
         Remove-Item (Join-Path $InstallDir $f) -Force -ErrorAction SilentlyContinue
     }
     $appDir = Join-Path $InstallDir 'app'
-    if ((Test-Path $appDir) -and (Read-Host "    Also delete $App's settings and event logs? [y/N]") -match '^[yY]') {
+    if ((Test-Path $appDir) -and (Read-Host "    Also delete $App's settings, event logs and records? [y/N]") -match '^[yY]') {
         Remove-Item $appDir -Recurse -Force
     }
     foreach ($d in $appDir, $InstallDir) {

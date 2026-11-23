@@ -89,6 +89,31 @@ Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout, and w
 overload (wideband peaks at full scale, which make every receiver's readings false; the
 stations' alarms are held until it clears).
 
+## Antenna tuning
+
+**Antenna tune** (at the top of the window or the web page) helps get the most from an antenna:
+its length, position, direction, or which antenna to use. It holds the gain where it is and
+measures each open station's S/N over the noise floor five times a second. The **score** is the
+weakest station's S/N, because the monitor is only as good as its worst station. Each bar has a
+tick at its best so far. Mark each setting you try (*dipole 75 cm*, *loop facing NE*) and the
+marks are ranked by score. Watch each station's AM / multipath as well: a longer antenna can
+pick up more reflections. Watch the ADC peaks too: too much signal overloads the SDR, and the
+window says so. The web page can play a tone that rises a semitone for each dB of score, so you
+can tune from a phone without looking at it. The receivers' alarms are held while tuning, and
+recalibrating the gain waits until tuning stops.
+
+## Recording
+
+Off until you start it: click the **REC** chip at the top of the window (or tick it in
+*Settings*), and click it again to stop; it stays as you left it across restarts. While on,
+each receiver gets a line a minute in `records/fm-modmon-ms_<MHz>_YYYY-MM-DD.csv` (a file per
+station and day, local time): the minute's peak modulation and AM as their maximum, the other
+readings (RF, S/N, carrier offset, pilot, RDS, MPX power, loudness, correlation) as their
+mean, and the alarms raised in that minute. The chip's menu opens the folder.
+
+Event logs and records are kept until you set, in *Settings*, how many days to keep them; older
+ones are then deleted at start and once a day (0, the default, keeps them all).
+
 > The monitor is a measurement aid, not a type-approved modulation monitor. Carrier
 > offset includes the SDR's own tuning error, and levels depend on gain calibration.
 
@@ -201,7 +226,8 @@ C:\ProgramData\radioconda\python.exe fm-modmon-ms.py --freqs 94.5 101.7 --countr
 | `--config PATH` | where receivers and settings are saved |
 
 Run with `--help` for details. Command-line options override what setup chose.
-Receivers and settings are saved to `fm-modmon-ms_config.json`; events are logged to `logs/`.
+Receivers and settings are saved to `fm-modmon-ms_config.json`; events are logged to `logs/`,
+measurements (when [recording](#recording)) to `records/`.
 
 ### Passwords
 
@@ -325,6 +351,14 @@ the web sign-in. `tests\radiovis_test.py` checks the RadioDNS slideshow (SSE, HT
 Stomp, SRV failover, trigger times, bad slides) against local fake servers.
 `tests\centre_test.py` checks where the RSP1A centres: no carrier on its DC offset or on
 another station's IQ image, and none past the IF filter's usable edge.
+`tests\record_test.py` checks the recording (a line a minute, the REC chip) and the deletion of
+old event logs and records.
+`tests\notify_test.py` checks email and webhook notifications against local fake servers
+(batching, retries, the test message). `tests\web_test.py` checks the web version's pages,
+sign-in, sessions and controls. `tests\recovery_test.py` checks what happens when the SDR is
+lost: reopening it, and restarting on a B210.
+`tests\antenna_test.py` checks antenna tuning: the S/N readings on a synthetic band, the score,
+peak hold and marks, and the live measurement surviving the SDR being reopened.
 `tests\sdr_test.py` checks each SDR's rate, window and scan, how `--sdr` and the setup
 pick it, and a synthetic station through a receiver at each SDR's sample rate.
 `tests\inventory_test.py` checks how the radios found are classified, the profiler on a

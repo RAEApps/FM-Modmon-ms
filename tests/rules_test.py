@@ -326,5 +326,22 @@ check('ISED over-deviation: each sample against its own subcarrier count',
 check('...FCC gives both the allowance: none count',
       rm.exceed_fraction(stats, lambda inj, n=None: rm.exceed_khz(rm.limit_at(fcc, inj, n))), 0.0)
 
+print('--- SM.1268 window: a key whose sum is zero may still be in use')
+# One update over the threshold at RDS 4.5%, then one with nothing over it (an all-zero
+# histogram, same key), then other injections until both leave the window. The first
+# leaving zeroes the key's sum while the second still refers to it (was a KeyError).
+m = rm.FmMeter()
+hot, quiet = np.full(10, 2.0 * rm.EXCEED_LO_KHZ * 1e3 / rm.MAX_DEV), np.zeros(10)
+m._inj, m._nsub = 4.5, 1
+m._add_exceed(hot)
+m._add_exceed(quiet)
+m._inj = 14.0
+try:
+    for _ in range(rm.EXCEED_MIN_S * rm.UPDATE_HZ + 2):
+        m._add_exceed(quiet)
+    check('old injection leaves the window without an error', sorted(m._exceed_by_inj), [(14.0, 1)])
+except KeyError as e:
+    check('old injection leaves the window without an error', f'KeyError {e}', [(14.0, 1)])
+
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
 sys.exit(1 if bad else 0)
