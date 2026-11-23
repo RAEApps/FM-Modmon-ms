@@ -52,7 +52,7 @@ t0 = time.mktime(datetime.datetime(2026, 11, 23, 23, 57).timetuple())
 
 print('--- off by default; on, it starts at the next whole minute')
 check('AppConfig: recording off by default', rm.AppConfig().record, False)
-check('AppConfig: logs kept 90 days by default', rm.AppConfig().keep_days, 90)
+check('AppConfig: logs kept for ever by default', rm.AppConfig().keep_days, 0)
 rec = rm.Recorder(folder)
 a, b = panel(0, 101.7, 'WEXA'), panel(1, 94.5)
 check('off: nothing written', (rec.tick([a, b], t0 + 200), os.listdir(folder)), (None, []))
@@ -129,7 +129,7 @@ check('a missing folder is fine', rm.prune_files(os.path.join(logs, 'none'), 90,
 print('--- settings')
 c = rm.AppConfig.from_dict({'record': 1, 'keep_days': '30'})
 check('saved settings read back', (c.record, c.keep_days), (True, 30))
-check('bad keep_days: the default', rm.AppConfig.from_dict({'keep_days': 'x'}).keep_days, 90)
+check('bad keep_days: the default (kept)', rm.AppConfig.from_dict({'keep_days': 'x'}).keep_days, 0)
 check('keep_days kept within 0-3650', (rm.AppConfig.from_dict({'keep_days': -5}).keep_days,
                                        rm.AppConfig.from_dict({'keep_days': 99999}).keep_days), (0, 3650))
 check('round trip', rm.AppConfig.from_dict(c.to_dict()), c)
@@ -165,7 +165,11 @@ if win:
     open(old, 'w').close()
     win._pruned_on = None
     win.prune()
-    check('prune: old event log deleted and logged', (os.path.exists(old), 'deleted 1 event log' in win.events[-1]),
+    check('prune by default (keep_days 0): old event log kept', os.path.exists(old), True)
+    win.app_config.keep_days = 90
+    win._pruned_on = None
+    win.prune()
+    check('prune with keep_days 90: old event log deleted and logged', (os.path.exists(old), 'deleted 1 event log' in win.events[-1]),
           (False, True))
 
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
