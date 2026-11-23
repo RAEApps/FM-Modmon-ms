@@ -20,8 +20,10 @@ has a dropdown of the stations found and a button to remove it. The 9.6 MS/s
 SDR window re-centres on the receivers' stations, so a station is only
 offered when it fits within 7.2 MHz of the others. Each receiver gets its own
 channel filter, stereo WBFM demodulator, RDS decoder and measurement blocks,
-and its own "radio" panel. Each panel has a Play button; one station plays
-at a time (stereo, 75 us de-emphasis; falls back to mono without a pilot).
+and its own row, with its detail view right under it when selected. The
+header's player plays the selected receiver (its own audio source), and
+follows the selection while listening; one station plays at a time (stereo,
+75 us de-emphasis; falls back to mono without a pilot).
 
 Other SDRs (SDRS): the RSP1B, as the RSP1A; an RTL-SDR at 2.304 MS/s
 (stations within 1.4 MHz; --gain in dB); an Ettus B210 at 30.72 MS/s (the
@@ -416,6 +418,8 @@ CAL_TOLERANCE_DB = 1.5     # ...the least gain whose stations' S/N is this close
 CAL_CLIP = 0.9            # ...and any sample at this fraction of full scale means overload
 CAL_LNA_STATES = range(9, -1, -1)  # SDRplay: tried from least gain to most
 CAL_STEP_DB = 3.0          # one gain stage (RTL-SDR, B210): raised this much at a time
+HELPER_TIMEOUT_S = 300     # start-up scan / calibration in a helper (B210): killed if not done in this long
+STOP_TIMEOUT_S = 10        # at exit, a B210's flowgraph given this long to stop (its samples may have stalled)
 IQ_TAP_BATCH = 65536       # live calibration reads the SDR in batches this big
 TUNE_RATE_HZ = 5           # antenna tuning: S/N measured this many times a second...
 TUNE_SAMPLES = 1 << 19     # ...each from this many IQ samples (128 spectra of 4096)...
@@ -635,6 +639,11 @@ class SdrProfile:
         is the SDR's overall gain (SoapySDR spreads it over its gain elements)."""
         for s, v in zip(self.stages, self.clamp(gain)):
             set_one(s.name, v)
+
+    @property
+    def sdrplay_gain(self):
+        """Its gain is SDRplay's LNA state and IF gain reduction (higher = less gain), not one gain in dB."""
+        return self.stages == _SDRPLAY_GAIN
 
 
 _SDRPLAY_GAIN = (GainStage('RFGR', 'LNA', 0, 9, ''), GainStage('IFGR', 'IFGR', 20, 59))  # higher = less gain
@@ -1520,7 +1529,7 @@ def band_scan(gain, verbose=False):
     outside the receivers' channel filters, so it is detected here.
     """
     if not SDR.closes_cleanly and not _IN_CHILD:
-        found, iboc_scan = _in_child('band_scan', list(gain))
+        found, iboc_scan = _in_child('band_scan', list(gain), timeout=HELPER_TIMEOUT_S)
         return [tuple(f) for f in found], {int(f): info for f, info in iboc_scan.items()}
     with _sdr_direct(gain) as rsp:
         return _scan(rsp, verbose, gain)
@@ -1529,7 +1538,7 @@ def band_scan(gain, verbose=False):
 def _less_gain(gain, by_db):
     """gain turned down by at least by_db (SDRplay: the IF gain first, then the
     LNA); None if it is already at the least."""
-    if len(SDR.stages) == 1:
+    if not SDR.sdrplay_gain:
         s = SDR.stages[0]
         return None if gain[0] <= s.lo else (max(s.lo, gain[0] - by_db),)
     lna, ifgr = gain
@@ -1609,7 +1618,7 @@ def _scan(rsp, verbose, gain=None):
     return found, iboc_scan
 
 
-class _Rsp:
+class _Capture:
     """What the band scan and gain calibration need from the SDR: tune(hz),
     set_gain(*gain) (one value per SDR.stages) and capture(n) -> complex64 IQ."""
 
@@ -1657,7 +1666,7 @@ def _sdr_direct(gain, center_hz=None):
         return out
 
     try:
-        yield _Rsp(lambda hz: dev.setFrequency(SOAPY_SDR_RX, 0, hz), set_gain, capture)
+        yield _Capture(lambda hz: dev.setFrequency(SOAPY_SDR_RX, 0, hz), set_gain, capture)
     finally:
         if not _IN_CHILD:   # (a helper process exits without closing it: see _in_child)
             dev.deactivateStream(stream)
@@ -1691,7 +1700,7 @@ def window_snrs(x, center_hz, freqs_hz):
 
 def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
     """Choose the gain for receiving freqs_hz with the SDR centred on
-    center_hz. rsp is an _Rsp already tuned there.
+    center_hz. rsp is an _Capture already tuned there.
 
     SDRplay: for each LNA state (least gain first) the IF gain reduction is
     set so the ADC's peaks sit at CAL_PEAK_DBFS. One gain stage (RTL-SDR,
@@ -1721,7 +1730,7 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
         last = [t[3] for t in tried[-3:]]
         return len(good) >= 4 and len(last) == 3 and max(last) - min(last) < 1.0  # antenna noise dominates
 
-    if len(SDR.stages) == 2:                     # SDRplay: LNA state, IF gain reduction
+    if SDR.sdrplay_gain:                         # LNA state, IF gain reduction
         ifgr = 40
         for lna in CAL_LNA_STATES:
             rsp.set_gain(lna, ifgr)
@@ -1754,14 +1763,15 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
     gain, peak_db, _, snr, worst = next(t for t in good if t[3] >= best - CAL_TOLERANCE_DB)
     report = (f'{SDR.gain_text(gain)}: stations {snr:.0f} dB over the floor on average '
               f'(weakest {worst:.0f} dB), '
-              f'ADC peaks {peak_db:.0f} dBFS ({len(tried)} {"LNA states" if len(SDR.stages) == 2 else "gains"} tried)')
+              f'ADC peaks {peak_db:.0f} dBFS ({len(tried)} {"LNA states" if SDR.sdrplay_gain else "gains"} tried)')
     return gain, report
 
 
 def calibrate_startup(receivers_hz, gain, progress=None):
     """Gain calibration on the SDR before the receiver opens it."""
     if not SDR.closes_cleanly and not _IN_CHILD:
-        gain, report = _in_child('calibrate_startup', list(receivers_hz), list(gain), progress=progress)
+        gain, report = _in_child('calibrate_startup', list(receivers_hz), list(gain), progress=progress,
+                                 timeout=HELPER_TIMEOUT_S)
         return tuple(gain), report
     center = _centre(receivers_hz)
     with _sdr_direct(gain, center) as rsp:
@@ -3014,7 +3024,7 @@ class RdsGroupServer:
                     conn.close()
                     continue
                 self._clients[conn] = q
-            threading.Thread(target=self._writer, args=(conn, q), daemon=True).start()
+            threading.Thread(target=self._writer, args=(conn, q), daemon=True, name='rds-feed-writer').start()
         self._sock.close()
 
     def close(self):
@@ -4333,7 +4343,7 @@ class FmMonitor(gr.top_block):
 
         try:
             freqs = [st.freq_hz for st in self.stations]
-            gain, report = calibrate_gain(_Rsp(None, set_gain, tap.grab), self.center_hz, freqs, progress)
+            gain, report = calibrate_gain(_Capture(None, set_gain, tap.grab), self.center_hz, freqs, progress)
         except Exception:
             set_gain(*self.gain)
             raise
@@ -4461,20 +4471,49 @@ class FmMonitor(gr.top_block):
 
 # --------------------------------------------------------------------------- GUI
 
-RED, GREEN, DIM, ACCENT = '#ff6b6b', '#69db7c', '#8c9197', '#8ab4f8'
-# High-performance HMI (ISA-101): normal readings are drawn in greys, so that
-# amber (abnormal, or not judged) and red (out of limits, alarm) stand out.
-NORMAL = '#7b8794'      # a bar or trace in its normal range
-TEXT_LIT = '#e3e4e6'    # a flag that is set, a value
-# Contrast (WCAG 2.1) on the dark backgrounds #16171a-#222328: text 4.5:1 or more
-# (DIM 4.9, muted #9aa0a6 5.9, the rest higher); control outlines 3:1 or more
-# (BORDER 3.3); disabled controls (exempt) stay readable at DISABLED 3.3.
-BORDER, BORDER_HOVER, DISABLED = '#6f747c', '#9aa0a6', '#6f747c'
-LCD = 'background: #0b1a0b; border: 1px solid #1f3a1f; border-radius: 6px;'
+def _mix(a, b, t):
+    """Hex colour a, blended t of the way to b."""
+    ca, cb = (tuple(int(x[i:i + 2], 16) for i in (1, 3, 5)) for x in (a, b))
+    return '#' + ''.join(f'{round(p + (q - p) * t):02x}' for p, q in zip(ca, cb))
+
+
+# The palette: every colour the window and the web page use, by what it means
+# (tests/theme_test.py fails on any other). High-performance HMI (ISA-101): normal
+# is grey, so that colour stands out and always means something: blue is selected
+# or clickable, amber abnormal or not judged, and the three alarm priorities.
+# Contrast (WCAG 2.1, checked by the test): every text colour 4.5:1 or more on the
+# window, the panel and the selected / alarm tints; control outlines 3:1 or more on
+# the window and panel; 'off' is for disabled and switched-off things, which are exempt.
+THEME = {
+    'window': '#16171a', 'panel': '#1e1f22', 'control': '#2b2d31', 'control_hi': '#33363c',
+    'well': '#111214',            # plots and received text (PS, RadioText)
+    'line': '#34373d', 'outline': '#6f747c',   # dividers, tracks; control outlines
+    'label': '#9aa0a6', 'text': '#b8bdc4', 'bright': '#e6e7ea', 'off': '#5d6167',
+    'ink': '#141414', 'white': '#ffffff',      # text on a bright fill; a ring that must be seen
+    'normal': '#7b8794',          # a bar or trace in its normal range
+    'accent': '#8ab4f8', 'accent_fill': '#2f6db5', 'accent_fill_hi': '#3a7cc6',
+    'amber': '#f0a35e',           # abnormal, pending, not judged
+    'p1': '#ff6b6b', 'p2': '#f2c14e', 'p3': '#4fb3c4',   # alarm priorities 1-3
+}
+# tints: a meaning washed into the panel, for a row, banner or fill, and its edge
+for _k in ('accent', 'amber', 'p1', 'p2', 'p3'):
+    THEME[f'{_k}_tint'] = _mix(THEME['panel'], THEME[_k], 0.12)
+    THEME[f'{_k}_line'] = _mix(THEME['panel'], THEME[_k], 0.42)
+# Type: four sizes. Label (headings, units, notes), body, reading (a value to read),
+# primary (the station's frequency, the title). Readings in Consolas: its digits are
+# all one width, so changing numbers don't jitter.
+TYPE = {'label': '8pt', 'body': '9pt', 'reading': '12pt', 'primary': '15pt'}
+RADIUS = '3px'   # corners: square-ish, as on instruments
+
+RED, DIM, ACCENT = THEME['p1'], THEME['label'], THEME['accent']
+NORMAL = THEME['normal']
+TEXT_LIT = THEME['bright']    # a flag that is set, a value
+BORDER, BORDER_HOVER, DISABLED = THEME['outline'], THEME['text'], THEME['outline']
+LCD = f'background: {THEME["well"]}; border: 1px solid {THEME["line"]}; border-radius: {RADIUS};'
 # Alarm priorities (ISA-18.2): each a colour and a shape (square, triangle, diamond)
 # and its number, so they read apart in greyscale too. Priority 2's yellow is not
 # AMBER, which means "pending / not judged".
-PRIORITY_COLOURS = {1: '#ff5c5c', 2: '#f2c14e', 3: '#4fb3c4'}
+PRIORITY_COLOURS = {1: THEME['p1'], 2: THEME['p2'], 3: THEME['p3']}
 PRIORITY_NAMES = {1: 'high', 2: 'medium', 3: 'low'}
 
 
@@ -4505,70 +4544,72 @@ def priority_icon(p, filled=True, size=12):
     return QtGui.QIcon(pm)
 
 APP_QSS = """
-QWidget { font-family: "Segoe UI"; font-size: 9pt; }
-QToolTip { background: #2b2d31; color: #e0e0e0; border: 1px solid #3c4043; padding: 4px 6px; }
-QFrame#row { background: #1e1f22; border: 1px solid #2e3035; border-left: 5px solid #1e1f22; border-radius: 6px; }
-QFrame#row[selected="true"] { background: #1c2636; border: 1px solid #5b8fd6; border-left: 5px solid #8ab4f8; }
-QFrame#row[unacked="true"] { background: #2c1b1e; }
-QFrame#row[selected="true"][unacked="true"] { background: #2c1b1e; border: 1px solid #5b8fd6; border-left: 5px solid #8ab4f8; }
-QFrame#row[selected="true"] QComboBox#freq { color: #8ab4f8; }
-QFrame#detail { background: #1b1c20; border: 1px solid #3d5f8f; border-radius: 6px; }
-QLabel#colHead { color: #8c9197; font-family: Consolas; font-size: 7pt; font-weight: 600; letter-spacing: 1px; }
-QComboBox#freq { font-size: 15pt; font-weight: 600; padding: 0 4px; border-color: transparent; background: transparent; }
-QComboBox#freq:hover { border-color: %BORDER%; }
-QToolButton#rowBtn { padding: 0 4px; border-color: transparent; background: transparent; color: #9aa0a6; }
-QToolButton#rowBtn:hover { border-color: %BORDER%; color: #e0e0e0; }
-QTabBar#detailTabs::tab { background: transparent; color: #9aa0a6; padding: 2px 10px; border: none;
-                          border-radius: 4px; margin-left: 2px; }
-QTabBar#detailTabs::tab:selected { background: #2b2d31; color: #e3e4e6; }
-QTabBar#detailTabs::tab:hover { color: #e3e4e6; }
-QFrame#card { background: #222328; border: 1px solid #2a2c31; border-radius: 8px; }
-QLabel#cardTitle { color: #9aa0a6; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }
-QLabel#chip { background: #24262b; border: 1px solid #30333a; border-radius: 10px; padding: 3px 10px; color: #c4c7cc; }
-QLabel#appTitle { font-size: 15pt; font-weight: 600; color: #e8eaed; padding-right: 8px; }
-QPushButton, QToolButton { background: #2b2d31; border: 1px solid %BORDER%; border-radius: 6px; padding: 5px 12px; }
-QPushButton:hover, QToolButton:hover { background: #33363c; border-color: %BORDER_HOVER%; }
-QPushButton:focus, QToolButton:focus { border: 1px solid #8ab4f8; }
-QPushButton:disabled, QToolButton:disabled { color: %DISABLED%; background: #25272b; border-color: #3a3d44; }
-QPushButton#help { border-radius: 16px; padding: 0; font-weight: 700; font-size: 11pt; color: #8ab4f8; }
-QPushButton#primary { background: #2f6db5; border-color: #3d7fd0; color: white; font-weight: 600; }
-QPushButton#primary:hover { background: #3a7cc6; }
-QPushButton#primary:focus { border-color: #ffffff; }
-QPushButton#primary:disabled { background: #25272b; border-color: #3a3d44; color: %DISABLED%; }
-QComboBox { background: #2b2d31; border: 1px solid %BORDER%; border-radius: 6px; padding: 3px 8px; }
-QComboBox:hover { border-color: %BORDER_HOVER%; }
-QComboBox:focus { border-color: #8ab4f8; }
-QComboBox:disabled { color: %DISABLED%; border-color: #3a3d44; }
-QComboBox QAbstractItemView { background: #222328; border: 1px solid %BORDER%; selection-background-color: #2f6db5; }
-QLineEdit, QSpinBox, QDoubleSpinBox { background: #16171a; border: 1px solid %BORDER%; border-radius: 5px; padding: 3px 6px; }
-QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: %BORDER_HOVER%; }
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: #8ab4f8; }
-QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { color: %DISABLED%; border-color: #3a3d44; }
+QWidget { font-family: "Segoe UI"; font-size: %size_body%; }
+QToolTip { background: %control%; color: %bright%; border: 1px solid %line%; padding: 4px 6px; }
+QFrame#row { background: %panel%; border: 1px solid %line%; border-radius: %radius%; }
+QFrame#row[selected="true"] { background: %accent_tint%; border: 1px solid %accent%; }
+QFrame#row[unacked="true"] { background: %p1_tint%; }
+QFrame#row[selected="true"][unacked="true"] { background: %p1_tint%; border: 1px solid %accent%; }
+QFrame#row[selected="true"] QComboBox#freq { color: %accent%; }
+QFrame#detail { background: %window%; border: 1px solid %accent_line%; border-radius: %radius%; }
+QLabel#colHead { color: %label%; font-size: %size_label%; font-weight: 600; letter-spacing: 1px; }
+QComboBox#freq { font-family: Consolas; font-size: %size_primary%; font-weight: 600; padding: 0 4px;
+                 border-color: transparent; background: transparent; }
+QComboBox#freq:hover { border-color: %outline%; }
+QToolButton#rowBtn { padding: 0 4px; border-color: transparent; background: transparent; color: %text%; }
+QToolButton#rowBtn:hover { border-color: %outline%; color: %bright%; }
+QTabBar#detailTabs::tab { background: transparent; color: %text%; padding: 2px 10px; border: none;
+                          border-bottom: 2px solid transparent; margin-left: 2px; }
+QTabBar#detailTabs::tab:selected { color: %bright%; border-bottom: 2px solid %accent%; }
+QTabBar#detailTabs::tab:hover { color: %bright%; }
+QFrame#card { background: %panel%; border: 1px solid %line%; border-radius: %radius%; }
+QLabel#cardTitle { color: %label%; font-size: %size_label%; font-weight: 600; letter-spacing: 1px; }
+QLabel#chip { background: transparent; border: none; border-left: 1px solid %line%; border-radius: 0;
+              padding: 2px 10px; color: %text%; font-family: Consolas; }
+QLabel#appTitle { font-size: %size_primary%; font-weight: 600; color: %bright%; padding-right: 8px; }
+QPushButton, QToolButton { background: %control%; border: 1px solid %outline%; border-radius: %radius%; padding: 5px 12px; }
+QPushButton:hover, QToolButton:hover { background: %control_hi%; border-color: %text%; }
+QPushButton:focus, QToolButton:focus { border: 1px solid %accent%; }
+QPushButton:disabled, QToolButton:disabled { color: %outline%; background: %panel%; border-color: %line%; }
+QPushButton#help { padding: 0; font-weight: 700; color: %accent%; }
+QPushButton#primary { background: %accent_fill%; border-color: %accent%; color: %white%; font-weight: 600; }
+QPushButton#primary:hover { background: %accent_fill_hi%; }
+QPushButton#primary:focus { border-color: %white%; }
+QPushButton#primary:disabled { background: %panel%; border-color: %line%; color: %outline%; }
+QComboBox { background: %control%; border: 1px solid %outline%; border-radius: %radius%; padding: 3px 8px; }
+QComboBox:hover { border-color: %text%; }
+QComboBox:focus { border-color: %accent%; }
+QComboBox:disabled { color: %outline%; border-color: %line%; }
+QComboBox QAbstractItemView { background: %panel%; border: 1px solid %outline%; selection-background-color: %accent_fill%; }
+QLineEdit, QSpinBox, QDoubleSpinBox { background: %window%; border: 1px solid %outline%; border-radius: %radius%; padding: 3px 6px; }
+QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: %text%; }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: %accent%; }
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { color: %outline%; border-color: %line%; }
 QCheckBox { spacing: 8px; }
-QCheckBox:disabled { color: %DISABLED%; }
-QCheckBox::indicator, QGroupBox::indicator { width: 14px; height: 14px; border: 2px solid %BORDER_HOVER%;
-                                             border-radius: 3px; background: #16171a; }
-QCheckBox::indicator:hover, QGroupBox::indicator:hover, QCheckBox::indicator:focus { border-color: #8ab4f8; }
-QCheckBox::indicator:checked, QGroupBox::indicator:checked { background: #8ab4f8; border-color: #8ab4f8;
+QCheckBox:disabled { color: %outline%; }
+QCheckBox::indicator, QGroupBox::indicator { width: 14px; height: 14px; border: 2px solid %text%;
+                                             border-radius: 2px; background: %window%; }
+QCheckBox::indicator:hover, QGroupBox::indicator:hover, QCheckBox::indicator:focus { border-color: %accent%; }
+QCheckBox::indicator:checked, QGroupBox::indicator:checked { background: %accent%; border-color: %accent%;
                                                              image: url(%CHECK%); }
-QCheckBox::indicator:disabled, QGroupBox::indicator:disabled { border-color: #4a4e56; background: #1c1d21; }
-QCheckBox::indicator:checked:disabled { background: #4a4e56; border-color: #4a4e56; }
+QCheckBox::indicator:disabled, QGroupBox::indicator:disabled { border-color: %off%; background: %panel%; }
+QCheckBox::indicator:checked:disabled { background: %off%; border-color: %off%; }
 QRadioButton { spacing: 8px; }
-QRadioButton:disabled { color: %DISABLED%; }
-QRadioButton::indicator { width: 14px; height: 14px; border: 2px solid %BORDER_HOVER%; border-radius: 9px;
-                          background: #16171a; }
-QRadioButton::indicator:hover, QRadioButton::indicator:focus { border-color: #8ab4f8; }
-QRadioButton::indicator:checked { border-color: #8ab4f8;
+QRadioButton:disabled { color: %outline%; }
+QRadioButton::indicator { width: 14px; height: 14px; border: 2px solid %text%; border-radius: 9px;
+                          background: %window%; }
+QRadioButton::indicator:hover, QRadioButton::indicator:focus { border-color: %accent%; }
+QRadioButton::indicator:checked { border-color: %accent%;
     background: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
-                                stop: 0 #8ab4f8, stop: 0.5 #8ab4f8, stop: 0.6 #16171a, stop: 1 #16171a); }
-QRadioButton::indicator:disabled { border-color: #4a4e56; }
-QPlainTextEdit { background: #16171a; border: none; border-radius: 6px; padding: 4px; color: #c4c7cc;
+                                stop: 0 %accent%, stop: 0.5 %accent%, stop: 0.6 %window%, stop: 1 %window%); }
+QRadioButton::indicator:disabled { border-color: %off%; }
+QPlainTextEdit { background: %window%; border: none; border-radius: %radius%; padding: 4px; color: %text%;
                  font-family: Consolas; }
 QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 22px;
-                       border: none; border-left: 1px solid %BORDER%; }
+                       border: none; border-left: 1px solid %outline%; }
 QComboBox::down-arrow { width: 10px; height: 6px; image: url(%ARROW%); }
-QGroupBox { border: 1px solid %BORDER%; border-radius: 8px; margin-top: 14px; padding-top: 6px; }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #8ab4f8; }
+QGroupBox { border: 1px solid %line%; border-radius: %radius%; margin-top: 14px; padding-top: 6px; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; color: %label%; font-weight: 600; }
 """
 
 
@@ -4618,19 +4659,19 @@ def splash_pixmap(scale=1.0):
     same scale to keep the logo in proportion to it."""
     w, h, logo = 360, 330, 180          # at 100% scaling
     pix = QtGui.QPixmap(int(w * scale), int(h * scale))
-    pix.fill(QtGui.QColor('#1c1d21'))
+    pix.fill(QtGui.QColor('#16171a'))
     p = QtGui.QPainter(pix)
     p.setRenderHint(QtGui.QPainter.Antialiasing)
     p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
     p.scale(scale, scale)
-    p.setPen(QtGui.QColor('#2c2e33'))
+    p.setPen(QtGui.QColor('#34373d'))
     p.drawRect(QtCore.QRectF(0.5, 0.5, w - 1, h - 1))
     p.drawImage(QtCore.QRectF((w - logo) / 2, 30, logo, logo), draw_icon(int(logo * scale)))
     font = QtGui.QFont('Segoe UI')
     font.setPixelSize(34)               # pixels, so the scale above isn't applied twice
     font.setWeight(QtGui.QFont.DemiBold)
     p.setFont(font)
-    p.setPen(QtGui.QColor('#e8eaed'))
+    p.setPen(QtGui.QColor('#e6e7ea'))
     p.drawText(QtCore.QRectF(0, 30 + logo + 12, w, 44), QtCore.Qt.AlignCenter, APP_NAME)
     p.end()
     return pix
@@ -4691,15 +4732,15 @@ def apply_dark_theme(app):
     app.setStyle('Fusion')
     P = QtGui.QPalette
     pal = QtGui.QPalette()
-    for role, colour in ((P.Window, '#1e1f22'), (P.WindowText, '#e0e0e0'), (P.Base, '#16171a'),
-                         (P.AlternateBase, '#26272b'), (P.Text, '#e0e0e0'), (P.Button, '#2b2d31'),
-                         (P.ButtonText, '#e0e0e0'), (P.Highlight, '#2f6db5'),
-                         (P.HighlightedText, '#ffffff'), (P.ToolTipBase, '#2b2d31'),
-                         (P.ToolTipText, '#e0e0e0'), (P.Link, ACCENT)):
+    T = THEME
+    for role, colour in ((P.Window, T['window']), (P.WindowText, T['bright']), (P.Base, T['window']),
+                         (P.AlternateBase, T['panel']), (P.Text, T['bright']), (P.Button, T['control']),
+                         (P.ButtonText, T['bright']), (P.Highlight, T['accent_fill']),
+                         (P.HighlightedText, T['white']), (P.ToolTipBase, T['control']),
+                         (P.ToolTipText, T['bright']), (P.Link, ACCENT)):
         pal.setColor(role, QtGui.QColor(colour))
     for role in (P.WindowText, P.Text, P.ButtonText):
         pal.setColor(P.Disabled, role, QtGui.QColor(DISABLED))
-    pal.setColor(P.Window, QtGui.QColor('#17181b'))
     app.setPalette(pal)
     # Qt stylesheets can't draw the dropdown arrow once its box is styled, so
     # draw one into the session cache and point the stylesheet at it.
@@ -4708,7 +4749,7 @@ def apply_dark_theme(app):
     p = QtGui.QPainter(arrow)
     p.setRenderHint(QtGui.QPainter.Antialiasing)
     p.setPen(QtCore.Qt.NoPen)
-    p.setBrush(QtGui.QColor('#9aa0a6'))
+    p.setBrush(QtGui.QColor(T['text']))
     p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(1, 1), QtCore.QPointF(19, 1), QtCore.QPointF(10, 11)]))
     p.end()
     arrow_path = os.path.join(cache_dir(), 'arrow.png')
@@ -4718,16 +4759,20 @@ def apply_dark_theme(app):
     tick.fill(QtCore.Qt.transparent)
     p = QtGui.QPainter(tick)
     p.setRenderHint(QtGui.QPainter.Antialiasing)
-    p.setPen(QtGui.QPen(QtGui.QColor('#0b1a33'), 4.2, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+    p.setPen(QtGui.QPen(QtGui.QColor(T['ink']), 4.2, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
     p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(5, 14.5), QtCore.QPointF(11.5, 21), QtCore.QPointF(23, 7)]))
     p.end()
     tick_path = os.path.join(cache_dir(), 'tick.png')
     tick.save(tick_path)
-    qss = APP_QSS
-    for token, value in (('%ARROW%', arrow_path.replace('\\', '/')), ('%CHECK%', tick_path.replace('\\', '/')),
-                         ('%BORDER_HOVER%', BORDER_HOVER), ('%BORDER%', BORDER), ('%DISABLED%', DISABLED)):
-        qss = qss.replace(token, value)
-    app.setStyleSheet(qss)
+    app.setStyleSheet(app_qss(arrow_path, tick_path))
+
+
+def app_qss(arrow_path='', tick_path=''):
+    """APP_QSS with its %placeholders% filled from THEME, TYPE and RADIUS."""
+    qss = APP_QSS.replace('%ARROW%', arrow_path.replace('\\', '/')).replace('%CHECK%', tick_path.replace('\\', '/'))
+    for name, value in (*THEME.items(), *((f'size_{k}', v) for k, v in TYPE.items()), ('radius', RADIUS)):
+        qss = qss.replace(f'%{name}%', value)
+    return qss
 
 
 def card(title=None, extra=None):
@@ -4771,12 +4816,12 @@ class Meter(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         w, h, val_w = self.width(), self.height(), 78
         name_w = self.name_w or p.fontMetrics().horizontalAdvance(self.name) + 12
-        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.setPen(QtGui.QColor('#b8bdc4'))
         p.drawText(QtCore.QRectF(0, 0, name_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.name)
         track = QtCore.QRectF(name_w, h / 2 - 4, max(w - name_w - val_w - 8, 10), 8)
         p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(QtGui.QColor('#2c2e33'))
-        p.drawRoundedRect(track, 4, 4)
+        p.setBrush(QtGui.QColor('#34373d'))
+        p.drawRoundedRect(track, 2, 2)
 
         def x(v):
             v = min(max(v, self.lo), self.hi)
@@ -4786,14 +4831,14 @@ class Meter(QtWidgets.QWidget):
             colour = next((c for upto, c in self.zones if self.value <= upto), self.zones[-1][1])
             x0, x1 = sorted((x(self.origin), x(self.value)))
             p.setBrush(QtGui.QColor(colour))
-            p.drawRoundedRect(QtCore.QRectF(x0, track.top(), max(x1 - x0, 3), track.height()), 4, 4)
-        p.setPen(QtGui.QPen(QtGui.QColor('#80868b'), 1))
+            p.drawRoundedRect(QtCore.QRectF(x0, track.top(), max(x1 - x0, 3), track.height()), 2, 2)
+        p.setPen(QtGui.QPen(QtGui.QColor('#9aa0a6'), 1))
         for t in self.ticks:
             p.drawLine(QtCore.QPointF(x(t), track.top() - 3), QtCore.QPointF(x(t), track.bottom() + 3))
         font = p.font()
         font.setBold(True)
         p.setFont(font)
-        p.setPen(QtGui.QColor('#e8eaed'))
+        p.setPen(QtGui.QColor('#e6e7ea'))
         p.drawText(QtCore.QRectF(w - val_w, 0, val_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight, self.text)
 
 
@@ -4856,15 +4901,15 @@ class Tape(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.setPen(QtGui.QColor('#b8bdc4'))
         p.drawText(QtCore.QRectF(0, 0, self.name_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, self.name)
         track = QtCore.QRectF(self.name_w, h / 2 - 3.5, max(w - self.name_w - self.val_w - 6, 10), 7)
         p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(QtGui.QColor('#2a2c31'))
+        p.setBrush(QtGui.QColor('#34373d'))
         p.drawRoundedRect(track, 2, 2)
         if self.band:
             a, b = self._x(track, self.band[0]), self._x(track, self.band[1])
-            p.setBrush(QtGui.QColor('#30353c'))
+            p.setBrush(QtGui.QColor('#34373d'))
             p.drawRect(QtCore.QRectF(a, track.top(), b - a, track.height()))
         colour = QtGui.QColor(TAPE_COLOURS.get(self.state, TAPE_COLOURS[None]))
         if self.value is not None and math.isfinite(self.value):
@@ -4877,7 +4922,7 @@ class Tape(QtWidgets.QWidget):
             p.drawLine(QtCore.QPointF(x, track.top() - 3), QtCore.QPointF(x, track.bottom() + 3))
         if self.peak is not None:
             p.setPen(QtCore.Qt.NoPen)
-            p.setBrush(QtGui.QColor('#e3e4e6'))
+            p.setBrush(QtGui.QColor('#e6e7ea'))
             x = self._x(track, self.peak)
             p.drawRect(QtCore.QRectF(x - 1, track.top() - 2, 2, track.height() + 4))
         if self.limit is not None:
@@ -4891,7 +4936,7 @@ class Tape(QtWidgets.QWidget):
         font = p.font()
         font.setBold(True)
         p.setFont(font)
-        p.setPen(QtGui.QColor('#e3e4e6') if self.state in (None, 'off') else colour)
+        p.setPen(QtGui.QColor('#e6e7ea') if self.state in (None, 'off') else colour)
         p.drawText(QtCore.QRectF(w - self.val_w, 0, self.val_w, h), QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
                    self.text)
 
@@ -5429,14 +5474,14 @@ class Annunciator(QtWidgets.QWidget):
     COLS = 4
     SHORT = {d.name: d.short for d in ALARM_DEFS}
     # state: (fill, text, outline or None, hatched); None = the alarm's priority colour
-    LOOK = {'clear': ('#26282d', '#7d838a', None, False),
-            'waiting': ('#26282d', '#4f545a', None, False),
+    LOOK = {'clear': ('#2b2d31', '#9aa0a6', None, False),
+            'waiting': ('#2b2d31', '#5d6167', None, False),
             'unack': (None, '#141414', None, False),
             'raised': (None, '#141414', None, False),
-            'cleared_unack': ('#1d1f23', None, None, False),
-            'pending': ('#4a3a1c', '#f0a35e', None, False),
-            'suppressed': ('#26282d', '#f0a35e', None, True),
-            'off': (None, '#4f545a', '#3a3d44', False)}
+            'cleared_unack': ('#111214', None, None, False),
+            'pending': ('#372f29', '#f0a35e', None, False),
+            'suppressed': ('#2b2d31', '#f0a35e', None, True),
+            'off': (None, '#5d6167', '#34373d', False)}
     PRIORITY_STATES = ('unack', 'raised', 'cleared_unack')
     MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, the SDR just re-adjusted, no readings yet, '
                                        'or not enough held yet)',
@@ -5505,7 +5550,7 @@ class Annunciator(QtWidgets.QWidget):
                 p.setBrush(QtGui.QColor(fill))
                 p.drawRoundedRect(rect, 2, 2)
             if hatched:
-                p.setBrush(QtGui.QBrush(QtGui.QColor('#5a4424'), QtCore.Qt.BDiagPattern))
+                p.setBrush(QtGui.QBrush(QtGui.QColor('#76563b'), QtCore.Qt.BDiagPattern))
                 p.drawRoundedRect(rect, 2, 2)
             if outline:
                 width = 1.5 if state == 'cleared_unack' else 1
@@ -5564,7 +5609,7 @@ class ReadoutInfo(QtWidgets.QFrame):
     def __init__(self, parent=None):
         super().__init__(parent, QtCore.Qt.Popup)
         self.setObjectName('readoutInfo')
-        self.setStyleSheet('#readoutInfo { background: #24262b; border: 1px solid #6f747c; border-radius: 8px; }'
+        self.setStyleSheet('#readoutInfo { background: #2b2d31; border: 1px solid #6f747c; border-radius: 3px; }'
                            'QLabel { background: transparent; }')
         self.setFixedWidth(self.WIDTH)
         box = QtWidgets.QVBoxLayout(self)
@@ -5579,7 +5624,7 @@ class ReadoutInfo(QtWidgets.QFrame):
         self.source_btn.clicked.connect(self._toggle_source)
         self.source = QtWidgets.QLabel()
         self.source.setWordWrap(True)
-        self.source.setStyleSheet('color: #9aa0a6;')
+        self.source.setStyleSheet('color: #b8bdc4;')
         self.source.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         box.addWidget(self.body)
         box.addWidget(self.source_btn, 0, QtCore.Qt.AlignLeft)
@@ -5598,10 +5643,10 @@ class ReadoutInfo(QtWidgets.QFrame):
     def show_at(self, anchor, title, value_html, sections, source=''):
         """anchor: the clicked thing's rect in global coordinates; sections: [(heading, text)],
         empty texts left out; value_html: the reading as the panel shows it."""
-        head = (f'<table width="100%" cellspacing="0" cellpadding="0"><tr><td><b style="font-size:11pt;'
-                f'color:#e3e4e6">{_html(title)}</b></td><td align="right"><b>{value_html}</b></td></tr></table>')
-        parts = [head] + [f'<p style="margin:8px 0 0 0"><span style="color:#8c9197;font-size:7.5pt;'
-                          f'letter-spacing:1px">{_html(h.upper())}</span><br><span style="color:#c4c7cc">'
+        head = (f'<table width="100%" cellspacing="0" cellpadding="0"><tr><td><b style="font-size:12pt;'
+                f'color:#e6e7ea">{_html(title)}</b></td><td align="right"><b>{value_html}</b></td></tr></table>')
+        parts = [head] + [f'<p style="margin:8px 0 0 0"><span style="color:#9aa0a6;font-size:8pt;'
+                          f'letter-spacing:1px">{_html(h.upper())}</span><br><span style="color:#b8bdc4">'
                           f'{text}</span></p>' for h, text in sections if text]
         self.body.setText(''.join(parts))
         self.source.setText(_html(source))
@@ -5669,7 +5714,7 @@ class Spark(QtWidgets.QWidget):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         w, h = self.width(), self.height()
-        p.fillRect(self.rect(), QtGui.QColor('#1a1b1f'))
+        p.fillRect(self.rect(), QtGui.QColor('#111214'))
         n = len(self.data)
 
         def y(v):
@@ -5711,7 +5756,7 @@ class Spark(QtWidgets.QWidget):
                     p.drawRect(QtCore.QRectF(x(i) - 0.8, y(self.data[i]), 1.8, y(self.limit) - y(self.data[i])))
             last = np.nonzero(ok)[0]
             if len(last):
-                p.setBrush(QtGui.QColor('#e3e4e6'))
+                p.setBrush(QtGui.QColor('#e6e7ea'))
                 p.drawEllipse(QtCore.QPointF(x(last[-1]), y(self.data[last[-1]])), 2, 2)
         if self.limit is not None:
             p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
@@ -5752,8 +5797,8 @@ class PeakHistogram(QtWidgets.QWidget):
         def x(pct):
             return w * (pct - self.LO) / (self.HI - self.LO)
 
-        p.fillRect(QtCore.QRectF(0, top, w, bottom - top), QtGui.QColor('#1a1b1f'))
-        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.fillRect(QtCore.QRectF(0, top, w, bottom - top), QtGui.QColor('#111214'))
+        p.setPen(QtGui.QColor('#b8bdc4'))
         for pct in range(self.LO, self.HI, 10):
             left_ = pct == self.LO
             p.drawText(QtCore.QRectF(x(pct) - (0 if left_ else 20), bottom + 1, 40, axis),
@@ -5890,7 +5935,7 @@ class HistoryStrips(QtWidgets.QWidget):
         for k, ((title, unit, _, lo, hi, _, ref), values) in enumerate(zip(self.STRIPS, strips)):
             top = k * self.STRIP_H
             box = QtCore.QRectF(left, top + 2, right - left, self.STRIP_H - 4)
-            p.fillRect(box, QtGui.QColor('#141518'))
+            p.fillRect(box, QtGui.QColor('#111214'))
 
             def y(v):
                 v = min(max(v, lo), hi)
@@ -5923,17 +5968,17 @@ class HistoryStrips(QtWidgets.QWidget):
                 shown = near[len(near) // 2] if near else math.nan
             else:
                 shown = next((v for v in values[::-1] if math.isfinite(v)), math.nan)
-            p.setPen(QtGui.QColor('#9aa0a6'))
+            p.setPen(QtGui.QColor('#b8bdc4'))
             p.drawText(QtCore.QRectF(4, top, left - 10, self.STRIP_H / 2 + 2), QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom,
                        title)
-            p.setPen(QtGui.QColor('#e3e4e6'))
+            p.setPen(QtGui.QColor('#e6e7ea'))
             p.drawText(QtCore.QRectF(4, top + self.STRIP_H / 2, left - 10, self.STRIP_H / 2),
                        QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
                        f'{shown:.1f} {unit}' if math.isfinite(shown) else '-')
         # alarm episodes, on the same time axis
         top = len(self.STRIPS) * self.STRIP_H
         box = QtCore.QRectF(left, top + 2, right - left, self.ALARM_H - 4)
-        p.fillRect(box, QtGui.QColor('#141518'))
+        p.fillRect(box, QtGui.QColor('#111214'))
         start = end - self.span
 
         def tx(t):
@@ -5950,13 +5995,13 @@ class HistoryStrips(QtWidgets.QWidget):
             p.setBrush(QtGui.QColor(RED))
             p.drawRect(QtCore.QRectF(x0, box.top(), max(x1 - x0, 2), box.height()))
             if x1 - x0 > fm_.horizontalAdvance(Annunciator.SHORT[name]) + 6:
-                p.setPen(QtGui.QColor('#ffe0e0'))
+                p.setPen(QtGui.QColor('#ffffff'))
                 p.drawText(QtCore.QRectF(x0, box.top(), x1 - x0, box.height()), QtCore.Qt.AlignCenter,
                            Annunciator.SHORT[name])
                 p.setPen(QtCore.Qt.NoPen)
             if t_at is not None and a <= t_at <= b_:
                 active_at.append(Annunciator.SHORT[name])
-        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.setPen(QtGui.QColor('#b8bdc4'))
         p.drawText(QtCore.QRectF(4, top, left - 10, self.ALARM_H), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
                    'Alarms' + (f': {", ".join(active_at)}' if active_at else ''))
         # time axis and the cursor
@@ -5970,7 +6015,7 @@ class HistoryStrips(QtWidgets.QWidget):
             p.drawText(rect, align, text)
         if t_at is not None:
             x = left + (right - left) * (at + 0.5) / n
-            p.setPen(QtGui.QPen(QtGui.QColor('#e3e4e6'), 1))
+            p.setPen(QtGui.QPen(QtGui.QColor('#e6e7ea'), 1))
             p.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, axis_top))
             p.drawText(QtCore.QRectF(x + 4, axis_top + 2, 120, fm_.height()), QtCore.Qt.AlignLeft,
                        time.strftime('%H:%M:%S', time.localtime(t_at)))
@@ -5993,7 +6038,7 @@ class HistoryView(QtWidgets.QWidget):
         self.span.activated.connect(lambda i: self._set_span(self.span.itemData(i)))
         note = QtWidgets.QLabel('Hover to read every strip at one moment. Up to 5 min: every update; '
                                 'beyond: one point a second (peaks: its highest). Alarms: the last 24 h.')
-        note.setStyleSheet('color: #8c9197;')
+        note.setStyleSheet('color: #9aa0a6;')
         head.addWidget(QtWidgets.QLabel('Span'))
         head.addWidget(self.span)
         head.addWidget(note, 1)
@@ -6017,6 +6062,7 @@ class AlarmTable(QtWidgets.QTableWidget):
     acknowledged (ISA-18.2), raised or cleared: click its Ack cell, or right-click."""
     COLS = ('Pri', 'Raised', 'Station', 'Alarm', 'Duration', 'Cleared', 'Ack', 'Measured')
     ACK_COL = 6
+    KEEP = 500   # episodes kept, besides any still waiting to be acknowledged
 
     def __init__(self):
         super().__init__(0, len(self.COLS))
@@ -6046,8 +6092,21 @@ class AlarmTable(QtWidgets.QTableWidget):
                               'station': station, 'desc': desc, 'start': t or time.time(), 'end': None,
                               'detail': detail, 'acked': None, 'acked_by': ''})
         self._next_id += 1
-        self.episodes = self.episodes[-500:]
+        self._trim()
         self.redraw()
+
+    def _trim(self):
+        """Forget the oldest episodes past KEEP, but only ones acknowledged and cleared:
+        one still waiting stays however many there are."""
+        over = len(self.episodes) - self.KEEP
+        if over > 0:
+            kept = []
+            for e in self.episodes:
+                if over and e['acked'] is not None and e['end'] is not None:
+                    over -= 1
+                else:
+                    kept.append(e)
+            self.episodes = kept
 
     def cleared(self, key, desc, t=None):
         for e in reversed(self.episodes):
@@ -6111,7 +6170,7 @@ class AlarmTable(QtWidgets.QTableWidget):
                      e['station'], e['desc'],
                      duration_text((now if on else e['end']) - e['start']) + (' …' if on else ''),
                      'raised' if on else time.strftime('%H:%M:%S', time.localtime(e['end'])), ack, e['detail'])
-            colour = QtGui.QColor(PRIORITY_COLOURS[e['priority']] if on else '#c4c7cc')
+            colour = QtGui.QColor(PRIORITY_COLOURS[e['priority']] if on else '#b8bdc4')
             for c, text in enumerate(cells):
                 item = self.item(r, c)
                 if item is None:
@@ -6142,7 +6201,7 @@ class AlarmBanner(QtWidgets.QFrame):
     """Under the header while any alarm waits to be acknowledged: the most urgent
     one (banner_episode), how many others wait, and Acknowledge / Acknowledge all.
     Hidden otherwise, so its appearing is the cue."""
-    LOOK = {1: ('#3a1a1d', '#7a2a30'), 2: ('#33290f', '#6b5520'), 3: ('#13292d', '#2a5a63')}
+    LOOK = {1: ('#39282b', '#7c3f41'), 2: ('#373227', '#776334'), 3: ('#243135', '#335d66')}
 
     def __init__(self, on_ack):
         super().__init__()
@@ -6181,7 +6240,7 @@ class AlarmBanner(QtWidgets.QFrame):
         bg, line = self.LOOK[e['priority']]
         colour = PRIORITY_COLOURS[e['priority']]
         self.setStyleSheet(f'QFrame#banner {{ background: {bg}; border: 1px solid {line}; border-radius: 3px; }}'
-                           'QFrame#banner QLabel { background: transparent; color: #f2f2f2; }')
+                           'QFrame#banner QLabel { background: transparent; color: #e6e7ea; }')
         self.icon.setPixmap(priority_icon(e['priority'], filled=e['end'] is None, size=16).pixmap(16, 16))
         short = next((d.short for d in ALARM_DEFS if d.name == e['name']), e['name'])
         since = time.strftime('%H:%M:%S', time.localtime(e['start']))
@@ -6193,7 +6252,7 @@ class AlarmBanner(QtWidgets.QFrame):
         self.text.setText(
             f'<b style="color:{colour}">{e["priority"]}&nbsp;&nbsp;{short}</b>&nbsp;&nbsp;'
             f'{_html(e["station"])} · {_html(e["desc"])}'
-            f'&nbsp;&nbsp;<span style="color:#b9bcc2">{state} · not acknowledged'
+            f'&nbsp;&nbsp;<span style="color:#b8bdc4">{state} · not acknowledged'
             + (f' · {others} more waiting' if others else '') + '</span>')
         self.text.setToolTip(e['detail'] or '')
         self.all.setText(f'Acknowledge all ({len(self.waiting)})')
@@ -6265,8 +6324,8 @@ class MpxSpectrum(QtWidgets.QWidget):
     frequency and level under the mouse."""
 
     TOP, BOTTOM, MAX_KHZ = 0.0, -70.0, 100.0
-    MARKERS = ((19, 'pilot', '#9aa0a6'), (38, '38k', '#6d737a'), (57, 'RDS', '#9aa0a6'),
-               (67, 'SCA', '#6d737a'), (92, 'SCA', '#6d737a'))
+    MARKERS = ((19, 'pilot', '#b8bdc4'), (38, '38k', '#9aa0a6'), (57, 'RDS', '#b8bdc4'),
+               (67, 'SCA', '#9aa0a6'), (92, 'SCA', '#9aa0a6'))
 
     def __init__(self, hold=False):
         super().__init__()
@@ -6316,10 +6375,10 @@ class MpxSpectrum(QtWidgets.QWidget):
             return top + (bottom - top) * (self.TOP - db) / (self.TOP - self.BOTTOM)
 
         # grid and axis labels
-        p.setPen(QtGui.QColor('#3c4043'))
+        p.setPen(QtGui.QColor('#34373d'))
         for db in range(0, -71, -10):
             p.drawLine(QtCore.QPointF(left, y(db)), QtCore.QPointF(right, y(db)))
-        p.setPen(QtGui.QColor('#9aa0a6'))
+        p.setPen(QtGui.QColor('#b8bdc4'))
         for db in range(0, -71, -10):
             p.drawText(QtCore.QRectF(0, y(db) - 8, left - 6, 16),
                        QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f'{db} dB')
@@ -6342,7 +6401,7 @@ class MpxSpectrum(QtWidgets.QWidget):
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(QtGui.QColor(159, 176, 191, 50))
             p.drawPolygon(fill)
-            p.setPen(QtGui.QPen(QtGui.QColor('#9fb0bf'), 1.1))
+            p.setPen(QtGui.QPen(QtGui.QColor('#b8bdc4'), 1.1))
             p.setBrush(QtCore.Qt.NoBrush)
             p.drawPolyline(trace)
 
@@ -6358,12 +6417,12 @@ class MpxSpectrum(QtWidgets.QWidget):
         # the frequency and level under the mouse (large view)
         if self._cursor is not None and self._db is not None and left <= self._cursor <= right:
             i = min(max(round((self._cursor - left) / (right - left) * self.MAX_KHZ / 0.5) - 1, 0), len(self._db) - 1)
-            p.setPen(QtGui.QPen(QtGui.QColor('#e3e4e6'), 1, QtCore.Qt.DotLine))
+            p.setPen(QtGui.QPen(QtGui.QColor('#e6e7ea'), 1, QtCore.Qt.DotLine))
             p.drawLine(QtCore.QPointF(x((i + 1) * 0.5), top), QtCore.QPointF(x((i + 1) * 0.5), bottom))
             text = f'{(i + 1) * 0.5:.1f} kHz   {self._db[i]:.1f} dB'
             if self._hold is not None:
                 text += f'   (hold {self._hold[i]:.1f} dB)'
-            p.setPen(QtGui.QColor('#e3e4e6'))
+            p.setPen(QtGui.QColor('#e6e7ea'))
             p.drawText(QtCore.QRectF(left, top + fm_.height() + 2, right - left - 6, fm_.height()),
                        QtCore.Qt.AlignRight, text)
 
@@ -6396,12 +6455,12 @@ class Goniometer(QtWidgets.QWidget):
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
-        p.fillRect(self.rect(), QtGui.QColor('#0b1a0b'))
+        p.fillRect(self.rect(), QtGui.QColor('#111214'))
         w = min(self.width(), self.height())
         x0, y0 = (self.width() - w) / 2, (self.height() - w) / 2
         c = w / 2
         big = w > 200
-        p.setPen(QtGui.QPen(QtGui.QColor('#2a4a2a'), 1, QtCore.Qt.DotLine))
+        p.setPen(QtGui.QPen(QtGui.QColor('#34373d'), 1, QtCore.Qt.DotLine))
         for a, b in (((c, 0), (c, w)), ((0, c), (w, c)), ((0, 0), (w, w)), ((w, 0), (0, w))):
             p.drawLine(QtCore.QPointF(x0 + a[0], y0 + a[1]), QtCore.QPointF(x0 + b[0], y0 + b[1]))
         if big:
@@ -6409,7 +6468,7 @@ class Goniometer(QtWidgets.QWidget):
             font = p.font()
             font.setPointSizeF(font.pointSizeF() * 1.3)
             p.setFont(font)
-        p.setPen(QtGui.QColor('#6a8f6a'))
+        p.setPen(QtGui.QColor('#9aa0a6'))
         pad = 8 if big else 4
         top = pad + p.fontMetrics().ascent()
         p.drawText(QtCore.QPointF(x0 + pad, y0 + top), 'L')
@@ -6430,7 +6489,7 @@ class Goniometer(QtWidgets.QWidget):
         k = 0.45 * w / max(peak, 1e-4)
         n = len(frames)
         for i, (mid, side) in enumerate(frames):  # oldest first, faintest
-            colour = QtGui.QColor('#66ff66')
+            colour = QtGui.QColor('#b8bdc4')
             colour.setAlphaF(0.25 + 0.75 * (i + 1) / n if n > 1 else 1.0)
             p.setPen(QtGui.QPen(colour, 1.6 if big else 1.0))
             xs, ys = (x0 + c + side * k).tolist(), (y0 + c - mid * k).tolist()
@@ -6456,7 +6515,7 @@ class StereoWindow(QtWidgets.QDialog):
         layout.addWidget(self.phase)
         self.readouts = QtWidgets.QLabel('')
         self.readouts.setAlignment(QtCore.Qt.AlignCenter)
-        self.readouts.setStyleSheet('color: #9aa0a6; padding: 4px;')
+        self.readouts.setStyleSheet('color: #b8bdc4; padding: 4px;')
         layout.addWidget(self.readouts)
 
     def follow(self, panel):
@@ -6466,7 +6525,7 @@ class StereoWindow(QtWidgets.QDialog):
         corr = (st.audio_meter.stats or {}).get('correlation')
         self.phase.set_value(corr, '-' if corr is None else f'{corr:+.2f}')
         self.readouts.setText('   \u00b7   '.join(
-            f'{n}: <b style="color:#e0e0e0">{QtGui.QTextDocumentFragment.fromHtml(panel.values[n].text()).toPlainText()}</b>'
+            f'{n}: <b style="color:#e6e7ea">{panel.plain_value(n)}</b>'
             for n in self.READOUTS))
 
 
@@ -6490,14 +6549,13 @@ class MpxWindow(QtWidgets.QDialog):
         self.readouts = QtWidgets.QLabel('')
         self.readouts.setAlignment(QtCore.Qt.AlignCenter)
         self.readouts.setWordWrap(True)
-        self.readouts.setStyleSheet('color: #9aa0a6; padding: 4px;')
+        self.readouts.setStyleSheet('color: #b8bdc4; padding: 4px;')
         layout.addWidget(self.readouts)
 
     def follow(self, panel):
         self.setWindowTitle(f'{panel.title} \u2013 MPX spectrum')
         self.spectrum.set_data(panel.readings.get('mpx_db'))
-        plain = lambda n: QtGui.QTextDocumentFragment.fromHtml(panel.values[n].text()).toPlainText()  # noqa: E731
-        self.readouts.setText('   \u00b7   '.join(f'{n}: <b style="color:#e0e0e0">{_html(plain(n))}</b>'
+        self.readouts.setText('   \u00b7   '.join(f'{n}: <b style="color:#e6e7ea">{_html(panel.plain_value(n))}</b>'
                                                 for n in self.READOUTS if n in panel.values))
 
 
@@ -7078,18 +7136,18 @@ class StationPanel(QtCore.QObject):
         ps_font = QtGui.QFont('Consolas', 12, QtGui.QFont.Bold)
         self.ps.setFont(ps_font)
         self.ps.setStyleSheet(LCD + 'font-family: Consolas; font-size: 12pt; font-weight: bold;'
-                              'color: #7cfc7c; padding: 1px 4px; border-radius: 4px;')
+                              'color: #e6e7ea; padding: 1px 4px; border-radius: 3px;')
         self.ps.setFixedWidth(QtGui.QFontMetrics(ps_font).horizontalAdvance('M' * 8) + 14)
         # DYNAMIC PS: an amber chip beside the PS, shown only while it applies
         self.ps_mode = QtWidgets.QLabel('DYN')
-        self.ps_mode.setStyleSheet('border-radius: 3px; padding: 1px 4px; font-weight: 600; font-size: 7pt;'
-                                   'background: #33363c; color: #e3e4e6; border: 1px solid #44474e;')
+        self.ps_mode.setStyleSheet('border-radius: 3px; padding: 1px 4px; font-weight: 600; font-size: 8pt;'
+                                   'background: #33363c; color: #e6e7ea; border: 1px solid #34373d;')
         self.ps_mode.setToolTip('Dynamic PS: the PS has changed 3 or more times in the last '
                                 f'{DYNAMIC_PS_S} s (scrolling or block text)')
         self.ps_mode.hide()
         self.meta = QtWidgets.QLabel('')
         self.meta.setTextFormat(QtCore.Qt.RichText)
-        self.meta.setStyleSheet('color: #8c9197; font-size: 8pt;')
+        self.meta.setStyleSheet('color: #9aa0a6; font-size: 8pt;')
         self.meta.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         station_box = QtWidgets.QWidget()
         station_box.setFixedWidth(widths['station'])
@@ -7110,14 +7168,14 @@ class StationPanel(QtCore.QObject):
         # of it in the tooltip); RT+ tags, else the RDS flags, under it.
         self.rt = QtWidgets.QLabel('')
         self.rt.setTextFormat(QtCore.Qt.PlainText)
-        self.rt.setFont(QtGui.QFont('Consolas', 10))
-        self.rt.setStyleSheet(LCD + 'color: #cfe8cf; padding: 2px 6px; font-family: Consolas; font-size: 10pt;'
-                              'border-radius: 4px;')
+        self.rt.setFont(QtGui.QFont('Consolas', 9))
+        self.rt.setStyleSheet(LCD + 'color: #e6e7ea; padding: 2px 6px; font-family: Consolas; font-size: 9pt;'
+                              'border-radius: 3px;')
         self.rt.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
         self.rt.setMinimumHeight(QtGui.QFontMetrics(self.rt.font()).height() + 8)
         self.rtplus = QtWidgets.QLabel('')
         self.rtplus.setTextFormat(QtCore.Qt.RichText)
-        self.rtplus.setStyleSheet('color: #c4c7cc;')
+        self.rtplus.setStyleSheet('color: #b8bdc4;')
         self.rtplus.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         text_box = QtWidgets.QVBoxLayout()
         text_box.setSpacing(3)
@@ -7148,7 +7206,7 @@ class StationPanel(QtCore.QObject):
 
         # trend: the last 5 minutes of peak modulation, excursions over the limit in red
         self.trend_note = QtWidgets.QLabel('')
-        self.trend_note.setStyleSheet('color: #8c9197; font-size: 7pt;')
+        self.trend_note.setStyleSheet('color: #9aa0a6; font-size: 8pt;')
         self.trend_note.setTextFormat(QtCore.Qt.RichText)
         self.spark = Spark(70, 125, limit=100)
         self.spark.setToolTip('Peak modulation, the last 5 minutes (each point: its highest); '
@@ -7172,7 +7230,7 @@ class StationPanel(QtCore.QObject):
 
         self.settings_btn = QtWidgets.QToolButton()
         self.settings_btn.setObjectName('rowBtn')
-        self.settings_btn.setText('⚙')
+        self.settings_btn.setText('⚙︎')   # (text style: a symbol, not a colour emoji)
         self.settings_btn.setToolTip('Settings for this receiver')
         self.settings_btn.clicked.connect(lambda: on_settings(self) if on_settings else None)
         self.remove_btn = QtWidgets.QToolButton()
@@ -7186,7 +7244,7 @@ class StationPanel(QtCore.QObject):
         buttons.addWidget(self.remove_btn)
         row.addLayout(buttons)
 
-        # ---- the detail view: this receiver in depth, under the rows or in its own window
+        # ---- the detail view: this receiver in depth, under its row or in its own window
         self.window = None      # its DetailWindow while popped out
         self.detail = QtWidgets.QFrame()
         self.detail.setObjectName('detail')
@@ -7194,13 +7252,13 @@ class StationPanel(QtCore.QObject):
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(6)
         self.detail_title = QtWidgets.QLabel('')
-        self.detail_title.setStyleSheet('font-weight: 700; font-size: 10pt;')
+        self.detail_title.setStyleSheet('font-weight: 700; font-size: 12pt;')
         self.detail_sub = QtWidgets.QLabel('')
-        self.detail_sub.setStyleSheet('color: #8c9197;')
+        self.detail_sub.setStyleSheet('color: #9aa0a6;')
         self.detail_sub.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.feed = None  # RdsGroupServer for this receiver, if any
         self.feed_label = QtWidgets.QLabel('')
-        self.feed_label.setStyleSheet('color: #8c9197;')
+        self.feed_label.setStyleSheet('color: #9aa0a6;')
         self.tabs = QtWidgets.QTabBar()
         self.tabs.setObjectName('detailTabs')
         self.tabs.setDrawBase(False)
@@ -7208,7 +7266,7 @@ class StationPanel(QtCore.QObject):
         self.tabs.addTab('Overview')
         self.tabs.addTab('History')
         self.pop_btn = QtWidgets.QToolButton()
-        self.pop_btn.setText('⧉  Pop out')
+        self.pop_btn.setText('Pop out')
         self.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
         self.pop_btn.clicked.connect(lambda: self.on_pop and self.on_pop(self))
         head = QtWidgets.QHBoxLayout()
@@ -7258,7 +7316,7 @@ class StationPanel(QtCore.QObject):
         media.addStretch(1)
         for w in (self.iboc_line, self.psd_line, self.sis_line, self.rdns_line):
             w.setTextFormat(QtCore.Qt.RichText)
-            w.setStyleSheet('color: #c4c7cc;')
+            w.setStyleSheet('color: #b8bdc4;')
             # long text wraps in the card (full text in the tooltip too), never widening it
             w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
             w.setWordWrap(True)
@@ -7267,7 +7325,7 @@ class StationPanel(QtCore.QObject):
         for i, (title, widget) in enumerate((('IBOC', self.iboc_line), ('PSD', self.psd_line),
                                              ('SIS', self.sis_line), ('RadioDNS', self.rdns_line))):
             label = QtWidgets.QLabel(title)
-            label.setStyleSheet('color: #9aa0a6;')    # as the card's other readings
+            label.setStyleSheet('color: #b8bdc4;')    # as the card's other readings
             label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
             text_grid.addWidget(label, i, 0)
             text_grid.addWidget(widget, i, 1)
@@ -7305,7 +7363,7 @@ class StationPanel(QtCore.QObject):
 
         def dim_label(text=''):
             label = QtWidgets.QLabel(text)
-            label.setStyleSheet('color: #8c9197; font-size: 8pt;')
+            label.setStyleSheet('color: #9aa0a6; font-size: 8pt;')
             return label
 
         # modulation: peak tapes against the limit in force, then the counts and channels
@@ -7397,13 +7455,13 @@ class StationPanel(QtCore.QObject):
         self.source = QtWidgets.QComboBox()
         for key, label in AUDIO_SOURCES:
             self.source.addItem(label, key)
-        self.source.setToolTip('What Play plays')
+        self.source.setToolTip("This receiver's audio source: what Listen plays (on this PC and the web page)")
         self.source.activated.connect(lambda i: on_source(self, self.source.itemData(i)) if on_source else None)
         self.play = QtWidgets.QPushButton('▶  Play')
         self.play.setCheckable(True)
         self.play.setStyleSheet('QPushButton { font-weight: 600; padding: 3px 10px; }'
                                 'QPushButton:checked { background: #2f6db5; color: white;'
-                                ' border: 1px solid #8ab4f8; border-radius: 6px; }'
+                                ' border: 1px solid #8ab4f8; border-radius: 3px; }'
                                 'QPushButton:checked:hover { background: #3a7cc6; }')
         self.play.toggled.connect(lambda on: on_play(self, on))
         box.addStretch(1)
@@ -7490,9 +7548,9 @@ class StationPanel(QtCore.QObject):
         badge = QtWidgets.QToolButton(graph)
         badge.setText('i')
         badge.setFixedSize(18, 18)
-        badge.setStyleSheet('QToolButton { border: none; border-radius: 9px; background: rgba(23, 24, 27, 210);'
-                            ' color: #9aa0a6; font-weight: 700; }'
-                            'QToolButton:hover { background: #33363c; color: #e3e4e6; }')
+        badge.setStyleSheet('QToolButton { border: none; border-radius: 3px; background: rgba(23, 24, 27, 210);'
+                            ' color: #b8bdc4; font-weight: 700; }'
+                            'QToolButton:hover { background: #33363c; color: #e6e7ea; }')
         badge.setCursor(QtCore.Qt.WhatsThisCursor)
         badge.setToolTip(f'{READOUT[name].what} Click for details.')
         badge.clicked.connect(lambda: self.explain(name, badge))
@@ -7564,7 +7622,7 @@ class StationPanel(QtCore.QObject):
                 'suppressed': 'not judged now', 'off': 'off'}[state]
         prio = self.settings.priorities.get(name, d.priority)
         colour = (PRIORITY_COLOURS[prio] if state in Annunciator.PRIORITY_STATES else
-                  {'pending': AMBER, 'suppressed': AMBER}.get(state, '#9aa0a6'))
+                  {'pending': AMBER, 'suppressed': AMBER}.get(state, '#b8bdc4'))
         word += f' · priority {prio} ({PRIORITY_NAMES[prio]})'
         when = alarm_when(d, self.settings.silence_s if name == 'SILENCE' else d.hold)
         now = Annunciator.MEANS[state]
@@ -7590,7 +7648,7 @@ class StationPanel(QtCore.QObject):
                 row, col, span = rows + i - len(normal), 0, cols * 2 - 1
             label = QtWidgets.QLabel(_html(name))
             label.setTextFormat(QtCore.Qt.RichText)
-            label.setStyleSheet('color: #9aa0a6;')
+            label.setStyleSheet('color: #b8bdc4;')
             value = QtWidgets.QLabel('-')
             value.setTextFormat(QtCore.Qt.RichText)
             value.setStyleSheet('font-weight: 600;')
@@ -8359,7 +8417,7 @@ class StationPanel(QtCore.QObject):
 
     def _meta_text(self, r):
         """The row's second line: PI, PTY, RDS rate, stereo, receiver number."""
-        parts = [f"<b style=\"color:#e3e4e6\">{r['pi']}</b>" if r['pi'] else 'no RDS']
+        parts = [f"<b style=\"color:#e6e7ea\">{r['pi']}</b>" if r['pi'] else 'no RDS']
         if r['pi']:
             if r['pty']:
                 parts.append(_html(r['pty']))
@@ -8487,6 +8545,10 @@ class StationPanel(QtCore.QObject):
             self.rt.setToolTip(r['rt'])
         self.show_alarms()
         return changes
+
+    def plain_value(self, name):
+        """A readout's text as shown, without its markup."""
+        return QtGui.QTextDocumentFragment.fromHtml(self.values[name].text()).toPlainText()
 
     def show_alarms(self):
         """The lamps, the status cell and the row's tint from the latest alarm states
@@ -8853,7 +8915,7 @@ class NotifyForm(QtWidgets.QWidget):
         else:
             text = '\n'.join(f'{name}: {"sent" if err is None else err}' for name, err in job['result'])
         job['label'].setText(text)
-        job['label'].setStyleSheet(f'color: {GREEN if ok else RED};')
+        job['label'].setStyleSheet(f'color: {TEXT_LIT if ok else RED};')   # (green is reserved: no "OK" colour)
 
 
 class SdrList(QtWidgets.QGroupBox):
@@ -9758,6 +9820,8 @@ class Notifier:
         self.results = queue.Queue()
         self.last_reply = {}            # channel -> the server's last answer to a message
         self._q = queue.Queue()
+        self._batch = []                # events being gathered by _run, not sent yet
+        self._lock = threading.Lock()
         threading.Thread(target=self._run, daemon=True).start()
 
     def enabled(self, kind):
@@ -9769,9 +9833,22 @@ class Notifier:
             self._q.put((time.strftime('%Y-%m-%d %H:%M:%S'), kind, text))
 
     def send_now(self, kind, text, timeout=8):
-        """Send one event at once, without retries (for "stopped", as the app exits)."""
-        if self.enabled(kind):
-            self._deliver([(time.strftime('%Y-%m-%d %H:%M:%S'), kind, text)], retries=(), timeout=timeout)
+        """Send one event at once, without retries (for "stopped", as the app exits),
+        with any still waiting to go."""
+        self.flush(timeout, [(time.strftime('%Y-%m-%d %H:%M:%S'), kind, text)] if self.enabled(kind) else [])
+
+    def flush(self, timeout=8, more=()):
+        """Send now, without retries, the events still waiting to go (and `more`)."""
+        with self._lock:
+            batch, self._batch = self._batch, []
+        while True:
+            try:
+                batch.append(self._q.get_nowait())
+            except queue.Empty:
+                break
+        batch += more
+        if batch:
+            self._deliver(batch, retries=(), timeout=timeout)
 
     def test(self, settings, password=None):
         """Send a test message with `settings` (and an SMTP password not stored yet);
@@ -9783,14 +9860,21 @@ class Notifier:
 
     def _run(self):
         while True:
-            batch = [self._q.get()]
+            event = self._q.get()
             deadline = time.monotonic() + NOTIFY_BATCH_S
-            while (left := deadline - time.monotonic()) > 0:
+            while True:
+                with self._lock:
+                    self._batch.append(event)
+                if (left := deadline - time.monotonic()) <= 0:
+                    break
                 try:
-                    batch.append(self._q.get(timeout=left))
+                    event = self._q.get(timeout=left)
                 except queue.Empty:
                     break
-            self._deliver(batch)
+            with self._lock:
+                batch, self._batch = self._batch, []
+            if batch:           # (empty: flush sent them)
+                self._deliver(batch)
 
     def _deliver(self, batch, settings=None, retries=NOTIFY_RETRY_S, timeout=15, report=True, password=None):
         s = settings or self.settings
@@ -10048,9 +10132,9 @@ class HelpDialog(QtWidgets.QDialog):
         self.resize(940, 760)
         view = QtWidgets.QTextBrowser()
         view.setOpenExternalLinks(False)
-        css = ('h2 { color: #8ab4f8; font-size: 13pt; margin: 14px 0 6px; } '
-               'pre { font-family: Consolas; font-size: 9pt; color: #d6d8dc; white-space: pre-wrap; } '
-               'p { color: #d6d8dc; } a { color: #8ab4f8; }')
+        css = ('h2 { color: #8ab4f8; font-size: 12pt; margin: 14px 0 6px; } '
+               'pre { font-family: Consolas; font-size: 9pt; color: #e6e7ea; white-space: pre-wrap; } '
+               'p { color: #e6e7ea; } a { color: #8ab4f8; }')
         toc = ' \u00b7 '.join(f'<a href="#s{i}">{_html(t)}</a>' for i, (t, _, _) in enumerate(sections))
         body = [f'<style>{css}</style><p>{toc}</p>']
         for i, (title, kind, text) in enumerate(sections):
@@ -10352,10 +10436,10 @@ class AntennaDialog(QtWidgets.QDialog):
             'you try, then go back to the best. A better antenna can bring multipath or overload with it: watch '
             'AM / multipath and the ADC peaks too. The receivers\' alarms are held while tuning.')
         intro.setWordWrap(True)
-        intro.setStyleSheet('color: #9aa0a6;')
+        intro.setStyleSheet('color: #b8bdc4;')
         lay.addWidget(intro)
         self.score = QtWidgets.QLabel('-')
-        self.score.setStyleSheet('font-size: 20pt; font-weight: 600; color: #e3e4e6;')
+        self.score.setStyleSheet('font-size: 15pt; font-weight: 600; color: #e6e7ea;')
         lay.addWidget(self.score)
         self.status = QtWidgets.QLabel('')
         self.status.setWordWrap(True)
@@ -10411,7 +10495,7 @@ class AntennaDialog(QtWidgets.QDialog):
         elif s['stale']:
             text, colour = f'No samples from the SDR. {adc}.', AMBER
         else:
-            text, colour = f'Gain held at {s["gain"]} · {adc}', '#9aa0a6'
+            text, colour = f'Gain held at {s["gain"]} · {adc}', '#b8bdc4'
         self.status.setText(text)
         self.status.setStyleSheet(f'color: {colour};')
         freqs = [st['freq'] for st in s['stations']]
@@ -10437,7 +10521,7 @@ class AntennaDialog(QtWidgets.QDialog):
                            peak=st['best'])
             v = st['multipath']
             mp.setText('AM / multipath -' if v is None else f'AM / multipath {v:.1f}%')
-            mp.setStyleSheet(f'color: {AMBER if v is not None and v >= PEAK_AM_PCT else "#9aa0a6"};')
+            mp.setStyleSheet(f'color: {AMBER if v is not None and v >= PEAK_AM_PCT else "#b8bdc4"};')
         sig = json.dumps(_finite(s['marks']))
         if sig != self._marks_sig:
             self._marks_sig = sig
@@ -10450,7 +10534,7 @@ class AntennaDialog(QtWidgets.QDialog):
                 for j, text in enumerate(cells):
                     item = QtWidgets.QTableWidgetItem(text)
                     if i == 0 and len(s['marks']) > 1:
-                        item.setForeground(QtGui.QColor(GREEN))
+                        item.setForeground(QtGui.QColor(ACCENT))   # the best so far
                     self.table.setItem(i, j, item)
 
     def closeEvent(self, event):
@@ -10520,7 +10604,9 @@ class ChipRow(QtWidgets.QWidget):
                             max(h.height() for h in hints))
 
     def minimumSizeHint(self):
-        return QtCore.QSize(0, self.sizeHint().height())
+        """Room for the chips that always stay (the others hide first: fit)."""
+        keep = [c.sizeHint().width() for k, c in self.chips.items() if k not in self.HIDE_FIRST]
+        return QtCore.QSize(sum(keep) + self.box.spacing() * max(0, len(keep) - 1), self.sizeHint().height())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -10609,13 +10695,39 @@ class MainWindow(QtWidgets.QWidget):
         self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr, _sdr_lost), else None
         self.restart_extra = []  # options for that restart (_sdr_lost: --recovering)
         top.addWidget(self.chip_row, 1)
+        # The player: always here, playing the selected receiver with its own audio source;
+        # selecting another receiver while listening switches to it (_sync_player).
+        self.player = QtWidgets.QFrame()
+        self.player.setObjectName('player')
+        pl = QtWidgets.QHBoxLayout(self.player)
+        pl.setContentsMargins(6, 2, 6, 2)
+        pl.setSpacing(6)
+        self.listen_btn = QtWidgets.QPushButton('▶  Listen')
+        self.listen_btn.setCheckable(True)
+        self.listen_btn.setMinimumHeight(30)
+        self.listen_btn.setToolTip('Play the selected receiver on this PC; select another receiver to switch to it')
+        self.listen_btn.setStyleSheet('QPushButton { font-weight: 600; padding: 3px 10px; }'
+                                      'QPushButton:checked { background: #2f6db5; color: white;'
+                                      ' border: 1px solid #8ab4f8; border-radius: 3px; }'
+                                      'QPushButton:checked:hover { background: #3a7cc6; }')
+        self.listen_btn.toggled.connect(self._listen)
+        self.listen_label = QtWidgets.QLabel('')
+        self.listen_label.setStyleSheet(f'color: {DIM};')
+        self.listen_label.hide()   # (no room in the header: what it says goes in Listen's tooltip;
+                                   # the selected row shows which receiver it plays)
+        self.source_slot = QtWidgets.QHBoxLayout()   # each receiver's audio source; only the selected one's shows
+        self.source_slot.setContentsMargins(0, 0, 0, 0)
+        pl.addWidget(self.listen_btn)
+        pl.addWidget(self.listen_label)
+        pl.addLayout(self.source_slot)
+        top.addWidget(self.player)
         self.help_btn = QtWidgets.QPushButton('?')
         self.help_btn.setObjectName('help')
         self.help_btn.setFixedSize(32, 32)
         self.help_btn.setToolTip('Help: this session, the guide and all command-line options')
         self.help_btn.clicked.connect(self._show_help)
         top.addWidget(self.help_btn)
-        self.settings_btn = QtWidgets.QPushButton('\u2699  Settings')
+        self.settings_btn = QtWidgets.QPushButton('Settings')
         self.settings_btn.setMinimumHeight(32)
         self.settings_btn.setToolTip('Notifications (email, webhook), the SDR, starting with Windows, recording '
                                      'and how long logs are kept')
@@ -10628,19 +10740,27 @@ class MainWindow(QtWidgets.QWidget):
         self.overload = AdcOverload()  # judged by the watchdog
         self.args = None   # the command line, set by main(), for the help
         self.sdr_report = ''  # which SDR start-up found and why, set by main()
-        self.cal_btn = QtWidgets.QPushButton('\u27f2  Recalibrate gain')
-        self.cal_btn.setMinimumHeight(32)
+        self.cal_btn = QtWidgets.QPushButton('Recalibrate gain', self)   # (in the Tools menu: not shown itself)
+        self.cal_btn.hide()
         self.cal_btn.setToolTip(f'Set the {SDR.name} gain for the stations being received now (takes a few '
                                 'seconds; the meters restart afterwards)')
         self.cal_btn.clicked.connect(self._recalibrate)
-        top.addWidget(self.cal_btn)
         self._cal = None  # {'thread', 'result' | 'error', 'was'} while recalibrating
-        self.ant_btn = QtWidgets.QPushButton('Antenna tune')
-        self.ant_btn.setMinimumHeight(32)
+        self.ant_btn = QtWidgets.QPushButton('Antenna tune', self)
+        self.ant_btn.hide()
         self.ant_btn.setToolTip('Tune the antenna: each station\'s S/N live at a fixed gain, to compare lengths, '
                                 'positions or antennas')
         self.ant_btn.clicked.connect(self.antenna_start)
-        top.addWidget(self.ant_btn)
+        # Occasional actions in one Tools menu, so the header holds status and the player;
+        # cal_btn / ant_btn (never shown) keep their state: enabled, tooltip.
+        self.tools_btn = QtWidgets.QPushButton('Tools')
+        self.tools_btn.setMinimumHeight(32)
+        self.tools_btn.setToolTip('Recalibrate the gain, tune the antenna')
+        tools = QtWidgets.QMenu(self.tools_btn)
+        tools.setToolTipsVisible(True)
+        tools.aboutToShow.connect(lambda: self._fill_tools(tools))
+        self.tools_btn.setMenu(tools)
+        top.addWidget(self.tools_btn)
         self.antenna = None      # an AntennaLoop while tuning
         self.antenna_dlg = None  # its AntennaDialog
         self.add_btn = QtWidgets.QPushButton('+  Add receiver')
@@ -10649,8 +10769,7 @@ class MainWindow(QtWidgets.QWidget):
         self.add_btn.clicked.connect(self._add_receiver)
         top.addWidget(self.add_btn)
         layout.addLayout(top)
-        self.banner = AlarmBanner(self.acknowledge)
-        layout.addWidget(self.banner)
+        self.banner = AlarmBanner(self.acknowledge)   # (in the console, over the alarm log)
         self._beep = QtCore.QTimer(self)   # the optional alarm sound (Settings)
         self._beep.timeout.connect(self._alarm_sound)
         self._beep.start(ALARM_BEEP_S * 1000)
@@ -10663,8 +10782,8 @@ class MainWindow(QtWidgets.QWidget):
         self.rows_box = QtWidgets.QVBoxLayout()   # one StationRow per receiver
         self.rows_box.setSpacing(4)
         box.addLayout(self.rows_box)
-        self.details = QtWidgets.QStackedWidget()  # the selected receiver's detail view
-        box.addWidget(self.details)
+        self.details = QtWidgets.QStackedWidget()  # the selected receiver's detail view, right under its row
+        self.rows_box.addWidget(self.details)
         box.addStretch(1)
         self.selected = None
         self.scroll = ReceiverScroll(receivers)
@@ -10687,6 +10806,7 @@ class MainWindow(QtWidgets.QWidget):
         logs.addWidget(self.log_view)
         logs.setFixedHeight(104)
         self.log_tabs.currentChanged.connect(logs.setCurrentIndex)
+        events_box.addWidget(self.banner)
         events_box.addWidget(self.log_tabs, 0, QtCore.Qt.AlignLeft)
         events_box.addWidget(logs)
         events.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
@@ -10739,14 +10859,19 @@ class MainWindow(QtWidgets.QWidget):
         self.panels.sort(key=lambda p: p.slot)
         if self.web and self.ffmpeg and self.web.formats:
             self.web.audio[slot + 1] = WebAudio(self.ffmpeg, st.web_tap)
+        self.rows_box.removeWidget(self.details)   # (the rows in slot order, then the detail placed again)
         self.rows_box.insertWidget(self.panels.index(panel), panel.row)
         self.details.addWidget(panel.detail)
+        panel.play.hide()                          # the header's player plays it (_sync_player)
+        self.source_slot.addWidget(panel.source)
+        panel.source.hide()
         if self.selected is None:
             self.focus(panel)
+        self._place_details()
 
     def focus(self, panel):
-        """Select a receiver: its row is highlighted and its detail shown (or, when
-        popped out, its window raised)."""
+        """Select a receiver: its row is highlighted and its detail shown right under
+        it (or, when popped out, its window raised)."""
         self.selected = panel
         for p in self.panels:
             p.row.set_selected(p is panel)
@@ -10756,6 +10881,57 @@ class MainWindow(QtWidgets.QWidget):
         elif panel is not None:
             self.details.setCurrentWidget(panel.detail)
         self.details.setVisible(self.details.count() > 0)
+        self._place_details()
+        self._sync_player()
+
+    def _fill_tools(self, menu):
+        """The Tools menu, from its actions' buttons as they stand (enabled, why not)."""
+        menu.clear()
+        for btn in (self.cal_btn, self.ant_btn):
+            action = menu.addAction(btn.text())
+            action.setEnabled(btn.isEnabled())
+            action.setToolTip(btn.toolTip())
+            action.triggered.connect(btn.click)
+
+    def _listen(self, on):
+        """The header's Listen / Stop: play the selected receiver, or stop."""
+        if on and self.selected is not None:
+            self.selected.play.setChecked(True)
+        elif not on:
+            for p in self.panels:
+                p.play.setChecked(False)
+        self._sync_player()
+
+    def _sync_player(self):
+        """The header's player follows the selected receiver: its audio source shows,
+        and while listening the audio switches to it."""
+        sel = self.selected
+        for p in self.panels:
+            p.source.setVisible(p is sel)
+        if self.listen_btn.isChecked() and sel is not None and not sel.play.isChecked():
+            sel.play.setChecked(True)      # (_on_play stops the one playing, and comes back here)
+            return
+        playing = next((p for p in self.panels if p.play.isChecked()), None)
+        self.listen_btn.blockSignals(True)
+        self.listen_btn.setChecked(playing is not None)
+        self.listen_btn.blockSignals(False)
+        self.listen_btn.setText('■  Stop' if playing else '▶  Listen')
+        self.listen_btn.setEnabled(sel is not None)
+        who = playing or sel
+        self.listen_label.setText('' if who is None else f'Rx {who.slot + 1} · {who.title}')
+        self.listen_btn.setToolTip((f'Playing {self.listen_label.text()} on this PC. ' if playing else
+                                    f'Play {self.listen_label.text()} on this PC. ' if sel else '')
+                                   + 'Select another receiver to switch to it.')
+
+    def _place_details(self):
+        """Put the detail view right under the row of the receiver it shows, so which
+        receiver it belongs to is plain (after the last row if it shows none)."""
+        shown = next((p for p in self.panels if p.detail is self.details.currentWidget()), None)
+        if shown and self.rows_box.indexOf(self.details) == self.rows_box.indexOf(shown.row) + 1:
+            return
+        self.rows_box.removeWidget(self.details)
+        self.rows_box.insertWidget(self.rows_box.indexOf(shown.row) + 1 if shown else self.rows_box.count(),
+                                   self.details)
 
     def pop_out(self, panel):
         """A receiver's detail in its own window, or (popped out already) back."""
@@ -10764,15 +10940,15 @@ class MainWindow(QtWidgets.QWidget):
             return
         self.details.removeWidget(panel.detail)
         panel.window = DetailWindow(self, panel, self._pop_in)
-        panel.pop_btn.setText('\u21a9  Dock')
-        panel.pop_btn.setToolTip('Put this receiver back under the station rows')
+        panel.pop_btn.setText('Dock')
+        panel.pop_btn.setToolTip('Put this receiver back in the main window, under its row')
         panel.window.show()
         docked = [p for p in self.panels if not p.window]
         self.focus(docked[0] if docked else panel)
 
     def _pop_in(self, panel):
         panel.window = None
-        panel.pop_btn.setText('\u29c9  Pop out')
+        panel.pop_btn.setText('Pop out')
         panel.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
         self.details.addWidget(panel.detail)
         self.focus(panel)
@@ -10874,7 +11050,7 @@ class MainWindow(QtWidgets.QWidget):
     def _show_recording(self):
         chip, on = self.chips['rec'], self.recorder.on
         chip.setText('●  REC' if on else 'REC off  ▾')
-        chip.setStyleSheet('background: #1d2a3a; color: #8ab4f8; border-color: #2e4a6b;' if on else f'color: {DIM};')
+        chip.setStyleSheet('background: #2b313c; color: #8ab4f8; border-color: #4b5e7c;' if on else f'color: {DIM};')
         chip.setToolTip('Recording each receiver\'s readings once a minute: click to stop or open the folder' if on else
                         'Not recording: click to record each receiver\'s readings once a minute (CSV)')
         self.chip_row.updateGeometry()
@@ -11142,7 +11318,7 @@ class MainWindow(QtWidgets.QWidget):
         if change:
             text = (f'SDR overload: the {SDR.name}\'s wideband samples reach {_dbfs(peak):.1f} dBFS (clipping from '
                     f'{_dbfs(CAL_CLIP):.1f}): every receiver\'s readings may be false. Recalibrate gain, '
-                    + ('or with --lna / --ifgr use less gain (higher values)' if len(SDR.stages) == 2 else
+                    + ('or with --lna / --ifgr use less gain (higher values)' if SDR.sdrplay_gain else
                        'or use less gain (--gain)'))
         else:
             text = f'SDR overload cleared: no wideband peak at {_dbfs(CAL_CLIP):.1f} dBFS for {ADC_OVERLOAD_CLEAR_S} s'
@@ -11157,7 +11333,7 @@ class MainWindow(QtWidgets.QWidget):
             text = (f'SDR lost: no samples from the {SDR.name} for {silent:.0f} s; '
                     f'restarting {APP_NAME} to reopen it')
             self.log(text)
-            self.notifier.send_now('sdr', text)   # (now: this process ends in a moment)
+            self.notifier.event('sdr', text)   # (sent as this process ends, in a moment)
             self.save()
             self.switch_to, self.restart_extra = SDR.key, ['--recovering']
             QtWidgets.QApplication.quit()
@@ -11406,6 +11582,11 @@ class MainWindow(QtWidgets.QWidget):
         if self.antenna:
             self.antenna.tuner.reset_hold()
 
+    def _web_episodes(self):
+        """The alarm log for the web page: the newest 100, and any older one still waiting."""
+        eps = self.alarm_table.episodes
+        return [e for i, e in enumerate(eps) if i >= len(eps) - 100 or e['acked'] is None]
+
     def _antenna_state(self):
         if not self.antenna:
             return None
@@ -11431,8 +11612,11 @@ class MainWindow(QtWidgets.QWidget):
             return
         title = panel.title
         self._clear_alarms(panel, 'receiver removed')
+        if self.selected is panel:
+            self.selected = None           # (so the player doesn't start it again as it stops)
         if panel.play.isChecked():
             panel.play.setChecked(False)
+        self.source_slot.removeWidget(panel.source)
         self._set_feed(panel, False)
         audio = self.web.audio.pop(panel.slot + 1, None) if self.web else None
         if audio:
@@ -11445,11 +11629,10 @@ class MainWindow(QtWidgets.QWidget):
         self.panels.remove(panel)
         self.rows_box.removeWidget(panel.row)
         self.details.removeWidget(panel.detail)
-        for w in (panel.row, panel.detail):
+        for w in (panel.row, panel.detail, panel.source):   # (its source list lives in the header's player)
             w.deleteLater()
         panel.deleteLater()
-        if self.selected is panel:
-            self.selected = None
+        if self.selected is None:
             self.focus(self.panels[0])
         self._feed_clients.pop(panel.slot, None)
         self._update_window()
@@ -11480,7 +11663,7 @@ class MainWindow(QtWidgets.QWidget):
                 p.settings.audio_source = 'analog'
                 self._apply_audio(p)
         lost = bool(self._recovery)
-        self.chips['gain'].setStyleSheet('background: #3a1d1f; color: #ff8a8a; border-color: #6b2a2e;'
+        self.chips['gain'].setStyleSheet('background: #39282b; color: #ff6b6b; border-color: #7c3f41;'
                                          if lost or self.overload.active else '')
         self.cal_btn.setEnabled(not lost and not self._cal and not self.antenna)
         self.cal_btn.setToolTip('Not while tuning the antenna: the gain is held until it ends' if self.antenna else
@@ -11533,6 +11716,7 @@ class MainWindow(QtWidgets.QWidget):
                     p.play.setChecked(False)
         self._apply_audio(panel)
         panel.play.setText('\u25a0  Stop audio' if on else '\u25b6  Play audio')
+        self._sync_player()
 
     def _on_source(self, panel, key):
         if key == panel.settings.audio_source:
@@ -11624,7 +11808,7 @@ class MainWindow(QtWidgets.QWidget):
         n, waiting = self.alarm_table.raised_now(), len(self.alarm_table.unacked())
         parts = [f'{n} raised'] * bool(n) + [f'{waiting} to acknowledge'] * bool(waiting)
         self.log_tabs.setTabText(0, 'Alarms' + (' \u00b7 ' + ', '.join(parts) if parts else ''))
-        self.log_tabs.setTabTextColor(0, QtGui.QColor(RED if n or waiting else '#9aa0a6'))
+        self.log_tabs.setTabTextColor(0, QtGui.QColor(RED if n or waiting else '#b8bdc4'))
         self.banner.set_episodes(self.alarm_table.unacked())
 
     def _refresh(self):
@@ -11633,6 +11817,7 @@ class MainWindow(QtWidgets.QWidget):
             self.alarm_table.redraw()   # the running durations
         if self._ticks % UPDATE_HZ == 0:
             self.banner.tick()
+            self._sync_player()   # (the station's name, once its PS is known)
         for p in self.panels:
             if p.feed and p.feed.clients != self._feed_clients.get(p.slot, 0):
                 n, was = p.feed.clients, self._feed_clients.get(p.slot, 0)
@@ -11689,7 +11874,7 @@ class MainWindow(QtWidgets.QWidget):
             'alarm_means': Annunciator.MEANS,
             'alarm_episodes': [{k: e[k] for k in ('id', 'slot', 'name', 'priority', 'station', 'desc', 'start', 'end',
                                                   'detail', 'acked', 'acked_by')}
-                               for e in self.alarm_table.episodes[-100:]],
+                               for e in self._web_episodes()],
             'alarm_waiting': [e['id'] for e in self.alarm_table.unacked()],
             'priority_colours': PRIORITY_COLOURS, 'priority_names': PRIORITY_NAMES,
             'alarm_beep_s': ALARM_BEEP_S,
@@ -11854,7 +12039,7 @@ def build_parser(width=100):
                            'attached (default: as set in Setup, else auto)')
     ap.add_argument('--scan-sdrs', action='store_true',
                     help='list the SDRs attached (known, profiled here, or new) and exit')
-    ap.add_argument('--profile-sdr', metavar='SDR',
+    ap.add_argument('--profile-sdr', metavar='SERIAL',
                     help='profile the attached SDR with this serial or key (also one already profiled, '
                          'or a built-in kind, to compare) and exit; the monitor must not be using it')
     ap.add_argument('--no-sdr-profile', action='store_true',
@@ -11953,7 +12138,7 @@ def configure_sdr(args, key, serial='', error=None):
     it can't take (default: the command-line error, which exits)."""
     error = error or build_parser().error
     use_sdr(key, serial)
-    sdrplay = len(SDR.stages) == 2
+    sdrplay = SDR.sdrplay_gain
     if args.gain_db is not None and sdrplay:
         error(f'the {SDR.name} takes --lna and --ifgr, not --gain')
     if (args.lna is not None or args.ifgr is not None) and not sdrplay:
@@ -12196,6 +12381,20 @@ RESTART_DROP = {'--sdr': 1, '--lna': 1, '--ifgr': 1, '--gain': 1, '--after-pid':
                 '--recovering': 0}
 
 
+def stop_flowgraph(tb, timeout=None):
+    """tb.stop() and tb.wait(). With a timeout they run in a thread, given up on after
+    that long: when a B210's samples have stalled, wait() can block for ever, and that
+    process ends with os._exit anyway. Returns whether it stopped."""
+    if timeout is None:
+        tb.stop()
+        tb.wait()
+        return True
+    t = threading.Thread(target=lambda: (tb.stop(), tb.wait()), daemon=True)
+    t.start()
+    t.join(timeout)
+    return not t.is_alive()
+
+
 def restart_argv(argv, sdr, pid):
     """The command line to restart on SDR `sdr` (switch_sdr): argv without the
     options that pin the old SDR, its gain or its stations (the receivers come back
@@ -12259,10 +12458,10 @@ def main():
     app.processEvents()
     try:
         splash.showMessage('Looking for an SDR…\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
-                           QtGui.QColor('#9aa0a6'))
+                           QtGui.QColor('#b8bdc4'))
         app.processEvents()
         def waiting(text):
-            splash.showMessage(f'{text}\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter, QtGui.QColor('#9aa0a6'))
+            splash.showMessage(f'{text}\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter, QtGui.QColor('#b8bdc4'))
             app.processEvents()
 
         args.sdr_inventory = scan_sdrs()
@@ -12280,14 +12479,14 @@ def main():
         saved = {} if args.freqs else load_config(args.config)
         if not args.no_scan:
             splash.showMessage(f'Scanning the FM band on the {SDR.name}…\n',
-                               QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter, QtGui.QColor('#9aa0a6'))
+                               QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter, QtGui.QColor('#b8bdc4'))
             app.processEvents()
         stations, receivers, iboc_scan = choose_stations(args, saved)
         cal_report = None
         if not args.gain_manual:
             def step(text):
                 splash.showMessage(f'Setting the gain\u2026\n{text}', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
-                                   QtGui.QColor('#9aa0a6'))
+                                   QtGui.QColor('#b8bdc4'))
                 app.processEvents()
 
             step('')
@@ -12308,6 +12507,10 @@ def main():
                 if not isinstance(e, SdrNotFound) and re.search(r'rsp|sdrplay|rtl|uhd|soapy|device', str(e), re.I)
                 else '')
         QtWidgets.QMessageBox.critical(None, APP_NAME, f'{APP_NAME} could not start:\n\n{e}{hint}')
+        if not SDR.closes_cleanly:     # (it may be open: never close it in-process)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
         sys.exit(1)
     win.log(f'SDR: {sdr_report}')
     if cal_report:
@@ -12350,11 +12553,21 @@ def main():
                            + ', '.join(p.title for p in win.panels))
     else:
         win.notifier.event('startstop', 'FM-Modmon-ms started: ' + ', '.join(p.title for p in win.panels))
-    app.aboutToQuit.connect(lambda: (win.log('monitor stopped' + (' to restart' if win.switch_to else '')),
-                                     web and web.close_audio(), tb.stop_all_iboc(), tb.stop(), tb.wait(),
-                                     clear_cache(),
-                                     None if win.switch_to else   # (it's back in half a minute)
-                                     win.notifier.send_now('startstop', 'FM-Modmon-ms stopped')))
+    def stopping():
+        win.log('monitor stopped' + (' to restart' if win.switch_to else ''))
+        win.hide()     # (the last notifications can take some seconds to go)
+        if web:
+            web.close_audio()
+        tb.stop_all_iboc()
+        if not stop_flowgraph(tb, None if SDR.closes_cleanly else STOP_TIMEOUT_S):
+            print(f'the flowgraph did not stop in {STOP_TIMEOUT_S:g} s; ending anyway', flush=True)
+        clear_cache()
+        if win.switch_to:   # (it's back in half a minute): only what is waiting to go
+            win.notifier.flush()
+        else:
+            win.notifier.send_now('startstop', 'FM-Modmon-ms stopped')
+
+    app.aboutToQuit.connect(stopping)
     code = app.exec_()
     if win.switch_to:
         subprocess.Popen([sys.executable, os.path.abspath(__file__)]

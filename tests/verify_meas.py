@@ -1,6 +1,5 @@
 """Check every FM-Modmon-ms readout against a synthetic transmitter with known values.
 Usage: verify_meas.py [app path]"""
-import importlib.util
 import math
 import os
 import sys
@@ -8,10 +7,8 @@ from collections import Counter
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')  # readouts use − and µ; Windows consoles default to cp1252
-APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py')
-spec = importlib.util.spec_from_file_location('fm_modmon', APP)
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app(sys.argv[1] if len(sys.argv) > 1 else None)
 import numpy as np
 from scipy import signal as sps
 from PyQt5 import QtGui, QtWidgets

@@ -26,6 +26,9 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
 - `tests\alarm_ack_test.py` covers alarm priorities and acknowledgement. The alarm log (`AlarmTable.episodes`)
   is the one record of what waits to be acknowledged; `MainWindow._sync_unacked` copies it to each
   receiver's `alarms.unacked` for its lamps, status cell and row tint. Run it after touching alarms.
+- `tests\theme_test.py` holds the visual system: every colour in the GUI code and the web page must be a
+  `THEME` value (add a token, don't add a hex), type sizes from `TYPE`, corners from `RADIUS`, no emoji,
+  and the text colours' contrast. The stylesheet is `APP_QSS` with `%token%` placeholders (`app_qss()`).
 - `tests\inventory_test.py` covers the SDR inventory and profiler (a simulated radio; no SDR needed).
   On hardware: `fm-modmon-ms.py --scan-sdrs` and `--profile-sdr SERIAL --config <a copy>` (a built-in kind
   is printed beside its built-in profile, not saved).
@@ -41,6 +44,9 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `--after-pid`): the sample rate changes every filter, and UHD can crash closing a B210 in-process.
   So an SDR with `closes_cleanly=False` (the B210) is never closed in-process: scan and calibration run
   in a helper (`_in_child`, `--child-call`), exit is `os._exit`, and SDR lost restarts (`--recovering`).
+  Known, left as is: unplugging a streaming B210 aborts the process (UHD 4.8 throws again while unwinding
+  its USB buffers → `std::terminate`; the same through gr-soapy and gr-uhd), so SDR lost never runs for
+  that case. Surviving it would need the B210 in its own capture process, as fm-band-monitor does.
 - CPU: `tools\profile_cpu.py` profiles the monitor on the RSP1A (~70 s; needs the SDR free).
   Pass `--config` with a copy that has notifications off when testing here.
 - Install: `install.ps1` (run from GitHub with `irm .../install.ps1 | iex`). It pins

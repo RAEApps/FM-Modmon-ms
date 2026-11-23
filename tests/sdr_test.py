@@ -1,16 +1,14 @@
 """Each SDR profile (SDRS): its rate, window and scan fit together, the command
 line and settings pick it, and a synthetic station through a real FmStation at
 its sample rate reads right. Exits non-zero on a failure."""
-import importlib.util
 import os
 import random
 import sys
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 
 import fmtx  # noqa: E402
 
@@ -249,6 +247,8 @@ check('switch menu: look for SDRs plugged in since', any(t.startswith('Look for 
 for key in rm.BUILTIN_SDRS:
     problems = rm.profile_problems(rm.SDRS[key])
     check(f'{rm.SDRS[key].name}: profile_problems passes it', not problems, problems)
+check('SDRplay gain (LNA + IFGR): the RSPs only', {k for k in rm.BUILTIN_SDRS if rm.SDRS[k].sdrplay_gain},
+      {'rsp1a', 'rsp1b'})
 rm.use_sdr('rsp1a')
 
 print('\nall ok' if not bad else f'\n{len(bad)} WRONG')

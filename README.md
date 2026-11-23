@@ -52,12 +52,19 @@ Per station, refreshed 10× a second:
 ## The window
 
 Normal readings are grey; amber means abnormal or not judged, red out of limits or an
-alarm (ISA-101 high-performance HMI). Each station row has peak modulation against the
+alarm, and blue selected or clickable (ISA-101 high-performance HMI). The window and the
+web page draw from one palette (`THEME`), four type sizes and square 3 px corners; readings
+are set in Consolas, whose digits keep their width as values change. The header holds the
+status line (SDR, gain, recording), the player, Settings and a Tools menu (recalibrate the
+gain, tune the antenna). Each station row has peak modulation against the
 limit in force with a 2 s peak hold, RF and AM bars, a 5-minute sparkline and an
 annunciator with every alarm in a fixed place (raised, holding off, not judged, off). A
 status cell at the row's left shows its most urgent alarm's priority, and the row turns red
 while one of its alarms waits to be acknowledged (see Alarms).
-The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
+Click a row to select its receiver: its detail view opens right under that row (double-click
+to give it its own window). The player in the header always plays the selected receiver, with
+that receiver's audio source: Listen starts it, and selecting another receiver while listening
+switches the audio to that one (the web page's player does the same in the browser). The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
 Audio cards, listing what a station doesn't carry once instead of as dashes, and a History
 tab: the readings as stacked strips over 1 minute to 1 hour with one cursor across them.
 Under it, the Alarms tab lists each alarm once, with how long it lasted.
@@ -92,8 +99,8 @@ AUX, alert) or **3** (cyan diamond: the rest). The shape and number go with the 
 everywhere, so they read apart without it.
 
 **Acknowledging** (as ISA-18.2). Every alarm waits to be acknowledged, also after it has
-cleared, so a burst at 03:00 is still there in the morning. While one waits, a banner under
-the header shows the most urgent, the receiver's row is red and its lamp has a white ring;
+cleared, so a burst at 03:00 is still there in the morning. While one waits, a banner over
+the alarm log shows the most urgent, the receiver's row is red and its lamp has a white ring;
 a cleared alarm keeps its lamp's outline until acknowledged. Acknowledge from the banner
 (one, or all), the Ack column of the Alarms tab (or its right-click menu), or by
 right-clicking a lamp or a row; the web page does the same (with the controls), and the
@@ -107,7 +114,7 @@ stations' alarms are held until it clears).
 
 ## Antenna tuning
 
-**Antenna tune** (at the top of the window or the web page) helps get the most from an antenna:
+**Antenna tune** (the window's Tools menu, or the web page's button) helps get the most from an antenna:
 its length, position, direction, or which antenna to use. It holds the gain where it is and
 measures each open station's S/N over the noise floor five times a second. The **score** is the
 weakest station's S/N, because the monitor is only as good as its worst station. Each bar has a
@@ -127,8 +134,8 @@ station and day, local time): the minute's peak modulation and AM as their maxim
 readings (RF, S/N, carrier offset, pilot, RDS, MPX power, loudness, correlation) as their
 mean, and the alarms raised in that minute. The chip's menu opens the folder.
 
-Event logs and records are kept until you set, in *Settings*, how many days to keep them; older
-ones are then deleted at start and once a day (0, the default, keeps them all).
+Event logs and records are kept until you set, in *Settings*, how many days to keep them (today
+counts as one); older ones are then deleted at start and once a day (0, the default, keeps them all).
 
 > The monitor is a measurement aid, not a type-approved modulation monitor. Carrier
 > offset includes the SDR's own tuning error, and levels depend on gain calibration.
@@ -325,6 +332,11 @@ exits without closing it (Windows releases it), and when the B210 goes silent th
 restarts itself on it instead of reopening it in place (about half a minute; it waits for the
 B210 to come back, and after a minute uses another SDR if one is plugged in).
 
+Unplugging the B210 while the monitor runs (or a USB drop that disconnects it) ends the
+monitor at once, with no "SDR lost" event or notification: UHD 4.8 aborts the process when
+the device disappears mid-stream. Start the monitor again once the B210 is back. Where the
+B210 must run unattended, prefer the RSP1A.
+
 An RTL-SDR's 8-bit ADC has much less headroom than the others, and its window takes only
 stations within 1.4 MHz of each other, often just one or two. Saved receivers that don't
 fit the window are left closed. On an RTL-SDR without a TCXO, the frequency error shows up
@@ -346,7 +358,8 @@ proxy, or reach it over a VPN. Don't expose it directly to the internet.
 Each receiver serves its error-free RDS groups over TCP (by default ports 7711–7714 for
 receivers 1–4; each receiver's port can be changed or the feed turned off in its settings) as
 hex text, one group per line – the format of an Inovonics INOmini 633 or RDS Spy – for other
-RDS software.
+RDS software. While no group has gone out for a second, an all-errored line (`---- ---- ---- ----`) is sent
+each second: the receiver is running but decodes no RDS, which a client can tell from a silent monitor.
 
 ## Tests
 

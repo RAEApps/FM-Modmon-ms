@@ -1,17 +1,15 @@
 """RDS group feed (RdsGroupServer): a client that stops reading is dropped
 without ever holding up the RDS decoder, and a healthy client keeps its feed.
 Exits non-zero on a failure."""
-import importlib.util
 import os
 import socket
 import sys
+import threading
 import time
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-APP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py')
-spec = importlib.util.spec_from_file_location('fm_modmon', APP)
-m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
+from loadapp import load_app  # noqa: E402
+m = load_app(sys.argv[1] if len(sys.argv) > 1 else None)
 
 bad = []
 
@@ -51,8 +49,12 @@ for i in range(12000):
 time.sleep(m.RdsGroupServer.SEND_TIMEOUT_S + 0.5)
 check('send_group never blocks', worst < 0.05, f'(worst {worst * 1000:.2f} ms)')
 check('stalled client dropped, healthy one kept', srv.clients == 1, srv.clients)
+writers = lambda: sum(t.name == 'rds-feed-writer' for t in threading.enumerate())  # noqa: E731
+check("the stalled client's writer ended (its queue full, so no None to read)", writers() == 1, writers())
 
 srv.close()
+time.sleep(0.5)
+check('close(): every writer ended', writers() == 0, writers())
 try:
     socket.create_server(('127.0.0.1', port)).close()
     free = True
