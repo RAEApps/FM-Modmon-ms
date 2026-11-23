@@ -153,6 +153,17 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 .media img { max-width: 88px; max-height: 88px; border-radius: 3px; cursor: zoom-in; }
 .media a { position: absolute; right: 2px; bottom: 2px; padding: 0 4px; border-radius: 3px; background: rgba(0,0,0,.65); color: var(--accent); text-decoration: none; font-size: 13px; }
 .cards { display: grid; grid-template-columns: 24fr 26fr 24fr 22fr; gap: 8px; align-items: stretch; }
+.dtabs { margin: 0 0 0 auto; }
+.tabpage { display: flex; gap: 8px; align-items: flex-start; }
+.tabcards { display: flex; gap: 8px; flex: 0 1 auto; min-width: 0; }
+.tabcards .card { width: 300px; }
+.tabside { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.tabside .plots { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.smstrip { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.smstrip span { color: var(--bright); font-weight: 600; } .smstrip span.red { color: var(--red); } .smstrip span.amber { color: var(--amber); }
+canvas.bigmpx { width: 100%; height: 260px; }
+canvas.tabplot { width: 100%; height: 200px; }
+canvas.biggonio { width: 360px; height: 360px; max-width: 100%; }
 .card { background: var(--card); border: 1px solid var(--card-b); border-radius: 3px; padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .card-head { display: flex; align-items: center; gap: 6px; }
 .card-title { flex: 1; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
@@ -164,7 +175,6 @@ canvas.spark { width: 100%; height: 26px; display: block; }
 .kv .v { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .kv .v.wide { grid-column: 2 / -1; white-space: normal; }   /* long readouts wrap, not cut */
 /* essentials / all, the out-of-range line, and what a reading means (on a click, as the app) */
-.card-head .allbtn { padding: 0 8px; font-size: 11px; }
 [data-r] { cursor: help; }
 .kv .k[data-r]:hover, .kv .v[data-r]:hover, .tape[data-r]:hover { background: #34373d; border-radius: 3px; }
 .kv .k.surf::after { content: ' \25B2'; color: var(--amber); font-size: 11px; }
@@ -254,18 +264,7 @@ legend { color: var(--accent); }
 .err { color: var(--red); margin-top: 8px; min-height: 1em; }
 #help-btn { width: 32px; height: 32px; padding: 0; border-radius: 3px; font-weight: 700; font-size: 16px; color: var(--accent); }
 #helpdlg { max-width: 960px; width: 96vw; padding: 0; }
-#stereo { max-width: min(94vw, 640px); width: 640px; padding: 0 0 12px; }
-#stereo .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 8px; }
-#stereo .help-head h2 { margin: 0; }
-#stereo-scope { display: block; width: calc(100% - 32px); aspect-ratio: 1; margin: 0 16px; border-radius: 3px; }
-#stereo-phase { margin: 10px 16px 0; --tn: 50px; --tv: 60px; }
-#stereo-readouts { margin: 6px 16px 0; color: var(--muted); text-align: center; }
-#stereo-readouts b { color: var(--text); }
 canvas.mpx { cursor: pointer; }
-#mpxwin { max-width: 94vw; width: 960px; padding: 0 0 12px; }
-#mpxwin .help-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px 8px; }
-#mpxwin .help-head h2 { margin: 0; }
-#mpx-big { display: block; width: calc(100% - 32px); height: min(60vh, 420px); margin: 0 16px; border-radius: 3px; }
 #mpx-readouts { margin: 8px 16px 0; color: var(--muted); text-align: center; }
 #mpx-readouts b { color: var(--text); }
 #antwin { max-width: 720px; }
@@ -307,7 +306,8 @@ canvas.mpx { cursor: pointer; }
 #zoom img { max-width: 90vw; max-height: 90vh; }
 
 /* narrower screens: cards two by two, then the row's columns wrap */
-@media (max-width: 1250px) { .cards { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 1250px) { .cards { grid-template-columns: 1fr 1fr; } .tabpage { flex-direction: column; align-items: stretch; } }
+@media (max-width: 700px) { .tabcards { flex-direction: column; } .tabcards .card { width: auto; } .tabside .plots { grid-template-columns: 1fr; } }
 @media (max-width: 1100px) {
   :root { --cols: 26px 230px minmax(0, 1fr) 260px 28px; }
   .colhead span:nth-child(5), .colhead span:nth-child(6) { display: none; }
@@ -392,17 +392,6 @@ canvas.mpx { cursor: pointer; }
     <div class="err" id="s-err"></div>
     <div class="buttons"><button value="cancel" formnovalidate>Cancel</button><button class="primary" id="s-ok" value="ok">OK</button></div>
   </form>
-</dialog>
-<dialog id="mpxwin">
-  <div class="help-head"><h2 id="mpx-title">MPX spectrum</h2><button id="mpx-close">Close</button></div>
-  <canvas id="mpx-big" title="Grey: now. Amber: peak hold, falling 3 dB/s. dB re a 100% (75 kHz) sine, 500 Hz bins"></canvas>
-  <div id="mpx-readouts"></div>
-</dialog>
-<dialog id="stereo">
-  <div class="help-head"><h2 id="stereo-title">Stereo image</h2><button id="stereo-close">Close</button></div>
-  <canvas id="stereo-scope"></canvas>
-  <div id="stereo-phase"></div>
-  <div id="stereo-readouts"></div>
 </dialog>
 <dialog id="antwin">
   <div class="help-head"><h2>Antenna tune</h2><button id="ant-close">Close</button></div>
@@ -555,7 +544,6 @@ function readouts(r) {
       const pct = r[`sca${k}_pct`];
       o[`SCA ${k} kHz`] = pct == null ? [['none', 'dimt']] : [`${pct.toFixed(1)}%  `, ...scaParts(r[`sca${k}_kind`], r[`sca${k}_baud`])];
     }
-    o['Peak deviation'] = `${fx(r.dev_khz)} kHz (${fx(r.dev_khz / 0.75, 0)}%)`;
     o['Over 100%'] = `${r.over100_min} /min`; o['Over 110%'] = `${r.over110_min} /min`;
     o['MPX power'] = `${sgn(r.mpx_dbr)} dBr` + (r.mpx_window_s >= 60 ? '' : `  (${fx(r.mpx_window_s, 0)} s)`);
     o['Limit'] = `${fx(r.limit_pct)}%`;
@@ -578,11 +566,12 @@ function readouts(r) {
     o['L+R / L−R'] = [pct('mod_m'), ' / ', pct('mod_s')];
     o['Momentary'] = num(r.momentary, 'LUFS'); o['Short-term'] = num(r.short_term, 'LUFS');
     o['Integrated'] = num(r.integrated, 'LUFS');
+    o['Loudness range'] = r.lra == null ? '-' : `${fx(r.lra)} LU` + (r.loud_s < 60 ? '  (settling)' : '');
+    o['Max momentary'] = num(r.max_momentary, 'LUFS'); o['Max short-term'] = num(r.max_short_term, 'LUFS');
     o['True peak L/R'] = `${fx(r.tp_l)} / ${fx(r.tp_r)} dBTP`;
     o['Level L/R'] = `${num(r.rms_l, '')}/ ${num(r.rms_r, 'dB')}`;
     const bal = r.balance_db || 0;
     o['Balance'] = Math.abs(bal) < 0.5 ? 'centre' : `${Math.abs(bal).toFixed(1)} dB ${bal > 0 ? 'L' : 'R'}`;
-    o['Correlation'] = [[sgn(r.correlation, 2), L('correlation')]];
     o['Width (S/M)'] = !fin(r.width_db) || r.width_db < -40 ? 'mono' : num(r.width_db, 'dB');
   }
   return o;
@@ -773,64 +762,118 @@ function drawGonio(cv, data, frames) {
   });
   c.globalAlpha = 1;
 }
-// The large stereo-image view: the goniometer with afterglow (the last 10 updates),
-// the phase bar and the stereo readouts, following one receiver until closed.
-const stereo = {p: null, frames: [], phase: makeTape('Phase', -1, 1, {origin: 0})};
-$('#stereo-phase').append(stereo.phase.el);
-function openStereo(p) {
-  stereo.p = p; stereo.frames = [];
-  $('#stereo').showModal();
-  if (p.r) followStereo(p.r);
+// ---------------------------------------------------------------- the detail tabs (as the app's StationPanel.TABS)
+// Overview: each card's essential readings (and any out of range). MPX, RDS and Audio: their
+// cards in full, beside the MPX tab's SM.1268 views and the Audio tab's large stereo image.
+// A card is one element: it moves to the page of the tab shown. The tab is remembered here.
+const TAB_CARDS = {Overview: [], MPX: ['mod', 'mpx'], RDS: ['rds'], Audio: ['aud']};
+let detailTab = (() => { try { const t = localStorage.getItem('fm-modmon-ms-tab'); return t in TAB_CARDS ? t : 'Overview'; }
+                         catch (e) { return 'Overview'; } })();
+const fullCards = () => new Set(TAB_CARDS[detailTab]);
+function showTab(name) {
+  detailTab = name;
+  try { localStorage.setItem('fm-modmon-ms-tab', name); } catch (e) {}
+  for (const q of recv.values()) { placeTab(q); if (q.r && q.n === selected) updateReceiver(q, q.r); }
 }
-function followStereo(r) {
-  setText($('#stereo-title'), `${r.title} – stereo image`);
-  drawGonio($('#stereo-scope'), r.gonio, stereo.frames);
-  if (r.gonio) { stereo.frames.push(r.gonio); if (stereo.frames.length > 9) stereo.frames.shift(); }
-  const rd = r.readings, corr = rd.correlation;
-  stereo.phase.set(corr, fin(corr) ? sgn(corr, 2) : '-', fin(corr) && corr < 0 ? 'alarm' : null);
-  const o = readouts(rd), box = $('#stereo-readouts');
-  if (!box._v) {
-    box._v = {};
-    for (const k of ['Correlation', 'Balance', 'Width (S/M)', 'Level L/R']) {
-      const v = h('b'); box._v[k] = v; box.append(h('span', null, k + ': '), v, h('span', null, '   ·   '));
-    }
-    box.lastChild.remove();
+function placeTab(p) {
+  for (const [name, b] of Object.entries(p.tabBtns)) b.classList.toggle('on', name === detailTab);
+  for (const [name, page] of Object.entries(p.pages)) page.style.display = name === detailTab ? '' : 'none';
+  const home = detailTab === 'Overview' ? p.cardsEl : p.tabCards[detailTab];
+  for (const key of detailTab === 'Overview' ? ['mod', 'mpx', 'rds', 'aud'] : TAB_CARDS[detailTab])
+    if (p.cardEls[key].parentNode !== home || home.lastChild !== p.cardEls[key]) home.append(p.cardEls[key]);
+}
+// the MPX tab's deviation exceedance: the share of samples over each level, log scale (ExceedancePlot)
+function drawExceed(cv, ccdf, limitKhz, mouseX) {
+  const [c, w, hh] = canvasCtx(cv);
+  c.clearRect(0, 0, w, hh);
+  const L = 40, T = 6, R = w - 8, B = hh - 16, LO = 60, STEP = 0.5, N = ccdf ? ccdf.length : 120, HI = LO + N * STEP, DEC = 7;
+  const x = k => L + (R - L) * (k - LO) / (HI - LO);
+  const y = s => T + (B - T) * (s > 0 ? Math.min(-Math.log10(s), DEC) : DEC) / DEC;
+  c.fillStyle = C.plot; c.fillRect(L, T, R - L, B - T);
+  c.strokeStyle = C.grid; c.lineWidth = 1; c.beginPath();
+  for (let d = 1; d < DEC; d++) { c.moveTo(L, y(10 ** -d)); c.lineTo(R, y(10 ** -d)); }
+  for (let k = LO + 10; k < HI; k += 10) { c.moveTo(x(k), T); c.lineTo(x(k), B); }
+  c.stroke();
+  c.fillStyle = C.axis; c.font = '11px "Segoe UI", sans-serif'; c.textAlign = 'right'; c.textBaseline = 'middle';
+  for (const d of [0, 2, 4, 6]) c.fillText(d ? '10⁻' + '⁰¹²³⁴⁵⁶⁷'[d] : '1', L - 4, y(10 ** -d));
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  for (let k = LO; k <= HI; k += 10) c.fillText(String(k), x(k), B + 2);
+  c.setLineDash([2, 3]); c.strokeStyle = C.axis; c.beginPath(); c.moveTo(x(75), T); c.lineTo(x(75), B); c.stroke();
+  c.setLineDash([4, 3]); c.strokeStyle = C.red; c.beginPath(); c.moveTo(L, y(1e-6)); c.lineTo(R, y(1e-6));
+  if (limitKhz) { c.moveTo(x(limitKhz), T); c.lineTo(x(limitKhz), B); }
+  c.stroke(); c.setLineDash([]);
+  if (!ccdf) {
+    c.fillStyle = C.axis; c.textBaseline = 'middle'; c.fillText('no valid reception yet', (L + R) / 2, (T + B) / 2);
+    return;
   }
-  for (const [k, v] of Object.entries(box._v)) setParts(v, o[k] ?? '-');
-}
-// The large MPX spectrum: peak hold falling 3 dB/s and a readout under the mouse,
-// with the multiplex readouts, following one receiver until closed (as the app's MpxWindow).
-const mpxv = {p: null, db: null, hold: null, t: 0, cx: null};
-function drawMpxBig() { drawMpx($('#mpx-big'), mpxv.db, {hold: mpxv.hold, cursor: mpxv.cx}); }
-function openMpx(p) {
-  mpxv.p = p; mpxv.hold = null;
-  $('#mpxwin').showModal();
-  if (p.r) followMpx(p.r);
-}
-function followMpx(r) {
-  setText($('#mpx-title'), `${r.title} – MPX spectrum`);
-  const db = r.mpx, now = performance.now(), fall = 3 * (now - mpxv.t) / 1000;
-  mpxv.t = now;
-  mpxv.hold = !db ? null : mpxv.hold && mpxv.hold.length === db.length ? db.map((d, i) => Math.max(d, mpxv.hold[i] - fall)) : db.slice();
-  mpxv.db = db;
-  drawMpxBig();
-  const rd = r.readings, o = readouts(rd), box = $('#mpx-readouts');
-  o['Pilot'] = rd.stereo_mode === 'mono' || !rd.has_signal ? 'none (mono)' : `${fx(rd.pilot_pct)}%  ${rd.stereo_mode}`;
-  if (!box._v) {
-    box._v = {};
-    for (const k of ['Pilot', 'RDS injection', 'SCA 67 kHz', 'SCA 92 kHz', 'MPX power', 'Noise >100 kHz']) {
-      const v = h('b'); box._v[k] = v; box.append(h('span', null, k + ': '), v, h('span', null, '   ·   '));
-    }
-    box.lastChild.remove();
+  c.strokeStyle = C.bright; c.lineWidth = 1.5; c.beginPath();
+  let first = true;
+  ccdf.forEach((s, i) => { if (s > 0) { const X = x(LO + i * STEP), Y = y(s); first ? c.moveTo(X, Y) : c.lineTo(X, Y); first = false; } });
+  c.stroke();
+  if (mouseX != null && mouseX >= L && mouseX <= R) {
+    const k = LO + (mouseX - L) / (R - L) * (HI - LO), s = ccdf[Math.min(Math.max(Math.round((k - LO) / STEP), 0), N - 1)];
+    c.strokeStyle = '#8ab4f8'; c.lineWidth = 1; c.beginPath(); c.moveTo(mouseX, T); c.lineTo(mouseX, B); c.stroke();
+    c.fillStyle = '#8ab4f8'; c.textAlign = 'right'; c.textBaseline = 'top';
+    c.fillText(`${k.toFixed(1)} kHz (${(k / 0.75).toFixed(0)}%): ` +
+               (s ? `${s.toExponential(1)} of samples over (${(s * 1e6).toFixed(2)} ppm)` : 'none over'), R - 4, T + 2);
   }
-  for (const [k, v] of Object.entries(box._v)) setParts(v, o[k] ?? '-');
 }
-$('#mpx-big').addEventListener('mousemove', e => { mpxv.cx = e.offsetX; drawMpxBig(); });
-$('#mpx-big').addEventListener('mouseleave', () => { mpxv.cx = null; drawMpxBig(); });
-$('#mpx-close').onclick = () => $('#mpxwin').close();
-$('#mpxwin').addEventListener('close', () => { mpxv.p = null; mpxv.hold = null; });
-$('#stereo-close').onclick = () => $('#stereo').close();
-$('#stereo').addEventListener('close', () => { stereo.p = null; stereo.frames = []; });
+// the MPX tab's MPX power over the last hour, the highest of each 10 s (MpxPowerPlot): 0 dBr dashed,
+// the hour's highest boxed, its average dashed; returns {max, mean} for the header line
+function drawPower(cv, vals) {
+  const [c, w, hh] = canvasCtx(cv);
+  c.clearRect(0, 0, w, hh);
+  const L = 34, T = 6, R = w - 8, B = hh - 16, LO = -12, HI = 6, n = vals ? vals.length : 360;
+  const x = i => L + (R - L) * i / (n - 1), y = d => T + (B - T) * (HI - Math.min(Math.max(d, LO), HI)) / (HI - LO);
+  c.fillStyle = C.plot; c.fillRect(L, T, R - L, B - T);
+  c.strokeStyle = C.grid; c.lineWidth = 1; c.beginPath();
+  for (const d of [-9, -6, -3, 3]) { c.moveTo(L, y(d)); c.lineTo(R, y(d)); }
+  c.stroke();
+  c.fillStyle = C.axis; c.font = '11px "Segoe UI", sans-serif'; c.textAlign = 'right'; c.textBaseline = 'middle';
+  for (const d of [-12, -6, 0, 6]) c.fillText(d > 0 ? `+${d}` : d < 0 ? `−${-d}` : '0', L - 4, y(d));
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  for (const m of [60, 45, 30, 15, 0]) c.fillText(m ? `−${m} min` : 'now', x((n - 1) * (1 - m / 60)), B + 2);
+  c.setLineDash([4, 3]); c.strokeStyle = C.red; c.beginPath(); c.moveTo(L, y(0)); c.lineTo(R, y(0)); c.stroke(); c.setLineDash([]);
+  const pts = (vals || []).map((v, i) => [i, v]).filter(([, v]) => v != null);
+  if (!pts.length) {
+    c.fillStyle = C.axis; c.textBaseline = 'middle'; c.fillText('no readings yet', (L + R) / 2, (T + B) / 2);
+    return null;
+  }
+  c.strokeStyle = C.bright; c.lineWidth = 1.3; c.beginPath();
+  let prev = -2;
+  for (const [i, v] of pts) { i === prev + 1 ? c.lineTo(x(i), y(v)) : c.moveTo(x(i), y(v)); prev = i; }
+  c.stroke();
+  const [mi, max] = pts.reduce((a, b) => (b[1] > a[1] ? b : a)), mean = pts.reduce((s, [, v]) => s + v, 0) / pts.length;
+  c.setLineDash([4, 3]); c.strokeStyle = C.axis; c.beginPath(); c.moveTo(L, y(mean)); c.lineTo(R, y(mean)); c.stroke(); c.setLineDash([]);
+  c.strokeStyle = max > 0 ? C.red : C.bright; c.lineWidth = 1.5; c.strokeRect(x(mi) - 4, y(max) - 4, 8, 8);
+  return {max, mean};
+}
+// The MPX and Audio tabs' own views, for the receiver shown (as the app's _show_tab_views)
+function drawTabViews(p, r) {
+  const rd = r.readings, lv = rd.levels || {};
+  if (detailTab === 'MPX') {
+    const db = r.mpx, now = performance.now(), fall = 3 * (now - (p.holdT || now)) / 1000;
+    p.holdT = now;
+    p.mpxHold = !db ? null : p.mpxHold && p.mpxHold.length === db.length ? db.map((d, i) => Math.max(d, p.mpxHold[i] - fall)) : db.slice();
+    p.mpxDb = db;
+    drawMpx(p.bigMpx, db, {hold: p.mpxHold, cursor: p.bigMpxX});
+    drawExceed(p.exceed, rd.exceed_ccdf, rd.exceed_khz, p.exceedX);
+    const hour = drawPower(p.power, r.mpx_hour), parts = [];
+    if (fin(rd.pos_pct)) parts.push('Peak ', [`+${fx(rd.pos_pct)} / −${fx(rd.neg_pct)} %`, lv.pos_pct || lv.neg_pct || 'on'], '  ·  ');
+    if (fin(rd.mpx_dbr)) parts.push('MPX power ', [`${rd.mpx_dbr >= 0 ? '+' : ''}${fx(rd.mpx_dbr)} dBr`, 'on'],
+                                   hour ? ` (highest ${hour.max >= 0 ? '+' : ''}${fx(hour.max)} in the hour)  ·  ` : '  ·  ');
+    for (const [k, khz] of [['over75', 75], ['over77', 77]])
+      if (rd[k] != null) parts.push(`over ${khz} kHz `, [`${fx(rd[k] * 1e6, 2)} ppm`, 'on'], '  ·  ');
+    if (rd.exceed_frac != null) parts.push(`over the limit + 2 kHz (${fx(rd.exceed_khz)}) `, [`${fx(rd.exceed_frac * 1e6, 2)} ppm`, lv.exceed_frac || 'on'], '  ·  ');
+    parts.push(`${fx((rd.exceed_valid_s || 0) / 60, 0)} of 15 min valid`);
+    setParts(p.smStrip, parts);
+  } else if (detailTab === 'Audio') {
+    drawGonio(p.bigGonio, r.gonio, p.gonioFrames);
+    if (r.gonio) { p.gonioFrames.push(r.gonio); if (p.gonioFrames.length > 9) p.gonioFrames.shift(); }
+    const corr = rd.correlation;
+    p.bigPhase.set(corr, fin(corr) ? sgn(corr, 2) : '-', lv.correlation);
+  }
+}
 
 // ---------------------------------------------------------------- what each reading means (readouts.json)
 // The cards show each card's essential readings; "All" shows the rest (remembered in this
@@ -839,23 +882,9 @@ $('#stereo').addEventListener('close', () => { stereo.p = null; stereo.frames = 
 // what it means right now and the rule or standard behind it (as the app).
 let info = null, READ = {};
 const GRAPHS = new Set(['MPX spectrum', 'Stereo image', 'Peak distribution', 'RDS rate', 'Loudness trend', 'Peak trend']);
-const detailAll = (() => { try { return new Set(JSON.parse(localStorage.getItem('fm-modmon-ms-all') || '[]')); } catch (e) { return new Set(); } })();
 async function loadInfo() {
   info = await (await fetch('readouts.json', {cache: 'no-store'})).json();
   READ = Object.fromEntries(info.readouts.map(d => [d.name, d]));
-}
-function toggleAll(key) {
-  detailAll.has(key) ? detailAll.delete(key) : detailAll.add(key);
-  try { localStorage.setItem('fm-modmon-ms-all', JSON.stringify([...detailAll])); } catch (e) {}
-  for (const q of recv.values()) { labelAll(q); if (q.r) updateReceiver(q, q.r); }
-}
-function labelAll(p) {
-  for (const [key, b] of Object.entries(p.allBtns)) {
-    const more = info.readouts.filter(d => d.card === key && !d.essential).length;
-    setText(b, detailAll.has(key) ? 'Essentials' : `All (+${more})`);
-    b.title = detailAll.has(key) ? 'Show only the essential readings (any out of range still show)'
-                                 : `Show all the readings of this card: ${more} more`;
-  }
 }
 // readout_plain_now() in the app: a reading with nothing particular to say
 function readoutNow(d, level) {
@@ -943,11 +972,10 @@ function kv(names, cols, wide = []) {
   }
   return {el, vals};
 }
-function card(title, extra, key, p) {
+function card(title, extra) {
   const el = h('div', 'card'), head = h('div', 'card-head');
   head.append(h('span', 'card-title', title));
   if (extra) head.append(extra);
-  if (key) { const b = h('button', 'allbtn'); b.onclick = () => toggleAll(key); p.allBtns[key] = b; head.append(b); }
   el.append(head);
   return el;
 }
@@ -960,7 +988,7 @@ function graph(el, name) {
 }
 function readable(el, name) { el.dataset.r = name; el.title = READ[name].what + ' Click for details.'; return el; }
 function buildReceiver(r, alarmDefs) {
-  const n = r.receiver, p = {n, vals: {}, allBtns: {}, tapeOf: {}};
+  const n = r.receiver, p = {n, vals: {}, tapeOf: {}};
   // ---- the row
   const row = p.row = h('div', 'row');
   row.onclick = e => {
@@ -1018,7 +1046,12 @@ function buildReceiver(r, alarmDefs) {
   const d = p.detail = h('div', 'detail');
   const head = h('div', 'dhead');
   p.dTitle = h('span', 't'); p.dSub = h('span', 's'); p.status = h('span', 'f');
-  head.append(p.dTitle, p.dSub, p.status);
+  const tabBar = h('div', 'tabs dtabs');
+  p.tabBtns = {};
+  for (const name of Object.keys(TAB_CARDS)) {
+    const b = h('button', null, name); b.onclick = () => showTab(name); p.tabBtns[name] = b; tabBar.append(b);
+  }
+  head.append(p.dTitle, p.dSub, p.status, tabBar);
   d.append(head);
   const lines = h('div', 'lines');
   p.lines = {}; p.ibocRows = [];
@@ -1047,17 +1080,17 @@ function buildReceiver(r, alarmDefs) {
   const add = ({el, vals}) => { Object.assign(p.vals, vals); return el; };
   // modulation
   p.limitNote = readable(h('span', 'x'), 'Limit');
-  const mod = card('Modulation', p.limitNote, 'mod', p);
+  const mod = card('Modulation', p.limitNote);
   p.peak = {pos: makeTape('+ peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110}),
             neg: makeTape('− peak', 0, 130, {band: [85, 100], hold: true, nameW: 50, valW: 110})};
   p.hist = readable(h('canvas', 'hist'), 'Peak distribution');
   p.histCap = h('div', 'cap', 'Peak distribution · last 5 min');
   mod.append(p.peak.pos.el, p.peak.neg.el, p.histCap, p.hist,
-             add(kv(['Limit', 'Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
+             add(kv(['Limit', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance', 'L / R', 'L+R / L−R',
                        'Valid time', 'Over-deviation (15 min)'], 1, ['Valid time', 'Over-deviation (15 min)'])));
   // multiplex
-  const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'), 'mpx', p);
-  p.mpx = h('canvas', 'mpx'); p.mpx.title = 'Click for a larger view'; p.mpx.onclick = () => openMpx(p);
+  const mpx = card('Multiplex', h('span', 'x', '0–100 kHz'));
+  p.mpx = h('canvas', 'mpx'); p.mpx.title = 'Click for the MPX tab'; p.mpx.onclick = () => showTab('MPX');
   p.mpxT = {snr: makeTape('S/N', 0, 70, {band: [30, 70], nameW: 50, valW: 110}), pilot: makeTape('Pilot', 6, 12, {band: [8, 10], nameW: 50, valW: 110}),
             offset: makeTape('Offset', -3000, 3000, {origin: 0, band: [-1000, 1000], nameW: 50, valW: 110})};
   p.absMpx = h('div', 'absent');
@@ -1067,7 +1100,7 @@ function buildReceiver(r, alarmDefs) {
                     ['RDS phase', 'Sync AM', 'Noise >100 kHz', 'SCA 67 kHz', 'SCA 92 kHz', 'IBOC signal'])), p.absMpx);
   // RDS
   p.rdsNote = h('span', 'x');
-  const rds = card('RDS', p.rdsNote, 'rds', p);
+  const rds = card('RDS', p.rdsNote);
   p.rdsSpark = readable(h('canvas', 'spark'), 'RDS rate');
   p.absRds = h('div', 'absent');
   rds.append(p.rdsSpark, add(kv(['PI', 'PTY', 'PTYN', 'ECC', 'Groups/s', 'Group loss', 'Flags', 'ODA', 'Alt. freqs', 'Clock', 'Group types', 'Data services'], 1,
@@ -1075,21 +1108,52 @@ function buildReceiver(r, alarmDefs) {
   // audio
   const reset = h('button', null, 'reset I'); reset.title = 'Start the integrated loudness again';
   reset.onclick = () => api('reset_integrated', {receiver: n});
-  const audio = card('Audio', reset, 'aud', p);
+  const audio = card('Audio', reset);
   p.lufsSpark = readable(h('canvas', 'spark'), 'Loudness trend');
   const st = h('div', 'stereo'), side = h('div');
-  p.gonio = h('canvas', 'gonio'); p.gonio.title = 'Click for a larger view'; p.gonio.onclick = () => openStereo(p);
+  p.gonio = h('canvas', 'gonio'); p.gonio.title = 'Click for the Audio tab'; p.gonio.onclick = () => showTab('Audio');
   p.phase = makeTape('Phase', -1, 1, {origin: 0, nameW: 40, valW: 44});
   side.append(p.phase.el);
   const gbox = graph(p.gonio, 'Stereo image'); gbox.style.flex = 'none';
   st.append(gbox, side);
   // the stereo readouts under the goniometer, the card's full width (as the app)
-  audio.append(add(kv(['Momentary', 'Short-term', 'Integrated', 'True peak L/R'], 1)), p.lufsSpark, st,
-               add(kv(['Balance', 'Width (S/M)', 'Level L/R', 'Correlation'], 1)));
+  audio.append(add(kv(['Momentary', 'Short-term', 'Integrated', 'Loudness range', 'Max momentary', 'Max short-term',
+                       'True peak L/R'], 1)), p.lufsSpark, st,
+               add(kv(['Balance', 'Width (S/M)', 'Level L/R'], 1)));
   p.ar = buildAudio(p);   // the player lives in the header's player bar: only the selected receiver's shows
   $('#playerbar').append(p.ar);
+  // the tabs' pages (placeTab moves the cards between them)
+  p.cardsEl = cards; p.cardEls = {mod, mpx, rds, aud: audio};
   cards.append(mod, mpx, rds, audio);
-  d.append(cards);
+  const tabCards = () => h('div', 'tabcards');
+  p.tabCards = {MPX: tabCards(), RDS: tabCards(), Audio: tabCards()};
+  const mpxPage = h('div', 'tabpage'), mpxSide = h('div', 'tabside');
+  p.smStrip = h('div', 'smstrip');
+  p.bigMpx = readable(h('canvas', 'bigmpx'), 'MPX spectrum');
+  p.exceed = readable(h('canvas', 'tabplot'), 'Deviation exceedance');
+  p.power = readable(h('canvas', 'tabplot'), 'MPX power, last hour');
+  p.bigMpx.onmousemove = e => { p.bigMpxX = e.offsetX; if (p.r) drawMpx(p.bigMpx, p.mpxDb, {hold: p.mpxHold, cursor: p.bigMpxX}); };
+  p.bigMpx.onmouseleave = () => { p.bigMpxX = null; };
+  p.exceed.onmousemove = e => { p.exceedX = e.offsetX; if (p.r) drawExceed(p.exceed, p.r.readings.exceed_ccdf, p.r.readings.exceed_khz, p.exceedX); };
+  p.exceed.onmouseleave = () => { p.exceedX = null; };
+  const plots = h('div', 'plots');
+  for (const [cap, cv] of [['Deviation exceedance · share of samples over · 15 min valid', p.exceed],
+                           ['MPX power · 60 s integration · last hour', p.power]]) {
+    const col = h('div'); col.append(h('div', 'cap', cap), cv); plots.append(col);
+  }
+  mpxSide.append(p.smStrip, h('div', 'cap', 'MPX spectrum · 0–100 kHz · peak hold'), p.bigMpx, plots);
+  mpxPage.append(p.tabCards.MPX, mpxSide);
+  const rdsPage = h('div', 'tabpage');
+  rdsPage.append(p.tabCards.RDS);
+  const audPage = h('div', 'tabpage'), audSide = h('div', 'tabside');
+  p.bigGonio = readable(h('canvas', 'biggonio'), 'Stereo image');
+  p.bigPhase = makeTape('Phase', -1, 1, {origin: 0, nameW: 50, valW: 60});
+  p.gonioFrames = [];
+  audSide.append(h('div', 'cap', 'Stereo image · the last 160 ms'), p.bigGonio, p.bigPhase.el);
+  audPage.append(p.tabCards.Audio, audSide);
+  p.pages = {Overview: cards, MPX: mpxPage, RDS: rdsPage, Audio: audPage};
+  d.append(cards, mpxPage, rdsPage, audPage);
+  placeTab(p);
   p.tapeOf = {'+ peak': p.peak.pos, '− peak': p.peak.neg, 'S/N': p.mpxT.snr, 'Pilot': p.mpxT.pilot,
               'Offset': p.mpxT.offset, 'Phase': p.phase};
   for (const [name, t] of Object.entries(p.tapeOf)) readable(t.el, name);
@@ -1101,7 +1165,6 @@ function buildReceiver(r, alarmDefs) {
     const el = e.target.closest('[data-r]');
     if (el && p.r) explain(p, el.dataset.r, el);
   });
-  labelAll(p);
   p.ctrl = [p.station, p.gear, p.remove, p.source, reset];
   return p;
 }
@@ -1274,7 +1337,7 @@ function updateReceiver(p, r) {
   const col = collapse(rd), out = new Set(r.out_of_range || []);
   for (const [name, {k, v}] of Object.entries(p.vals)) {
     setParts(v, o[name] ?? '-');
-    const d = READ[name], all = detailAll.has(d.card), surf = !d.essential && !all && out.has(name);
+    const d = READ[name], all = fullCards().has(d.card), surf = !d.essential && !all && out.has(name);
     const show = col.hidden.has(name) || !(d.essential || all || surf) ? 'none' : '';
     if (k.style.display !== show) k.style.display = v.style.display = show;
     if (k.classList.contains('surf') !== surf) {
@@ -1282,7 +1345,7 @@ function updateReceiver(p, r) {
       k.title = d.what + (surf ? ' Shown because it is out of range.' : '') + ' Click for details.';
     }
   }
-  p.histCap.style.display = p.hist.style.display = detailAll.has('mod') ? '' : 'none';
+  p.histCap.style.display = p.hist.style.display = fullCards().has('mod') ? '' : 'none';
   setText(p.absMpx, col.mpx); setText(p.absRds, col.rds);
   setText(p.rdsNote, rd.pi == null ? '' : `${fx(rd.rds_rate)}/s` + (rd.rds_loss_pct != null ? ` · loss ${fx(rd.rds_loss_pct, 0)}%` : ''));
   drawHist(p.hist, tr.hist, state.peak_hist, limit);
@@ -1290,6 +1353,7 @@ function updateReceiver(p, r) {
   drawSpark(p.lufsSpark, tr.short_term, -40, 0, null, null, -23);
   drawMpx(p.mpx, r.mpx);
   drawGonio(p.gonio, r.gonio);
+  if (p.n === selected) drawTabViews(p, r);
   const corr = rd.correlation;
   p.phase.set(corr, fin(corr) ? sgn(corr, 2) : '-', lv.correlation);
   // the readings out of range (after the tapes are set, which some of them quote)
@@ -1639,8 +1703,6 @@ function render(s) {
   for (const q of recv.values()) { q.row.classList.toggle('sel', q.n === selected); q.detail.style.display = q.n === selected ? '' : 'none'; }
   placeDetails();
   followPlayer();
-  if (stereo.p && stereo.p.r) followStereo(stereo.p.r);
-  if (mpxv.p && mpxv.p.r) followMpx(mpxv.p.r);
   renderAlarms(s);
   if (s.events_seq !== eventsSeq) {
     eventsSeq = s.events_seq;

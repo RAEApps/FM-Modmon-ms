@@ -2,6 +2,7 @@
 annunciator shows, and the per-receiver History, against synthetic stations."""
 import os
 import sys
+import time
 import types
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -132,20 +133,77 @@ states = settle(p, rds_seen=True)
 check('silent programme: RDS lost, not AUX', states[-1]['RDS'] == 'raised' and states[-1]['BACKUP'] == 'clear',
       (states[-1]['RDS'], states[-1]['BACKUP']))
 
-# ---- the large MPX spectrum window: opens on a click, follows the panel, holds peaks
+# ---- the detail tabs: a click on the spectrum shows the MPX tab, its cards in full, its SM.1268 views
 p, st = panel(left=[(997, 0.4)], right=[(1600, 0.4)], pilot=0.09, rds=0.04)
 settle(p, n=3)
+check('Overview first: no card in full', p.TABS[p.tabs.currentIndex()] == 'Overview' and p.detail_all == set(),
+      p.detail_all)
 p.mpx.on_click()
-win = p._mpx_win
-check('MPX window opens on the spectrum and shows the readings', win is not None and win.isVisible()
-      and np.array_equal(win.spectrum._db, p.readings['mpx_db']) and 'RDS injection:' in win.readouts.text())
+check('a click on the spectrum shows the MPX tab, Modulation and MPX in full',
+      p.TABS[p.tabs.currentIndex()] == 'MPX' and p.detail_all == {'mod', 'mpx'}, p.detail_all)
+check('the MPX tab holds the Modulation and MPX cards', p.card_widgets['mod'].parent() is p._mpx_cards.parentWidget()
+      and p.card_widgets['mpx'].parent() is p._mpx_cards.parentWidget(), p.card_widgets['mod'].parent())
+settle(p, n=2)
+check('the large spectrum follows the panel', np.array_equal(p.big_mpx._db, p.readings['mpx_db']))
+check('the SM.1268 strip shows the peaks, MPX power and the valid time',
+      'Peak' in p.sm_strip.text() and 'dBr' in p.sm_strip.text() and 'min valid' in p.sm_strip.text(), p.sm_strip.text())
 db = p.readings['mpx_db']
-win.spectrum.set_data(db - 20)          # everything 20 dB lower: the hold falls slowly from the old trace
-check('peak hold falls MPX_HOLD_DECAY_DB per update', np.allclose(win.spectrum._hold, db - rm.MPX_HOLD_DECAY_DB),
-      float(np.max(np.abs(win.spectrum._hold - db))))
+p.big_mpx.set_data(db - 20)          # everything 20 dB lower: the hold falls slowly from the old trace
+check('peak hold falls MPX_HOLD_DECAY_DB per update', np.allclose(p.big_mpx._hold, db - rm.MPX_HOLD_DECAY_DB),
+      float(np.max(np.abs(p.big_mpx._hold - db))))
 p.reset_display()
-check('retuning clears the peak hold', win.spectrum._hold is None)
-win.close()
+check('retuning clears the peak hold', p.big_mpx._hold is None)
+ex = rm.ExceedancePlot()
+ccdf = [10 ** -(i / 20) for i in range(rm.EXCEED_BINS)]      # one decade per 10 kHz from 60 kHz
+ex.set_data(ccdf, 77.0, 900)
+check('exceedance plot: the share over a level', abs(ex.share_at(70.0) - 0.1) < 1e-9 and ex.share_at(200) == ccdf[-1],
+      (ex.share_at(70.0), ex.share_at(200)))
+mp = rm.MpxPowerPlot()
+mp.set_data(np.arange(5.0), np.array([-3.0, -1.0, 0.5, -2.0, -4.0]))
+mx, when, mean = mp.summary()
+check("MPX power plot: the hour's highest, when, and the average", (mx, when) == (0.5, 2.0) and abs(mean + 1.9) < 1e-9,
+      mp.summary())
+p.show_tab('RDS')
+check('RDS tab: the RDS card in full', p.detail_all == {'rds'}
+      and p.card_widgets['rds'].parent() is p._rds_cards.parentWidget(), p.detail_all)
+p.show_tab('Audio')
+settle(p, n=2)
+check('Audio tab: the audio card in full', p.detail_all == {'aud'}
+      and p.card_widgets['aud'].parent() is p._aud_cards.parentWidget(), p.detail_all)
+p.show_tab('Overview')
+check('back to Overview: the four cards in its grid', all(p.card_widgets[k].parent() is p.cards_grid.parentWidget()
+      for k in ('mod', 'mpx', 'rds', 'aud')) and p.detail_all == set())
+p.history.reset()
+now = time.time()
+for k, dbr in enumerate((-2.0, 0.5, -1.0)):      # three seconds of MPX power, each closed by the next
+    p.history.add(now - 3 + k, {'mpx_dbr': dbr})
+p.history.add(now, {'mpx_dbr': -1.0})
+hour = p.web_mpx_hour()
+check('web: the MPX power hour, 360 points, the highest of the last 10 s',
+      hour is not None and len(hour) == 3600 // rm.StationPanel.MPX_HOUR_STEP_S and hour[-1] == 0.5 and hour[0] is None,
+      hour and (len(hour), hour[-3:]))
+
+# ---- loudness range (EBU Tech 3342) from the short-term histogram
+am = object.__new__(rm.AudioMeter)
+am._clear_gated()
+
+
+def short_terms(values):
+    for st_ in values:
+        k = min(int((st_ + 70) / am.GATE_STEP), am.GATE_BINS - 1)
+        am._st_pow[k] += 10 ** ((st_ + 0.691) / 10)
+        am._st_n[k] += 1
+
+
+check('LRA: none before any programme', am._loudness_range() is None)
+short_terms([-20.0] * 200 + [-30.0] * 200)          # as Tech 3342's first test signal: 10 LU apart
+check('LRA: two levels 10 LU apart read 10 LU', abs(am._loudness_range() - 10) < 0.1, am._loudness_range())
+short_terms([-65.0] * 400)                          # quiet passages 20 LU+ under the mean are gated out
+check('LRA: the relative gate leaves out the quiet passages', abs(am._loudness_range() - 10) < 0.1,
+      am._loudness_range())
+check('LRA text: settling for its first minute, then plain',
+      rm.loudness_range_text(9.96, 30) == '10.0 LU  (settling)' and rm.loudness_range_text(9.96, 90) == '10.0 LU'
+      and rm.loudness_range_text(None, 90) == '-')
 
 # ---- IBOC lines from readings
 ib = {'program': 0, 'service': 'MPS', 'synced': True, 'kbps': 48.0, 'mer_db': 7.5, 'ber': 2e-5, 'dropped': 0,

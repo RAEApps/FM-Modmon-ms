@@ -73,10 +73,13 @@ when no IBOC logo is on air. Some providers need a client identifier: set
 RADIODNS_CLIENT_ID (or --radiodns-client-id). Images and service information
 are cached for the session only (a %TEMP% folder deleted on exit).
 
-The detail cards show each card's essential readings; "All (+n)" on a card shows
-the rest (remembered, and the same for every receiver; the web page remembers its
-own choice, per browser), and a reading beyond the
-essentials shows anyway, marked with a triangle, while it is out of range. The
+The detail view has tabs. Overview shows each card's essential readings, and a
+reading beyond the essentials shows anyway, marked with a triangle, while it is
+out of range. MPX, RDS and Audio show their cards' every reading, beside what
+belongs with them: MPX the large spectrum with peak hold, the deviation
+exceedance (ITU-R SM.1268: the share of samples over each level, 15 minutes)
+and MPX power over the last hour with its highest marked; Audio the large
+goniometer. History is the readings over time. The
 line above the cards lists every reading out of range (what doesn't fit is
 counted, "+n more", in its tooltip). Click any reading, bar,
 graph's (i) or alarm lamp (or a station row's bars and trend, or a History
@@ -242,7 +245,6 @@ Measurements (refreshed 10x per second):
                     Flagged when one side reads 3% higher than the other
                     over 10 s: programme is symmetric, but a station 200 kHz
                     above pulls the positive peaks up (below: the negative)
-    Peak deviation  the same, of |MPX|, in kHz
     Over 100/110%   bursts above 100% / 110% in the last minute, counted only
                     in valid time; repeats within 5 ms are one burst (the
                     FCC-era convention of FCC 93-370, at most 10 a minute:
@@ -269,7 +271,8 @@ Measurements (refreshed 10x per second):
     MPX spectrum    0-100 kHz, 500 Hz resolution, dB re 100% modulation
   Loudness (ITU-R BS.1770 / EBU R128; 0 dBFS = 75 kHz deviation)
     Momentary 400 ms, short-term 3 s, integrated (gated, since start/reset),
-    true peak per channel (4x oversampled, 1 s hold)
+    true peak per channel (4x oversampled, 1 s hold); loudness range (EBU
+    Tech 3342) and max momentary / short-term since the same reset
   Stereo image (300 ms window)
     L/R RMS level, balance, correlation (+1 mono, 0 wide, <0 out of phase),
     width (side/mid energy ratio); the goniometer draws the last 8 ms of each
@@ -2673,12 +2676,33 @@ class AudioMeter(gr.sync_block):
     # Integrated loudness keeps the gated 400 ms blocks as a histogram of their
     # loudness (GATE_STEP LU bins from -70 LUFS), each bin's summed power and
     # count, so a monitor running for weeks uses fixed memory and time.
+    # Loudness range (EBU Tech 3342) keeps the short-term values the same way, and
+    # max momentary / short-term are held since the same reset (EBU Tech 3341).
     GATE_STEP = 0.01
     GATE_BINS = 8000  # -70 .. +10 LUFS
 
     def _clear_gated(self):
         self._gate_pow = np.zeros(self.GATE_BINS)
         self._gate_n = np.zeros(self.GATE_BINS, np.int64)
+        self._st_pow = np.zeros(self.GATE_BINS)
+        self._st_n = np.zeros(self.GATE_BINS, np.int64)
+        self._max_m = self._max_st = -math.inf
+        self._hops = 0      # since the reset: its time, for LRA's first 60 s (not yet stable)
+
+    def _loudness_range(self):
+        """LRA (EBU Tech 3342): the spread between the 10th and 95th percentile of the
+        short-term loudness, gated at -70 LUFS and 20 LU below their mean power."""
+        total = int(self._st_n.sum())
+        if not total:
+            return None
+        rel = -0.691 + _db(float(self._st_pow.sum()) / total) - 20
+        k0 = max(math.ceil((rel + 70) / self.GATE_STEP), 0)
+        cum = np.cumsum(self._st_n[k0:])
+        if not len(cum) or not cum[-1]:
+            return None
+        lo = int(np.searchsorted(cum, 0.10 * cum[-1]))
+        hi = int(np.searchsorted(cum, 0.95 * cum[-1]))
+        return (hi - lo) * self.GATE_STEP
 
     def reset_integrated(self):
         self._reset = True
@@ -2753,6 +2777,15 @@ class AudioMeter(gr.sync_block):
             k = min(int((momentary + 70) / self.GATE_STEP), self.GATE_BINS - 1)
             self._gate_pow[k] += m_pow
             self._gate_n[k] += 1
+        self._hops += 1
+        if len(self._kpow) >= 4:
+            self._max_m = max(self._max_m, momentary)
+        if len(self._kpow) == self._kpow.maxlen:      # a full 3 s window
+            self._max_st = max(self._max_st, short_term)
+            if short_term > -70:
+                k = min(int((short_term + 70) / self.GATE_STEP), self.GATE_BINS - 1)
+                self._st_pow[k] += 10 ** ((short_term + 0.691) / 10)
+                self._st_n[k] += 1
         integrated = -math.inf
         total = int(self._gate_n.sum())
         if total:
@@ -2770,6 +2803,9 @@ class AudioMeter(gr.sync_block):
             'momentary': momentary,
             'short_term': short_term,
             'integrated': integrated,
+            'lra': self._loudness_range(),
+            'max_momentary': self._max_m, 'max_short_term': self._max_st,
+            'loud_s': self._hops / UPDATE_HZ,     # seconds since the reset (LRA is unstable for the first 60)
             'tp_l': 20 * math.log10(tp[0] + 1e-10),
             'tp_r': 20 * math.log10(tp[1] + 1e-10),
             'rms_l': _db(ll / cnt),
@@ -5135,9 +5171,6 @@ READOUTS = (
                'The 1 s peak (the higher of + and −), every 100 ms, valid or not, in 2% bins from 60% to 130% '
                '(beyond: the end bins). Log height. Dashed line: the limit; red bins lie wholly over it, amber '
                'ones over 100%.'),
-    ReadoutDef('Peak deviation', 'mod', False, (), 'up to 75 kHz × the limit',
-               'The 1 s peak of either polarity, in kHz (and as a percentage).',
-               "The same detector as + / − peak, on the MPX's magnitude (either polarity). Not coloured."),
     ReadoutDef('MPX power', 'mod', False, (), 'information only here',
                'The average power of the whole composite over 60 s, against a ±19 kHz sine (0 dBr).',
                'Integrated over 60 s (the time so far while it fills), over the whole demodulated band, valid or '
@@ -5310,6 +5343,16 @@ READOUTS = (
                'Loudness since tuning, a gain recalibration, an SDR restart, or reset I.',
                'Gated as BS.1770 defines (−70 LUFS absolute, −10 LU relative), as EBU R128 requires.',
                'ITU-R BS.1770; EBU R128.'),
+    ReadoutDef('Loudness range', 'aud', False, (), '',
+               'How much the loudness varies (LRA): the spread of the short-term loudness since the same reset as '
+               'Integrated.',
+               'The 10th to 95th percentile of the short-term (3 s) values, after gating at −70 LUFS and 20 LU '
+               'below their mean. Marked "settling" for its first 60 s, when it isn\'t yet meaningful.',
+               'EBU Tech 3342; EBU R128.'),
+    ReadoutDef('Max momentary', 'aud', False, (), '', 'The loudest 400 ms since the same reset as Integrated.',
+               'The highest Momentary value; reset with Integrated (reset I).', 'EBU Tech 3341.'),
+    ReadoutDef('Max short-term', 'aud', False, (), '', 'The loudest 3 s since the same reset as Integrated.',
+               'The highest Short-term value; reset with Integrated (reset I).', 'EBU Tech 3341.'),
     ReadoutDef('True peak L/R', 'aud', True, (), 'below 0 dBTP', 'The true peak of each channel.',
                '4× oversampled, 1 s hold; 0 dBTP as for Momentary. Not coloured.', 'ITU-R BS.1770.'),
     ReadoutDef('Loudness trend', 'aud', True, (), '', 'Short-term loudness over the last 5 minutes.',
@@ -5328,8 +5371,6 @@ READOUTS = (
                '300 ms. Mono below −40 dB; 0 dB: L and R unrelated; above 0: more side than mid (out of phase).'),
     ReadoutDef('Level L/R', 'aud', False, (), '', 'The RMS level of each channel.',
                'Over 300 ms, in dB against full scale (a full-scale sine reads −3 dB).'),
-    ReadoutDef('Correlation', 'aud', False, ('correlation',), 'above 0', "The Phase meter's value: +1 mono, 0 wide "
-               'stereo, below 0 out of phase.', '300 ms window; red below 0.'),
 )
 # Readings shown outside the cards (the station row, the History tab): explained on a
 # click as the cards' are, but on no card.
@@ -5341,6 +5382,16 @@ OTHER_READOUTS = (
                'last 2 s; red notch: the limit; grey band: 85% to the limit. Amber over 100%, red over the limit '
                "(amber while reception isn't valid). In History, each point is the highest of its time.",
                'The limit: ' + _FCC_ISED_MOD + _RULES_SET),
+    ReadoutDef('Deviation exceedance', '', False, ('exceed_frac',), 'under 10⁻⁶ past the limit + 2 kHz',
+               'The share of samples whose deviation exceeds each level, over the last 15 minutes of valid '
+               'reception (the MPX tab).',
+               'Every sample of the peak path, as Over-deviation (15 min) counts them, in 0.5 kHz steps from 60 kHz '
+               '(log scale: 10⁻⁶ is one sample in a million). The marked lines: 75 kHz, and the limit + 2 kHz that '
+               'the over-deviation alarm judges. Move the mouse over it for the share above any level.', _SM1268),
+    ReadoutDef('MPX power, last hour', '', False, (), 'at or under 0 dBr',
+               'MPX power over the last hour, a point a second, with its highest marked (the MPX tab).',
+               'Each point is the 60 s integration of MPX power; the dashed line is 0 dBr.',
+               'ITU-R BS.412 (+0 dBr) and ITU-R SM.1268 (MPX power against time, its maximum marked).'),
     ReadoutDef('Peak trend', '', False, (), '',
                'Peak modulation over the last 5 minutes; the note above it counts the bursts over 100% in the '
                'last minute.',
@@ -5818,6 +5869,171 @@ class PeakHistogram(QtWidgets.QWidget):
         if self.limit is not None:
             p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
             p.drawLine(QtCore.QPointF(x(self.limit), top), QtCore.QPointF(x(self.limit), bottom))
+
+
+class ExceedancePlot(QtWidgets.QWidget):
+    """ITU-R SM.1268's complementary cumulative distribution: the share of samples
+    (log scale, 1 to 10^-7) whose deviation exceeds each level from EXCEED_LO_KHZ,
+    over the last 15 minutes of valid reception, with 75 kHz and the station's
+    limit + 2 kHz marked. Under the mouse: the share above that level."""
+    DECADES = 7
+
+    def __init__(self):
+        super().__init__()
+        self.ccdf, self.limit_khz, self.valid_s, self.mouse_x = None, None, 0.0, None
+        self.setMinimumSize(320, 220)
+        self.setMouseTracking(True)
+
+    def set_data(self, ccdf, limit_khz, valid_s):
+        self.ccdf, self.limit_khz, self.valid_s = ccdf, limit_khz, valid_s or 0.0
+        self.update()
+
+    def _frame(self):
+        fm_ = self.fontMetrics()
+        left, bottom = fm_.horizontalAdvance('10⁻⁷') + 8, self.height() - fm_.height() - 4
+        return QtCore.QRectF(left, 6, self.width() - left - 8, bottom - 6)
+
+    def _khz(self, i):
+        return EXCEED_LO_KHZ + i * EXCEED_BIN_KHZ
+
+    def share_at(self, khz):
+        """The share of samples over `khz` (None without data)."""
+        if not self.ccdf:
+            return None
+        i = min(max(round((khz - EXCEED_LO_KHZ) / EXCEED_BIN_KHZ), 0), len(self.ccdf) - 1)
+        return self.ccdf[i]
+
+    def mouseMoveEvent(self, event):
+        self.mouse_x = event.pos().x()
+        self.update()
+
+    def leaveEvent(self, event):
+        self.mouse_x = None
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        f = self._frame()
+        hi_khz = self._khz(EXCEED_BINS)
+
+        def x(khz):
+            return f.left() + f.width() * (khz - EXCEED_LO_KHZ) / (hi_khz - EXCEED_LO_KHZ)
+
+        def y(share):
+            d = min(-math.log10(share), self.DECADES) if share > 0 else self.DECADES
+            return f.top() + f.height() * d / self.DECADES
+
+        p.fillRect(f, QtGui.QColor(THEME['well']))
+        p.setPen(QtGui.QPen(QtGui.QColor(THEME['line']), 1))
+        for d in range(1, self.DECADES):
+            p.drawLine(QtCore.QPointF(f.left(), y(10 ** -d)), QtCore.QPointF(f.right(), y(10 ** -d)))
+        for khz in range(int(EXCEED_LO_KHZ) + 10, int(hi_khz), 10):
+            p.drawLine(QtCore.QPointF(x(khz), f.top()), QtCore.QPointF(x(khz), f.bottom()))
+        # the violation region: more than 10^-6 of the samples past the limit + 2 kHz
+        p.setPen(QtGui.QColor(THEME['label']))
+        fm_ = p.fontMetrics()
+        for d in (0, 2, 4, 6):
+            p.drawText(QtCore.QRectF(0, y(10 ** -d) - fm_.height() / 2, f.left() - 4, fm_.height()),
+                       QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, '1' if d == 0 else f'10⁻{"⁰¹²³⁴⁵⁶⁷"[d]}')
+        for khz in range(int(EXCEED_LO_KHZ), int(hi_khz) + 1, 10):
+            p.drawText(QtCore.QRectF(x(khz) - 20, f.bottom() + 2, 40, fm_.height()), QtCore.Qt.AlignHCenter, f'{khz}')
+        p.setPen(QtGui.QPen(QtGui.QColor(THEME['text']), 1, QtCore.Qt.DotLine))
+        p.drawLine(QtCore.QPointF(x(75), f.top()), QtCore.QPointF(x(75), f.bottom()))
+        p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
+        p.drawLine(QtCore.QPointF(f.left(), y(EXCEED_FRACTION)), QtCore.QPointF(f.right(), y(EXCEED_FRACTION)))
+        if self.limit_khz:
+            p.drawLine(QtCore.QPointF(x(self.limit_khz), f.top()), QtCore.QPointF(x(self.limit_khz), f.bottom()))
+        if not self.ccdf:
+            p.setPen(QtGui.QColor(THEME['label']))
+            p.drawText(f, QtCore.Qt.AlignCenter, 'no valid reception yet')
+            return
+        pts = [QtCore.QPointF(x(self._khz(i)), y(s)) for i, s in enumerate(self.ccdf) if s > 0]
+        if pts:
+            p.setPen(QtGui.QPen(QtGui.QColor(THEME['bright']), 1.5))
+            p.drawPolyline(QtGui.QPolygonF(pts))
+        if self.mouse_x is not None and f.left() <= self.mouse_x <= f.right():
+            khz = EXCEED_LO_KHZ + (self.mouse_x - f.left()) / f.width() * (hi_khz - EXCEED_LO_KHZ)
+            share = self.share_at(khz)
+            p.setPen(QtGui.QPen(QtGui.QColor(ACCENT), 1))
+            p.drawLine(QtCore.QPointF(self.mouse_x, f.top()), QtCore.QPointF(self.mouse_x, f.bottom()))
+            text = (f'{khz:.1f} kHz ({khz / 0.75:.0f}%): '
+                    + ('none over' if not share else f'{share:.1e} of samples over ({share * 1e6:.2f} ppm)'))
+            p.drawText(QtCore.QRectF(f.left() + 6, f.top() + 2, f.width() - 12, fm_.height()),
+                       QtCore.Qt.AlignRight, text)
+
+
+class MpxPowerPlot(QtWidgets.QWidget):
+    """MPX power over the last hour, a point a second (each the 60 s integration),
+    against the 0 dBr limit, its highest marked and its average dashed (ITU-R
+    SM.1268 asks for MPX power against time with its maximum shown)."""
+    LO, HI, SPAN_S = -12.0, 6.0, 3600
+
+    def __init__(self):
+        super().__init__()
+        self.t, self.v = np.zeros(0), np.zeros(0)
+        self.setMinimumSize(320, 150)
+
+    def set_data(self, t, v):
+        self.t, self.v = np.asarray(t, float), np.asarray(v, float)
+        self.update()
+
+    def summary(self):
+        """(max dBr, its time, mean dBr) over what is held, or None."""
+        ok = np.isfinite(self.v)
+        if not ok.any():
+            return None
+        i = int(np.nanargmax(np.where(ok, self.v, -np.inf)))
+        return float(self.v[i]), float(self.t[i]), float(np.mean(self.v[ok]))
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        fm_ = p.fontMetrics()
+        left = fm_.horizontalAdvance('−12') + 8
+        f = QtCore.QRectF(left, 6, self.width() - left - 8, self.height() - fm_.height() - 10)
+        now = time.time()
+
+        def x(t):
+            return f.right() - f.width() * (now - t) / self.SPAN_S
+
+        def y(db):
+            return f.top() + f.height() * (self.HI - min(max(db, self.LO), self.HI)) / (self.HI - self.LO)
+
+        p.fillRect(f, QtGui.QColor(THEME['well']))
+        p.setPen(QtGui.QPen(QtGui.QColor(THEME['line']), 1))
+        for db in (-9, -6, -3, 3):
+            p.drawLine(QtCore.QPointF(f.left(), y(db)), QtCore.QPointF(f.right(), y(db)))
+        p.setPen(QtGui.QColor(THEME['label']))
+        for db in (-12, -6, 0, 6):
+            p.drawText(QtCore.QRectF(0, y(db) - fm_.height() / 2, f.left() - 4, fm_.height()),
+                       QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f'{db:+d}'.replace('-', '−') if db else '0')
+        for m in (60, 45, 30, 15, 0):
+            p.drawText(QtCore.QRectF(x(now - m * 60) - 30, f.bottom() + 2, 60, fm_.height()), QtCore.Qt.AlignHCenter,
+                       f'−{m} min' if m else 'now')
+        p.setPen(QtGui.QPen(QtGui.QColor(RED), 1, QtCore.Qt.DashLine))
+        p.drawLine(QtCore.QPointF(f.left(), y(0)), QtCore.QPointF(f.right(), y(0)))
+        s = self.summary()
+        if s is None:
+            p.setPen(QtGui.QColor(THEME['label']))
+            p.drawText(f, QtCore.Qt.AlignCenter, 'no readings yet')
+            return
+        path, pen_down = QtGui.QPainterPath(), False
+        for t, v in zip(self.t, self.v):
+            if not math.isfinite(v):
+                pen_down = False
+                continue
+            pt = QtCore.QPointF(x(t), y(v))
+            path.lineTo(pt) if pen_down else path.moveTo(pt)
+            pen_down = True
+        p.setPen(QtGui.QPen(QtGui.QColor(THEME['bright']), 1.3))
+        p.drawPath(path)
+        peak, peak_t, mean = s
+        p.setPen(QtGui.QPen(QtGui.QColor(THEME['label']), 1, QtCore.Qt.DashLine))
+        p.drawLine(QtCore.QPointF(f.left(), y(mean)), QtCore.QPointF(f.right(), y(mean)))
+        p.setPen(QtGui.QPen(QtGui.QColor(RED if peak > 0 else THEME['bright']), 1.5))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawRect(QtCore.QRectF(x(peak_t) - 4, y(peak) - 4, 8, 8))
 
 
 def alarm_episodes(log, end):
@@ -6312,6 +6528,16 @@ def _num(v, unit, fmt='.1f'):
     return f'{v:{fmt}} {unit}' if math.isfinite(v) else f'-∞ {unit}'
 
 
+LRA_SETTLE_S = 60   # loudness range isn't meaningful before this much programme (EBU Tech 3342)
+
+
+def loudness_range_text(lra, seconds):
+    """'7.4 LU', marked 'settling' for its first LRA_SETTLE_S; '-' with no programme yet."""
+    if lra is None:
+        return '-'
+    return f'{lra:.1f} LU' + ('  (settling)' if (seconds or 0) < LRA_SETTLE_S else '')
+
+
 def _fits(freqs):
     return max(freqs) - min(freqs) <= MAX_SPAN + 1
 
@@ -6494,69 +6720,6 @@ class Goniometer(QtWidgets.QWidget):
             p.setPen(QtGui.QPen(colour, 1.6 if big else 1.0))
             xs, ys = (x0 + c + side * k).tolist(), (y0 + c - mid * k).tolist()
             p.drawPoints(QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in zip(xs, ys)]))
-
-
-class StereoWindow(QtWidgets.QDialog):
-    """A receiver's stereo image, large and live: goniometer with afterglow,
-    phase-correlation bar and the stereo readouts. Opened by clicking the
-    panel's goniometer; follows the panel until closed."""
-
-    READOUTS = ('Correlation', 'Balance', 'Width (S/M)', 'Level L/R')
-
-    def __init__(self, panel, parent):
-        super().__init__(parent)
-        self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
-        self.resize(560, 660)
-        layout = QtWidgets.QVBoxLayout(self)
-        self.scope = Goniometer(size=None, history=8, points=None)
-        self.scope.setMinimumSize(300, 300)
-        layout.addWidget(self.scope, 1)
-        self.phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))
-        layout.addWidget(self.phase)
-        self.readouts = QtWidgets.QLabel('')
-        self.readouts.setAlignment(QtCore.Qt.AlignCenter)
-        self.readouts.setStyleSheet('color: #b8bdc4; padding: 4px;')
-        layout.addWidget(self.readouts)
-
-    def follow(self, panel):
-        st = panel.station
-        self.setWindowTitle(f'{panel.title} \u2013 stereo image')
-        self.scope.set_data(st.audio_meter.scope)
-        corr = (st.audio_meter.stats or {}).get('correlation')
-        self.phase.set_value(corr, '-' if corr is None else f'{corr:+.2f}')
-        self.readouts.setText('   \u00b7   '.join(
-            f'{n}: <b style="color:#e6e7ea">{panel.plain_value(n)}</b>'
-            for n in self.READOUTS))
-
-
-class MpxWindow(QtWidgets.QDialog):
-    """A receiver's MPX spectrum, large and live, with peak hold, a readout
-    under the mouse and the multiplex readouts. Opened by clicking the panel's
-    spectrum; follows the panel until closed."""
-
-    READOUTS = ('Pilot (19 kHz)', 'RDS injection', 'SCA 67 kHz', 'SCA 92 kHz', 'MPX power', 'Noise >100 kHz')
-
-    def __init__(self, panel, parent):
-        super().__init__(parent)
-        self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
-        self.resize(960, 560)
-        layout = QtWidgets.QVBoxLayout(self)
-        self.spectrum = MpxSpectrum(hold=True)
-        self.spectrum.setMinimumSize(480, 300)
-        self.spectrum.setToolTip('Grey: now. Amber: peak hold, falling '
-                                 f'{MPX_HOLD_DECAY_DB * UPDATE_HZ:g} dB/s. dB re a 100% (75 kHz) sine, 500 Hz bins')
-        layout.addWidget(self.spectrum, 1)
-        self.readouts = QtWidgets.QLabel('')
-        self.readouts.setAlignment(QtCore.Qt.AlignCenter)
-        self.readouts.setWordWrap(True)
-        self.readouts.setStyleSheet('color: #b8bdc4; padding: 4px;')
-        layout.addWidget(self.readouts)
-
-    def follow(self, panel):
-        self.setWindowTitle(f'{panel.title} \u2013 MPX spectrum')
-        self.spectrum.set_data(panel.readings.get('mpx_db'))
-        self.readouts.setText('   \u00b7   '.join(f'{n}: <b style="color:#e6e7ea">{_html(panel.plain_value(n))}</b>'
-                                                for n in self.READOUTS if n in panel.values))
 
 
 AMBER = '#f0a35e'
@@ -7080,6 +7243,11 @@ class StationPanel(QtCore.QObject):
     """One receiver: measures it, judges its alarms, keeps its history, and shows
     it as a station row (self.row) and a detail view (self.detail)."""
 
+    # The detail view's tabs, and the cards each shows in full (Overview: every card's
+    # essential readings). A card is one widget: it moves to the page of the tab shown.
+    TABS = ('Overview', 'MPX', 'RDS', 'Audio', 'History')
+    TAB_CARDS = {'Overview': (), 'MPX': ('mod', 'mpx'), 'RDS': ('rds',), 'Audio': ('aud',), 'History': ()}
+
     def __init__(self, station, stations, on_play, on_select, iboc_scan=None, on_remove=None, on_settings=None,
                  on_source=None, radiodns=None, country='CA', on_focus=None, on_pop=None):
         super().__init__()
@@ -7263,8 +7431,8 @@ class StationPanel(QtCore.QObject):
         self.tabs.setObjectName('detailTabs')
         self.tabs.setDrawBase(False)
         self.tabs.setExpanding(False)
-        self.tabs.addTab('Overview')
-        self.tabs.addTab('History')
+        for name in self.TABS:
+            self.tabs.addTab(name)
         self.pop_btn = QtWidgets.QToolButton()
         self.pop_btn.setText('Pop out')
         self.pop_btn.setToolTip('Show this receiver in its own window (double-clicking its row does the same)')
@@ -7278,8 +7446,7 @@ class StationPanel(QtCore.QObject):
         head.addWidget(self.pop_btn)
         layout.addLayout(head)
         self.pages = QtWidgets.QStackedWidget()
-        self.tabs.currentChanged.connect(self.pages.setCurrentIndex)
-        self.tabs.currentChanged.connect(lambda i: i == 1 and self.history_view.refresh())
+        self.tabs.currentChanged.connect(self._show_tab)
         layout.addWidget(self.pages)
         overview = QtWidgets.QWidget()
         ov = QtWidgets.QVBoxLayout(overview)
@@ -7297,8 +7464,6 @@ class StationPanel(QtCore.QObject):
         self._iboc_rows = []   # IBOC, PSD and SIS rows: shown only when the station has IBOC
         self._rdns_row = ()     # the RadioDNS row: shown only while RadioDNS works for the station
         self._rdns_working = False
-        self._stereo = None     # the large stereo-image window, once opened
-        self._mpx_win = None    # the large MPX spectrum window, once opened
         self.rdns_line.setToolTip('RadioDNS service information (ETSI TS 103 270 / TS 102 818)')
         self.logo_img, self.art_img = QtWidgets.QLabel(), QtWidgets.QLabel()
         for img in (self.logo_img, self.art_img):
@@ -7345,10 +7510,8 @@ class StationPanel(QtCore.QObject):
         self._kv_rows = {}      # readout: its (label, value), to hide when it isn't on air
         self.absent = {}        # card: its 'not on air' line
         self.readout_widgets = {}   # reading (READOUTS): the widget showing it (value label, tape, meter, graph)
-        self.detail_all = set()     # the cards showing all their readings, not just the essential ones
-        self.on_detail_all = None   # on_detail_all(cards): set by the window, which shares it across receivers
-        self._all_btns = {}         # card: its All / Essentials button
-        self._extra = {}            # reading: more widgets shown only under All (besides the label/value rows)
+        self.detail_all = set()     # the cards showing all their readings: those of the tab shown (TAB_CARDS)
+        self._extra = {}            # reading: more widgets shown only in its card's tab (besides the label/value rows)
         self.info = ReadoutInfo(self.detail)
         # the readings out of range now, each a link to its explanation (shown whatever the cards show)
         self.strip = QtWidgets.QLabel()
@@ -7357,7 +7520,7 @@ class StationPanel(QtCore.QObject):
         self.strip.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.strip.linkActivated.connect(lambda name: self.explain(name, self.strip))
         ov.addWidget(self.strip)
-        cards = QtWidgets.QGridLayout()
+        cards = self.cards_grid = QtWidgets.QGridLayout()
         cards.setSpacing(8)
         ov.addLayout(cards)
 
@@ -7378,7 +7541,7 @@ class StationPanel(QtCore.QObject):
         self._extra['Peak distribution'] = (hist_cap, self.peak_hist)
         box.addWidget(hist_cap)
         box.addWidget(self.peak_hist)
-        box.addLayout(self._kv(('Limit', 'Peak deviation', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance',
+        box.addLayout(self._kv(('Limit', 'MPX power', 'Over 100%', 'Over 110%', 'Peak balance',
                                 'L / R', 'L+R / L−R', 'Valid time', 'Over-deviation (15 min)'), 1,
                                wide=('Valid time', 'Over-deviation (15 min)')))
         box.addStretch(1)
@@ -7390,7 +7553,7 @@ class StationPanel(QtCore.QObject):
         self.mpx.setMinimumHeight(140)
         self.mpx.setCursor(QtCore.Qt.PointingHandCursor)
         self.mpx.setToolTip('Click for a larger view')
-        self.mpx.on_click = self._open_mpx
+        self.mpx.on_click = lambda: self.show_tab('MPX')
         box.addWidget(self.mpx)
         self.mpx_tapes = {
             'snr': Tape('S/N', 0, 70, band=(30, 70), name_w=50, val_w=110),
@@ -7431,13 +7594,14 @@ class StationPanel(QtCore.QObject):
         reset.setStyleSheet('padding: 0 6px;')
         reset.clicked.connect(station.audio_meter.reset_integrated)
         audio, box = card('Audio', self._card_head('aud', reset))
-        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'True peak L/R'), 1))
+        box.addLayout(self._kv(('Momentary', 'Short-term', 'Integrated', 'Loudness range', 'Max momentary',
+                                'Max short-term', 'True peak L/R'), 1))
         self.lufs_spark = Spark(-40, 0, ref=-23)
         box.addWidget(self.lufs_spark)
         self.gonio = Goniometer(size=104)
         self.gonio.setCursor(QtCore.Qt.PointingHandCursor)
         self.gonio.setToolTip('Click for a larger view')
-        self.gonio.on_click = self._open_stereo
+        self.gonio.on_click = lambda: self.show_tab('Audio')
         self.meters = {'corr': Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))}
         self.meters['corr'].setMinimumWidth(120)
         self.meters['corr'].name_w = 44
@@ -7451,7 +7615,7 @@ class StationPanel(QtCore.QObject):
         stereo.addLayout(side, 1)
         box.addLayout(stereo)
         # the stereo readouts under the goniometer, the card's full width (beside it they were cut)
-        box.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R', 'Correlation'), 1))
+        box.addLayout(self._kv(('Balance', 'Width (S/M)', 'Level L/R'), 1))
         self.source = QtWidgets.QComboBox()
         for key, label in AUDIO_SOURCES:
             self.source.addItem(label, key)
@@ -7472,6 +7636,67 @@ class StationPanel(QtCore.QObject):
         cards.addWidget(audio, 0, 3)
         for col, stretch in enumerate((24, 26, 24, 22)):
             cards.setColumnStretch(col, stretch)
+        self.card_widgets = {'mod': mod, 'mpx': mpx_card, 'rds': rds, 'aud': audio}
+
+        # MPX: the Modulation and Multiplex cards in full, beside what ITU-R SM.1268 asks a
+        # monitor to show: MPX power against time with its maximum, and the share of samples
+        # over each deviation; with the large spectrum (peak hold) and a header line.
+        mpx_page = QtWidgets.QWidget()
+        mp = QtWidgets.QHBoxLayout(mpx_page)
+        mp.setContentsMargins(0, 0, 0, 0)
+        mp.setSpacing(8)
+        self._mpx_cards = QtWidgets.QHBoxLayout()
+        self._mpx_cards.setSpacing(8)
+        mp.addLayout(self._mpx_cards, 5)
+        right = QtWidgets.QVBoxLayout()
+        right.setSpacing(6)
+        self.sm_strip = QtWidgets.QLabel('')
+        self.sm_strip.setTextFormat(QtCore.Qt.RichText)
+        self.sm_strip.setWordWrap(True)
+        right.addWidget(self.sm_strip)
+        self.big_mpx = MpxSpectrum(hold=True)
+        self.big_mpx.setMinimumHeight(200)
+        self.big_mpx.setToolTip('Grey: now. Amber: peak hold, falling '
+                                f'{MPX_HOLD_DECAY_DB * UPDATE_HZ:g} dB/s. dB re a 100% (75 kHz) sine, 500 Hz bins')
+        right.addWidget(dim_label('MPX spectrum · 0–100 kHz · peak hold'))
+        right.addWidget(self.big_mpx, 3)
+        graphs = QtWidgets.QHBoxLayout()
+        graphs.setSpacing(8)
+        self.exceed_plot, self.power_plot = ExceedancePlot(), MpxPowerPlot()
+        for cap, w in (('Deviation exceedance · share of samples over · 15 min valid', self.exceed_plot),
+                       ('MPX power · 60 s integration · last hour', self.power_plot)):
+            col = QtWidgets.QVBoxLayout()
+            col.setSpacing(2)
+            col.addWidget(dim_label(cap))
+            col.addWidget(w, 1)
+            graphs.addLayout(col, 1)
+        right.addLayout(graphs, 2)
+        mp.addLayout(right, 6)
+        self.pages.addWidget(mpx_page)
+
+        # RDS: its card in full (the IBOC, PSD, SIS and RadioDNS lines are in it)
+        rds_page = QtWidgets.QWidget()
+        self._rds_cards = QtWidgets.QHBoxLayout(rds_page)
+        self._rds_cards.setContentsMargins(0, 0, 0, 0)
+        self.pages.addWidget(rds_page)
+
+        # Audio: its card in full, beside the large goniometer and phase meter
+        aud_page = QtWidgets.QWidget()
+        ap = QtWidgets.QHBoxLayout(aud_page)
+        ap.setContentsMargins(0, 0, 0, 0)
+        ap.setSpacing(8)
+        self._aud_cards = QtWidgets.QHBoxLayout()
+        ap.addLayout(self._aud_cards, 1)
+        scope_col = QtWidgets.QVBoxLayout()
+        self.big_gonio = Goniometer(size=None, history=8, points=None)
+        self.big_gonio.setMinimumSize(300, 300)
+        self.big_phase = Meter('Phase', -1, 1, [(-0.0001, RED), (1, NORMAL)], origin=0, ticks=(0,))
+        scope_col.addWidget(dim_label('Stereo image · the last 160 ms'))
+        scope_col.addWidget(self.big_gonio, 1)
+        scope_col.addWidget(self.big_phase)
+        ap.addLayout(scope_col, 1)
+        self.pages.addWidget(aud_page)
+
         self.history_view = HistoryView(self)
         self.pages.addWidget(self.history_view)
         # readouts the tapes show instead: kept (hidden) so every reading still has its text
@@ -7499,40 +7724,68 @@ class StationPanel(QtCore.QObject):
         self._collapse({})
 
     def _card_head(self, key, extra):
-        """A card's head: its own note or button, then its All / Essentials button."""
-        btn = QtWidgets.QToolButton()
-        btn.setStyleSheet('padding: 0 6px;')
-        btn.more = sum(1 for d in READOUTS if d.card == key and not d.essential)
-        btn.clicked.connect(lambda: self._toggle_all(key))
-        self._all_btns[key] = btn
-        box = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(box)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        if extra:
-            row.addWidget(extra)
-        row.addWidget(btn)
-        self._label_all(key)
-        return box
+        """A card's head: its own note or button (its readings beyond the essentials
+        are in its tab: TAB_CARDS)."""
+        return extra
 
-    def _label_all(self, key):
-        btn = self._all_btns[key]
-        if key in self.detail_all:
-            btn.setText('Essentials')
-            btn.setToolTip('Show only the essential readings (any out of range still show)')
-        else:
-            btn.setText(f'All (+{btn.more})')
-            btn.setToolTip(f'Show all the readings of this card: {btn.more} more')
+    def show_tab(self, name):
+        """Show the detail tab `name` (one of TABS)."""
+        self.tabs.setCurrentIndex(self.TABS.index(name))
 
-    def _toggle_all(self, key):
-        (self.on_detail_all or self.set_detail_all)(self.detail_all ^ {key})
-
-    def set_detail_all(self, cards):
-        """Show every reading of these cards (keys of CARDS); the others show their essential ones."""
-        self.detail_all = {c for c in cards if c in dict(CARDS)}
-        for key in self._all_btns:
-            self._label_all(key)
+    def _show_tab(self, index):
+        """Show tab `index`: the cards it shows in full move to its page (Overview: all
+        four, their essential readings and any out of range)."""
+        name = self.TABS[index]
+        full = self.TAB_CARDS[name]
+        if name == 'Overview':
+            for col, key in enumerate(('mod', 'mpx', 'rds', 'aud')):
+                self.cards_grid.addWidget(self.card_widgets[key], 0, col)
+        for key, box in (('mod', '_mpx_cards'), ('mpx', '_mpx_cards'), ('rds', '_rds_cards'), ('aud', '_aud_cards')):
+            if key in full:
+                getattr(self, box).addWidget(self.card_widgets[key])
+        self.detail_all = set(full)
+        self.pages.setCurrentIndex(index)
         self._collapse(self.readings)
+        if name == 'History':
+            self.history_view.refresh()
+        elif self.readings:
+            self._show_tab_views(self.readings)
+
+    def _show_tab_views(self, r):
+        """The MPX and Audio tabs' own views, while their tab shows."""
+        name = self.TABS[self.tabs.currentIndex()]
+        if name == 'MPX':
+            self.big_mpx.set_data(r.get('mpx_db'))
+            self.exceed_plot.set_data(r.get('exceed_ccdf'), r.get('exceed_khz'), r.get('exceed_valid_s'))
+            self.power_plot.set_data(*self.history.series('mpx_dbr', MpxPowerPlot.SPAN_S))
+            self.sm_strip.setText(self._sm_strip(r))
+        elif name == 'Audio':
+            st = self.station
+            self.big_gonio.set_data(st.audio_meter.scope)
+            corr = r.get('correlation')
+            self.big_phase.set_value(corr, '-' if corr is None else f'{corr:+.2f}')
+
+    def _sm_strip(self, r):
+        """The MPX tab's header line: what SM.1268 reports, at a glance."""
+        def b(text, level=None):
+            return f'<b style="color:{LEVEL_COLOURS.get(level, TEXT_LIT)}">{_html(text)}</b>'
+        lv = r.get('levels', {})
+        parts = []
+        if r.get('pos_pct') is not None:
+            parts.append('Peak ' + b(f"+{r['pos_pct']:.1f} / −{r['neg_pct']:.1f} %",
+                                     lv.get('pos_pct') or lv.get('neg_pct')))
+        s = self.power_plot.summary()
+        if r.get('mpx_dbr') is not None:
+            parts.append('MPX power ' + b(f"{r['mpx_dbr']:+.1f} dBr")
+                         + (f' (highest {s[0]:+.1f} in the hour)' if s else ''))
+        for key, khz in (('over75', 75), ('over77', 77)):
+            if r.get(key) is not None:
+                parts.append(f'over {khz} kHz ' + b(f'{r[key] * 1e6:.2f} ppm'))
+        if r.get('exceed_frac') is not None:
+            parts.append(f"over the limit + 2 kHz ({r['exceed_khz']:.1f}) "
+                         + b(f"{r['exceed_frac'] * 1e6:.2f} ppm", lv.get('exceed_frac')))
+        parts.append(f"{(r.get('exceed_valid_s') or 0) / 60:.0f} of {EXCEED_MIN_S / 60:.0f} min valid")
+        return f'<span style="color:{DIM}">' + '  ·  '.join(parts) + '</span>'
 
     def _clickable(self, name, *widgets, tip=True):
         """tip: False keeps the widgets' own tooltips (they end 'Click for details.')."""
@@ -7890,8 +8143,8 @@ class StationPanel(QtCore.QObject):
         self.peak_hist.set_data([], None)
         self.gonio.set_data(None)
         self.mpx.set_data(None)
-        if self._mpx_win:
-            self._mpx_win.spectrum.set_data(None)   # the old station's peak hold goes too
+        self.big_mpx.set_data(None)   # the old station's peak hold goes too
+        self.big_gonio.set_data(None)
 
     def _reset_identity(self):
         self._pi_seen = (None, 0.0)    # (PI, decoded unchanged since)
@@ -7966,21 +8219,6 @@ class StationPanel(QtCore.QObject):
                 self.source.setItemData(i, tip, QtCore.Qt.ToolTipRole)
             self._dim_source(i, text, kind in (None, 'data', 'idle'))   # nothing to listen to
 
-    def _open_mpx(self):
-        if self._mpx_win is None:
-            self._mpx_win = MpxWindow(self, self.detail)
-        self._mpx_win.follow(self)
-        self._mpx_win.show()
-        self._mpx_win.raise_()
-        self._mpx_win.activateWindow()
-
-    def _open_stereo(self):
-        if self._stereo is None:
-            self._stereo = StereoWindow(self, self.detail)
-        self._stereo.follow(self)
-        self._stereo.show()
-        self._stereo.raise_()
-        self._stereo.activateWindow()
 
     def rules(self):
         """The rule set the alarms use: 'ised', 'fcc' or 'custom'."""
@@ -8088,6 +8326,11 @@ class StationPanel(QtCore.QObject):
             r['exceed_khz'] = exceed_khz(limit)
             r['exceed_frac'] = exceed_fraction(s, lambda inj, n=None: exceed_khz(limit_at(lim, inj, n)))
             r['exceed_valid_s'] = s['exceed_valid_s']
+            # the MPX tab: the share of samples over each deviation (SM.1268's complementary
+            # cumulative distribution), from EXCEED_LO_KHZ in EXCEED_BIN_KHZ steps; and over 75 / 77 kHz
+            r['exceed_ccdf'] = (np.cumsum(s['exceed_hist'][::-1])[::-1] / s['exceed_n']).tolist() \
+                if s.get('exceed_n') else None
+            r['over75'], r['over77'] = exceed_fraction(s, 75.0), exceed_fraction(s, 77.0)
             if r['exceed_frac'] is not None and r['exceed_frac'] > EXCEED_FRACTION:
                 lv['exceed_frac'] = 'alarm' if s['exceed_valid_s'] >= EXCEED_MIN_S else 'warn'
             # RDS phase only for a station with RDS: an SCA's skirt or noise in the 57 kHz band has a phase too.
@@ -8127,7 +8370,8 @@ class StationPanel(QtCore.QObject):
         r['has_audio'] = bool(a)
         if a:
             r.update({k: a[k] for k in ('mod_l', 'mod_r', 'mod_m', 'mod_s', 'momentary', 'short_term', 'integrated',
-                                        'tp_l', 'tp_r', 'rms_l', 'rms_r', 'correlation', 'width_db')})
+                                        'tp_l', 'tp_r', 'rms_l', 'rms_r', 'correlation', 'width_db',
+                                        'lra', 'max_momentary', 'max_short_term', 'loud_s')})
             r['balance_db'] = a['rms_l'] - a['rms_r'] if math.isfinite(a['rms_l'] + a['rms_r']) else 0.0
             for key in ('mod_l', 'mod_r', 'mod_m', 'mod_s'):
                 if level := _level(a[key], 100, 110):
@@ -8237,7 +8481,6 @@ class StationPanel(QtCore.QObject):
             v['Peak balance'].setText('-' if r['asym_pct'] is None else asym.strip() if asym else
                                       f"even ({r['asym_pct']:+.1f}%)")
             v['Limit'].setText(f"{r['limit_pct']:.1f}%")
-            v['Peak deviation'].setText(f"{r['dev_khz']:.1f} kHz  ({r['dev_khz'] / 0.75:.0f}%)")
             v['Over 100%'].setText(f"{r['over100_min']} /min")
             v['Over 110%'].setText(f"{r['over110_min']} /min")
             v['Valid time'].setText(_valid_html(r['valid_pct'], r['valid_window_s'], r['invalid_why'],
@@ -8271,22 +8514,21 @@ class StationPanel(QtCore.QObject):
             v['Momentary'].setText(_num(r['momentary'], 'LUFS'))
             v['Short-term'].setText(_num(r['short_term'], 'LUFS'))
             v['Integrated'].setText(_num(r['integrated'], 'LUFS'))
+            v['Loudness range'].setText(loudness_range_text(r.get('lra'), r.get('loud_s')))
+            v['Max momentary'].setText(_num(r['max_momentary'], 'LUFS'))
+            v['Max short-term'].setText(_num(r['max_short_term'], 'LUFS'))
             v['True peak L/R'].setText(f"{r['tp_l']:.1f} / {r['tp_r']:.1f} dBTP")
             v['Level L/R'].setText(f"{_num(r['rms_l'], '')}/ {_num(r['rms_r'], 'dB')}")
             bal = r['balance_db']
             v['Balance'].setText('centre' if abs(bal) < 0.5 else
                                  f"{abs(bal):.1f} dB {'L' if bal > 0 else 'R'}")
             corr = r['correlation']
-            v['Correlation'].setText(_coloured(f'{corr:+.2f}', lv.get('correlation')))
             v['Width (S/M)'].setText('mono' if not math.isfinite(r['width_db']) or r['width_db'] < -40
                                      else _num(r['width_db'], 'dB'))
             self.meters['corr'].set_value(corr, f'{corr:+.2f}')
         if st.audio_meter.scope is not None:
             self.gonio.set_data(st.audio_meter.scope)
-        if self._stereo and self._stereo.isVisible():
-            self._stereo.follow(self)
-        if self._mpx_win and self._mpx_win.isVisible():
-            self._mpx_win.follow(self)
+        self._show_tab_views(r)
         self._show_strip(r)
 
     def _show_strip(self, r):
@@ -8661,6 +8903,23 @@ class StationPanel(QtCore.QObject):
                      if self._data_lost else ''),
         }
 
+    MPX_HOUR_STEP_S = 10   # the web page's hour of MPX power: one point per this many seconds
+
+    def web_mpx_hour(self):
+        """MPX power over the last hour for the web page's MPX tab: the highest of each
+        MPX_HOUR_STEP_S up to now, oldest first (None where there is none); None if empty."""
+        t, v = self.history.series('mpx_dbr', MpxPowerPlot.SPAN_S)
+        if not len(t):
+            return None
+        now, step = time.time(), self.MPX_HOUR_STEP_S
+        n = MpxPowerPlot.SPAN_S // step
+        k = np.clip(((now - t) // step).astype(int), 0, n - 1)
+        out = np.full(n, np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            np.fmax.at(out, n - 1 - k, v)
+        return [None if not math.isfinite(x) else round(float(x), 2) for x in out]
+
     def web_readings(self):
         """self.readings as plain JSON values for the web page, which draws the
         rows and the detail from them as the window does."""
@@ -8697,6 +8956,7 @@ class StationPanel(QtCore.QObject):
             'receiver': self.slot + 1, 'freq': st.freq_hz, 'title': self.title, 'name': self.settings.name,
             'readings': self.web_readings(), 'notes': self._alarm_notes(self.readings) if self.readings else {},
             'trends': self.web_trends,
+            'mpx_hour': self.web_mpx_hour(),
             'mpx': None if mpx is None else _Finite(np.round(np.nan_to_num(mpx), 1).tolist()),
             'gonio': None if scope is None else [_Finite(np.round(np.nan_to_num(x[-400::2]), 4).tolist()) for x in scope],
             'status': self.feed_label.text(),
@@ -9772,7 +10032,6 @@ class AppConfig:
     record: bool = False               # write each receiver's readings once a minute (Recorder)
     alarm_sound: bool = False          # a tone while a priority 1 alarm waits to be acknowledged
     keep_days: int = KEEP_DAYS         # delete event logs and records older than this; 0 = keep them
-    detail_all: list = field(default_factory=list)  # detail cards showing all their readings (CARDS keys)
 
     @classmethod
     def from_dict(cls, d):
@@ -9792,14 +10051,12 @@ class AppConfig:
             out.web_port = WEB_PORT
         out.web_bind = str(out.web_bind or '0.0.0.0')
         out.web_password_hash = str(out.web_password_hash or '')
-        cards = out.detail_all if isinstance(out.detail_all, list) else []
         out.record = bool(out.record)
         out.alarm_sound = bool(out.alarm_sound)
         try:
             out.keep_days = max(0, min(3650, int(out.keep_days)))
         except (TypeError, ValueError):
             out.keep_days = KEEP_DAYS
-        out.detail_all = sorted({c for c in cards if isinstance(c, str) and c in dict(CARDS)})
         return out
 
     def to_dict(self):
@@ -10655,7 +10912,6 @@ class MainWindow(QtWidgets.QWidget):
         self.nrsc5 = nrsc5              # path to nrsc5.exe, or None: no IBOC playout
         self.config_path = config_path  # None: don't save
         self.app_config = None          # AppConfig (set by main); None: the file's is kept
-        self._detail_all = []           # the cards showing all their readings, while app_config is None
         self.stations = stations
         self.gain_info = gain_info
         self.iboc_scan = iboc_scan
@@ -10846,9 +11102,7 @@ class MainWindow(QtWidgets.QWidget):
                              self.radiodns, self.country, on_focus=self.focus, on_pop=self.pop_out)
         panel.slot = slot
         panel.settings = settings or ReceiverSettings()
-        panel.on_detail_all = self._set_detail_all
         panel.on_ack = self._ack_panel
-        panel.set_detail_all(self.app_config.detail_all if self.app_config else self._detail_all)
         panel.set_source(panel.settings.audio_source)
         st.audio_source = panel.settings.audio_source
         st.apply_settings(panel.settings)
@@ -10978,14 +11232,6 @@ class MainWindow(QtWidgets.QWidget):
         if self.config_path:
             save_config(self.config_path, self.panels, self.notify_settings, self.app_config)
 
-    def _set_detail_all(self, cards):
-        """The cards showing all their readings, the same for every receiver, and remembered."""
-        self._detail_all = sorted(cards)
-        for p in self.panels:
-            p.set_detail_all(cards)
-        if self.app_config:
-            self.app_config.detail_all = self._detail_all
-            self.save()
 
     # ------------------------------------------------------------ notifications
     def _where(self):
