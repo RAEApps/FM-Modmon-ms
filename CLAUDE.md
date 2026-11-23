@@ -24,7 +24,8 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\sdr_test.py` covers the SDR profiles (`SDRS`: RSP1A, RSP1B, RTL-SDR, B210) and a station at each one's rate.
   `tests\antenna_test.py` covers antenna tuning (`window_snrs`, `AntennaTuner`, `AntennaLoop` on a
   synthetic flowgraph, the window and web controls).
-- `tests\alarm_ack_test.py` covers alarm priorities and acknowledgement. The alarm log (`AlarmTable.episodes`)
+- `tests\alarm_ack_test.py` covers alarm priorities, acknowledgement, on/off delays, shelving and the log's
+  filter and CSV export. The alarm log (`AlarmTable.episodes`)
   is the one record of what waits to be acknowledged; `MainWindow._sync_unacked` copies it to each
   receiver's `alarms.unacked` for its lamps, status cell and row tint. Run it after touching alarms.
 - `tests\theme_test.py` holds the visual system: every colour in the GUI code and the web page must be a

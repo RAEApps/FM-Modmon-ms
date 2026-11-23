@@ -3,8 +3,10 @@ acknowledged (raised or since cleared), from the log, a lamp, a row, the banner
 or the web page; each alarm has a priority (1-3) per receiver, shown as a colour,
 a shape and its number on the lamps, the row's status cell, the banner and the
 log. No SDR needed. Exits non-zero on a failure."""
+import csv
 import os
 import sys
+import tempfile
 import time
 import types
 
@@ -189,6 +191,74 @@ check('log: an old one waiting to be acknowledged is kept', 'OLD' in names and l
 check('log: one still raised is kept', 'UP' in names, names)
 log.cleared('k', 'up')
 check('log: ...and can still be cleared', [e['end'] is not None for e in log.episodes if e['name'] == 'UP'], [True])
+
+# ------------------------------------------------------------ on and off delays, shelving
+s3 = rm.ReceiverSettings.from_dict({'delays': {'OVERMOD': [2, 30], 'PILOT': ['x', 5], 'FREQUENCY': [9999, -4]},
+                                    'silence_s': 20})
+check('delays: set ones kept, bad ones back to the default, out of range clipped',
+      (s3.delays['OVERMOD'], s3.delays['PILOT'], s3.delays['FREQUENCY']), ([2, 30], [5, 5], [600, 0]))
+check("delays: SILENCE's on-delay is its silence time", s3.delay('SILENCE'), (20, 10))
+check("delays: saved files without them get the alarms' own", rm.ReceiverSettings.from_dict({}).delay('CARRIER'), (5, 5))
+dlg = rm.ReceiverDialog(None, 0, s3, 7711)
+on, off = dlg.delay_spins['OVERMOD']
+check('receiver dialog: on and off delays as set', (on.value(), off.value()), (2, 30))
+check("receiver dialog: SILENCE's on-delay is the silence time (no spin of its own)",
+      dlg.delay_spins['SILENCE'][0] is None)
+off.setValue(45)
+check('receiver dialog: a changed off-delay is in its result', dlg.settings().delays['OVERMOD'], [2, 45])
+
+al = rm.StationAlarms()
+clock = [1000.0]
+real_mono = rm.time.monotonic
+rm.time.monotonic = lambda: clock[0]
+al._t0 = clock[0] - 60
+holds = {'OVERMOD': (2, 30)}
+
+
+def step(dt, on):
+    clock[0] += dt
+    return [(n, up) for n, _, up in al.update({'OVERMOD': on}, holds)]
+
+
+step(0, True)
+check('on-delay: not raised before it', step(1.5, True), [])
+check('on-delay: raised once it has held', step(1, True), [('OVERMOD', True)])
+step(0, False)
+check('off-delay: still raised after the on-delay', step(5, False), [])
+check('off-delay: cleared once gone for it', step(26, False), [('OVERMOD', False)])
+al.shelve('OVERMOD', 3600)
+check('shelved: its condition counts as gone', (step(0, True), step(10, True)), ([], []))
+check('shelved: listed until when', 'OVERMOD' in al.shelved_now())
+fake = types.SimpleNamespace(settings=rm.ReceiverSettings(), alarms=al)
+check('shelved: its lamp says so', rm.StationPanel._alarm_states(fake, {})['OVERMOD'], 'shelved')
+al.shelved['OVERMOD'] = rm.time.time() - 1
+check('shelving ends by itself', al.shelved_now(), {})
+step(0, True)
+check('unshelved: it raises again', step(3, True), [('OVERMOD', True)])
+rm.time.monotonic = real_mono
+check('when it raises and clears, in words', rm.alarm_when(rm.ALARM_DEFS[2], 2, 30),
+      'It raises once its condition has held 2 s, and clears once it has been gone 30 s. '
+      + rm.ALARM_JUDGED['OVERMOD'] + ' While it is not judged it counts as clear, so a raised alarm clears 30 s later.')
+
+# ------------------------------------------------------------ the log: filter, CSV export
+log = rm.AlarmTable()
+log.raised('a', '98.1 CLASSIC', 'audio silence', 'below -45 LUFS', name='SILENCE', priority=1, slot=0)
+log.raised('b', '101.7 NEWS', 'RDS lost', 'under 1 group/s', name='RDS', priority=2, slot=1)
+log.cleared('b', 'RDS lost')
+check('log: an Rx column', [log.item(r, 2).text() for r in range(log.rowCount())], ['2', '1'])
+log.set_filter('news rds')
+check('log: the filter shows the rows with every word', [log.isRowHidden(r) for r in range(2)], [False, True])
+log.set_filter('')
+check('log: no filter, every row', [log.isRowHidden(r) for r in range(2)], [False, False])
+path = os.path.join(tempfile.mkdtemp(), 'alarms.csv')
+check('log: export writes every alarm', log.export_csv(path), 2)
+with open(path, encoding='utf-8') as fh:
+    rows = list(csv.DictReader(fh))
+check('log: CSV columns and values', (rows[0]['receiver'], rows[0]['alarm'], rows[0]['cleared'], rows[1]['duration_s'],
+                                      rows[1]['priority']), ('1', 'audio silence', '', '0', '2'))
+check('app setting: the log height kept in range', (rm.AppConfig().log_height,
+      rm.AppConfig.from_dict({'log_height': 5}).log_height, rm.AppConfig.from_dict({'log_height': 'x'}).log_height),
+      (200, rm.LOG_MIN_H, 200))
 
 eps = [{'id': i, 'acked': None if i == 3 else 1.0} for i in range(150)]
 web = types.SimpleNamespace(alarm_table=types.SimpleNamespace(episodes=eps))

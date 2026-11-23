@@ -57,9 +57,11 @@ alarm, and blue selected or clickable (ISA-101 high-performance HMI). The window
 web page draw from one palette (`THEME`), four type sizes and square 3 px corners; readings
 are set in Consolas, whose digits keep their width as values change. The header holds the
 status line (SDR, gain, recording), the player, Settings and a Tools menu (recalibrate the
-gain, tune the antenna). Each station row has peak modulation against the
-limit in force with a 2 s peak hold, RF and AM bars, a 5-minute sparkline and an
-annunciator with every alarm in a fixed place (raised, holding off, not judged, off). A
+gain, tune the antenna). Each station row has PI, stereo, pilot and "RDS ok" (or its group
+loss) under the frequency; peak modulation against the limit in force with a 2 s peak hold,
+RF, AM and MPX power (against 0 dBr) bars; a 5-minute sparkline of peak modulation ending on
+its newest value, with the bursts over 100% a minute; and an
+annunciator with every alarm in a fixed place (raised, holding off, not judged, shelved, off). A
 status cell at the row's left shows its most urgent alarm's priority, and the row turns red
 while one of its alarms waits to be acknowledged (see Alarms).
 Click a row to select its receiver: its detail view opens right under that row (double-click
@@ -73,10 +75,12 @@ The detail view has tabs:
   shows anyway, marked ▲, while it is out of range, with one line above the cards listing
   everything out of range (what doesn't fit is counted, "+n more").
 - **MPX** – the Modulation and Multiplex cards in full beside the ITU-R SM.1268 views: a
-  header line (peaks, MPX power and the hour's highest, the share over 75 and 77 kHz and over
-  the limit + 2 kHz, the valid time), a large MPX spectrum with peak hold, the deviation
-  exceedance plot (the share of samples over each level, log scale, under the mouse) and MPX
-  power over the last hour with its highest marked. A click on the small spectrum opens it.
+  header of readings, as DEVA's (peak deviation, the share over 75 and 77 kHz and over the
+  limit + 2 kHz, MPX power and the hour's highest with its time, multipath, the time
+  measured), a large MPX spectrum with peak hold, the deviation exceedance plot (the share of
+  samples above each level, log scale; a click places a marker, read out under it) and MPX
+  power over the last hour, on clock time, with its highest marked. A click on the small
+  spectrum, or a card's "MPX tab" link, opens it.
 - **RDS** – the RDS card in full.
 - **Audio** – the Audio card in full (with loudness range and max momentary / short-term),
   a large goniometer and the phase meter. A click on the small goniometer opens it.
@@ -118,6 +122,14 @@ a cleared alarm keeps its lamp's outline until acknowledged. Acknowledge from th
 right-clicking a lamp or a row; the web page does the same (with the controls), and the
 log records when and from where. Settings can sound a tone every 4 s while a priority 1
 alarm waits (off by default); the web page has its own Sound switch.
+
+**Delays and shelving.** Each alarm has an on-delay (how long its condition must hold before
+it raises) and an off-delay (how long it must be gone before it clears), set apart per
+receiver as on the Inovonics 551 and DEVA monitors; silence's on-delay is its "for" time. A
+lamp's right-click menu can also **shelve** an alarm for 15 minutes to 24 hours: it is
+silenced meanwhile (its lamp dotted), then judged again by itself; shelving is not kept over
+a restart. The alarm log has a **filter** (every word typed, any case), an **Rx** column, and
+**Export CSV**; drag the line above it to give it more height (remembered).
 
 Alarms go to the event log and optionally to email (SMTP) and webhooks (JSON, Slack,
 Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout, and warns of ADC
