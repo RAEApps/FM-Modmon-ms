@@ -1434,6 +1434,7 @@ class FmMeter(gr.sync_block):
         self._exceed_hist = np.zeros(EXCEED_BINS, np.int64)  # ...their sum
         self._exceed_n = 0
         self._exceed_by_inj = {}                           # ...and summed by (injection %, subcarriers on air)
+        self._exceed_inj_n = {}                            # ...and how many updates each of those has
         self._inj = 0.0                                    # subcarrier injection at the last update, %
         self._nsub = 0                                     # ...and how many subcarriers were on air
         self._mpx_ms = deque(maxlen=MPX_POWER_S * UPDATE_HZ)  # MPX mean square per update
@@ -1490,6 +1491,7 @@ class FmMeter(gr.sync_block):
             self._exceed_hist[:] = 0
             self._exceed_n = 0
             self._exceed_by_inj.clear()
+            self._exceed_inj_n.clear()
             self._inj, self._nsub = 0.0, 0
             self._settle = SETTLE_UPDATES
             self.stats = None
@@ -1676,8 +1678,12 @@ class FmMeter(gr.sync_block):
             self._exceed_hist -= old
             self._exceed_n -= n
             self._exceed_by_inj[inj] -= old
-            if not self._exceed_by_inj[inj].any():
-                del self._exceed_by_inj[inj]
+            # Dropped only when no update in the window has this key: an update with
+            # nothing over EXCEED_LO_KHZ adds an all-zero histogram, so a zero sum
+            # doesn't mean the key is unused (deleting it then raised a KeyError later).
+            self._exceed_inj_n[inj] -= 1
+            if not self._exceed_inj_n[inj]:
+                del self._exceed_by_inj[inj], self._exceed_inj_n[inj]
         # The limit depends on the injection (RDS + SCA) and on how many subcarriers
         # are on air, which can change within the window: keep both for each update.
         inj = (round(self._inj / EXCEED_INJ_STEP) * EXCEED_INJ_STEP, self._nsub)
@@ -1687,6 +1693,7 @@ class FmMeter(gr.sync_block):
         if inj not in self._exceed_by_inj:
             self._exceed_by_inj[inj] = np.zeros(EXCEED_BINS, np.int64)
         self._exceed_by_inj[inj] += h
+        self._exceed_inj_n[inj] = self._exceed_inj_n.get(inj, 0) + 1
 
     def _invalid(self, settling, iq_power):
         """Why this update's peaks can't be trusted, or None (valid).
