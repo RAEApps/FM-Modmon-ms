@@ -23,6 +23,14 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\sdr_test.py` covers the SDR profiles (`SDRS`: RSP1A, RSP1B, RTL-SDR, B210) and a station at each one's rate.
   `tests\antenna_test.py` covers antenna tuning (`window_snrs`, `AntennaTuner`, `AntennaLoop` on a
   synthetic flowgraph, the window and web controls).
+- `tests\inventory_test.py` covers the SDR inventory and profiler (a simulated radio; no SDR needed).
+  On hardware: `fm-modmon-ms.py --scan-sdrs` and `--profile-sdr SERIAL --config <a copy>` (a built-in kind
+  is printed beside its built-in profile, not saved).
+- New SDRs: `scan_sdrs` classifies every radio by driver + serial (`FoundSdr`: known / learned / new /
+  failed / unusable). `profile_sdr` measures a new one (each step in an `_in_child` helper) into an
+  `SdrProfile` saved in the settings file's `sdrs` section; `load_learned` adds those to `SDRS` under
+  their own key (`BUILTIN_SDRS` are never overridden). Bump `PROFILER_VERSION` when the profiler's
+  results change, so learned profiles are made again.
 - SDRs: one `SdrProfile` each in `SDRS`; `use_sdr()` sets `SAMP_RATE`, `CHAN_DECIM`, `MAX_SPAN` and the
   other rate-derived globals from it. Every station is decimated to the same `QUAD_RATE` (384 kS/s).
   At start-up `detect_sdr()` finds what is plugged in (`find_sdrs`, `choose_sdr`) and switches to it.

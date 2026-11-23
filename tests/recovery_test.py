@@ -232,10 +232,11 @@ def detect(argv, attached):
     """attached(look) -> what find_sdrs() finds on that look (0 = the first)."""
     looks = []
 
-    def find_sdrs():
+    def find_sdrs(inventory=None):
         looks.append(1)
         return attached(len(looks) - 1)
     rm.find_sdrs = find_sdrs
+    rm.scan_sdrs = lambda found=None: []   # (no real radios: find_sdrs above says what is attached)
     clock['t'] = 0.0
     waits.clear(), progress.clear(), configured.clear()
     args = rm.parse_args(argv)

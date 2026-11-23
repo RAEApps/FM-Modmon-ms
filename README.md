@@ -206,7 +206,10 @@ C:\ProgramData\radioconda\python.exe fm-modmon-ms.py --freqs 94.5 101.7 --countr
 | `--freqs MHZ …` | start on these stations instead of the saved ones |
 | `--setup` | open the setup before starting |
 | `--country CC` | ISO country (ISED rules for `CA`, FCC otherwise; RadioDNS) |
-| `--sdr NAME` | `rsp1a`, `rsp1b`, `rtlsdr` or `b210` (must be plugged in), or `auto` (the default) |
+| `--sdr NAME` | `rsp1a`, `rsp1b`, `rtlsdr`, `b210` or a profiled SDR's key (must be plugged in), or `auto` (the default) |
+| `--scan-sdrs` | list the radios plugged in (known, profiled here, new) and exit |
+| `--profile-sdr SERIAL` | profile that radio and exit (the monitor must not be using it) |
+| `--no-sdr-profile` | don't profile new SDRs at the start |
 | `--lna N --ifgr DB` | SDRplay: fixed gain instead of start-up calibration |
 | `--gain DB` | RTL-SDR or B210: fixed gain instead of start-up calibration |
 | `--web-port N` | web version port (default 8765, `0` = off) |
@@ -243,13 +246,42 @@ measurements (when [recording](#recording)) to `records/`.
 
 ## SDRs
 
-At each start the monitor looks for the SDRs plugged in and uses the one it finds, its window,
-gain controls and name in the window: with more than one, the widest window (B210, then
-RSP1A / RSP1B, then RTL-SDR). The event log says which it found. *Settings → SDR* (or setup)
-can name a preferred SDR, used when it's plugged in, from the next start; `--sdr` names one that
-must be. To change SDR while running, click the SDR chip at the top of the window (▾) and pick
-another one plugged in: the monitor restarts on it (about half a minute), scans, calibrates its
-gain and reopens the receivers that fit its window; it also becomes the preferred SDR.
+At each start the monitor looks for every radio plugged in (anything SoapySDR finds, sound
+cards aside) and identifies each by its driver and serial. It uses the one with the widest
+window (B210, then RSP1A / RSP1B, then RTL-SDR, profiled ones by their own window). The event
+log says which it found. *Settings* (or setup) can name a preferred SDR, used when it's plugged
+in, from the next start; `--sdr` names one that must be. To change SDR while running, click the
+SDR chip at the top of the window (▾) and pick another one plugged in: the monitor restarts on
+it (about half a minute), scans, calibrates its gain and reopens the receivers that fit its
+window; it also becomes the preferred SDR.
+
+### New SDRs
+
+A radio none of the built-in profiles below fits (another SDRplay model, an Airspy HF+, a
+HackRF, a LimeSDR…) is **profiled** the first time the monitor starts with it plugged in: a
+dialog shows the steps, about two minutes, and *Skip* leaves it for later. Each step runs in a
+short-lived helper process, as a radio not yet profiled may crash as it closes:
+
+1. what SoapySDR says it can do (it must tune 87.5–108 MHz and have a gain control);
+2. the fastest sample rate, a whole multiple of 384 kS/s (2.304 to 30.72 MS/s), that streams
+   without overflows, stalls or lost samples, for 3 s and then 8 s;
+3. a starting gain (the band scan's; the gain is calibrated at each start as usual);
+4. how far either side of the centre its filter is flat (within 1 dB): that sets how far apart
+   stations can be and the band-scan windows;
+5. whether it closes cleanly (five times): if not, it is never closed while the monitor runs,
+   as the B210 isn't;
+6. the CPU one receiver takes on it;
+7. the profile checked as the built-in ones are.
+
+The profile is saved in the settings file (`sdrs`), and the radio is then one of the SDRs to
+use, prefer and switch to. One that can't be used (for example an Airspy R2, whose 10 and
+2.5 MS/s aren't multiples of 384 kS/s) or whose profiling failed is listed with the reason, and
+isn't profiled again at each start. The SDR chip offers new radios for profiling and *Look for
+SDRs plugged in since*, which finds radios plugged in while running. *Settings → SDRs* lists every
+radio, plugged in or profiled here, with its profile: *Profile…* (again), *Report…* (what
+profiling found) and *Forget*. `--scan-sdrs` and `--profile-sdr SERIAL` do the same from the
+command line; `--profile-sdr` on a built-in kind prints its measured profile beside the
+built-in one without saving it.
 
 All the stations come from one SDR window, so the SDR's sample rate sets how far apart they can
 be. Every station is filtered down to the same 384 kS/s, so the measurements are the same
@@ -329,6 +361,9 @@ lost: reopening it, and restarting on a B210.
 peak hold and marks, and the live measurement surviving the SDR being reopened.
 `tests\sdr_test.py` checks each SDR's rate, window and scan, how `--sdr` and the setup
 pick it, and a synthetic station through a receiver at each SDR's sample rate.
+`tests\inventory_test.py` checks how the radios found are classified, the profiler on a
+simulated radio (its rate, filter, gain, closes; radios it can't use), and learned profiles
+saved, chosen and forgotten.
 
 ## CPU profile
 

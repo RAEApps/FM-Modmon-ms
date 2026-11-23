@@ -25,10 +25,20 @@ at a time (stereo, 75 us de-emphasis; falls back to mono without a pilot).
 
 Other SDRs (SDRS): the RSP1B, as the RSP1A; an RTL-SDR at 2.304 MS/s
 (stations within 1.4 MHz; --gain in dB); an Ettus B210 at 30.72 MS/s (the
-whole band at once; --gain in dB). At each start the SDRs plugged in are
-found (find_sdrs) and the one with the widest window is used, unless Setup
-prefers one that is plugged in or --sdr names one. Every station is
-decimated to the same 384 kS/s, so the measurements don't depend on the SDR.
+whole band at once; --gain in dB). At each start every radio SoapySDR finds
+is identified by its driver and serial (scan_sdrs). Any it has no profile for
+is profiled, once, before the monitor starts (profile_sdr, about two minutes,
+each step in a helper process): its fastest sample rate (a multiple of 384
+kS/s) that streams without loss, a starting gain, how far its filter is flat
+(so its window and band-scan windows), whether it closes cleanly, and the CPU
+one receiver takes. The profile is saved in the settings file ("sdrs") and the
+radio can then be used like the built-in kinds; one that can't be used says
+why. Of the SDRs attached, the one with the widest window is used, unless
+Setup prefers one that is plugged in or --sdr names one. The SDR chip lists
+them to switch to, profiles new ones and looks for radios plugged in since;
+Settings lists them all with their profiles (--scan-sdrs and --profile-sdr do
+the same from the command line). Every station is decimated to the same 384
+kS/s, so the measurements don't depend on the SDR.
 
 Run with radioconda's Python:
     C:\\ProgramData\\radioconda\\python.exe fm-modmon-ms.py
@@ -615,7 +625,8 @@ class SdrProfile:
         return ' · '.join(f'{s.label} {v:g}{s.unit}' for s, v in zip(self.stages, gain))
 
     def apply_gain(self, set_one, gain):
-        """set_one(name, value) for each stage, clamped to its range."""
+        """set_one(name, value) for each stage, clamped to its range. A stage named ''
+        is the SDR's overall gain (SoapySDR spreads it over its gain elements)."""
         for s, v in zip(self.stages, self.clamp(gain)):
             set_one(s.name, v)
 
@@ -659,7 +670,7 @@ def use_sdr(key, serial=''):
     serial: open that one (as find_sdrs() reported it), not the first of its kind."""
     global SDR, SAMP_RATE, CHAN_DECIM, MAX_SPAN, EDGE_HZ, SRC_BUFFER, IBOC_DECIM, SCAN_CENTERS, SCAN_HALF_WIDTH
     SDR = SDRS[key]
-    if serial:
+    if serial and 'serial=' not in SDR.device:   # (a learned profile already names its one)
         SDR = replace(SDR, device=f'{SDR.device},serial={serial}')
     if 'driver=uhd' in SDR.device:
         SDR = replace(SDR, device=SDR.device + uhd_image_args())
@@ -721,23 +732,195 @@ def sdrplay_service_state(wait_s=0.0):
         time.sleep(0.5)
 
 
-def find_sdrs():
-    """The SDRs attached that the monitor can use, widest window first:
-    [(SDRS key, serial, label), ...]. Takes a few seconds (a B210's firmware loads)."""
+# ---------------------------------------------------------------- SDR inventory
+# Every radio SoapySDR finds is identified by its driver and serial. One a built-in
+# profile (BUILTIN_SDRS) fits is "known"; any other is "new" until the profiler
+# (profile_sdr) has measured it, and its profile is then saved in the settings file's
+# "sdrs" section and added to SDRS under its own key ("learned"), so everything that
+# takes an SDRS key takes it. A radio whose profiling failed stays "failed" until it is
+# profiled again; one that can't receive FM at all is "unusable".
+
+BUILTIN_SDRS = tuple(SDRS)
+SDR_SKIP_DRIVERS = ('audio', 'remote')  # SoapySDR finds sound cards (and networked servers) too: not ours
+PROFILER_VERSION = 1      # learned profiles made by an older profiler are made again
+LEARNED = {}              # learned key -> its settings-file entry (load_learned), failed ones too
+
+
+@dataclass
+class FoundSdr:
+    """One radio found by scan_sdrs()."""
+    driver: str
+    serial: str
+    label: str
+    args: dict            # its SoapySDR enumerate() result
+    key: str = ''         # the SDRS profile it uses; '' until it has one
+    status: str = 'new'   # 'known', 'learned', 'new', 'failed' or 'unusable'
+    note: str = ''
+
+    @property
+    def id(self):
+        """Its learned-profile key: driver and serial, e.g. 'airspy-a74068c82f5a5853'."""
+        return learned_key(self.driver, self.serial or self.label)
+
+    @property
+    def usable(self):
+        return self.status in ('known', 'learned')
+
+    def describe(self):
+        """'B210 209012: B210, stations up to 20.4 MHz apart' and the like."""
+        if self.usable:
+            return f'{self.label}: {SDRS[self.key].name}, {sdr_summary(SDRS[self.key])}'
+        return f'{self.label}: ' + {'new': 'new, not profiled yet', 'failed': 'profiling failed',
+                                    'unusable': 'can\'t be used'}[self.status] + (f' ({self.note})' if self.note else '')
+
+    def to_dict(self):
+        return {'driver': self.driver, 'serial': self.serial, 'label': self.label, 'args': dict(self.args),
+                'key': self.key, 'status': self.status, 'note': self.note}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(**{k: d[k] for k in ('driver', 'serial', 'label', 'args', 'key', 'status', 'note') if k in d})
+
+
+def learned_key(driver, serial):
+    return re.sub(r'[^a-z0-9]+', '-', f'{driver}-{serial}'.lower()).strip('-')
+
+
+def sdr_summary(p):
+    """'2.304 MS/s, stations up to 1.4 MHz apart' for profile p."""
+    return f'{p.rate / 1e6:g} MS/s, ' + ('the whole FM band at once' if p.span >= 19.8e6 else
+                                          f'stations up to {p.span / 1e6:g} MHz apart')
+
+
+def profile_to_dict(p):
+    d = asdict(p)
+    return json.loads(json.dumps(d))   # (tuples as lists)
+
+
+def profile_from_dict(d):
+    d = dict(d)
+    d['stages'] = tuple(GainStage(**s) for s in d['stages'])
+    d['scan_centers'] = tuple(float(c) for c in d['scan_centers'])
+    d['default_gain'] = tuple(float(g) for g in d['default_gain'])
+    d['settings'] = tuple(tuple(s) for s in d.get('settings', ()))
+    known = {f.name for f in fields(SdrProfile)}
+    return SdrProfile(**{k: v for k, v in d.items() if k in known})
+
+
+def profile_problems(p):
+    """What makes profile p unusable (the checks tests/sdr_test.py makes of the built-in
+    ones): [] if none."""
+    out = []
+    decim = round(p.rate / QUAD_RATE)
+    if decim < 1 or decim * QUAD_RATE != p.rate:
+        out.append(f'rate {p.rate:g} is not a whole multiple of {QUAD_RATE:g}')
+    edge = p.span / 2 + 150e3
+    if edge + CHAN_PASS_HZ + 35e3 >= p.rate / 2:
+        out.append('a station at the window edge would be past Nyquist')
+    if p.scan_half_width < 0.2e6 or p.scan_half_width + 199e3 >= p.rate / 2:
+        out.append('the scan windows don\'t fit the sample rate')
+    if not all(any(abs(ch * 1e5 - c) <= p.scan_half_width + 1 for c in p.scan_centers) for ch in CHANNELS_MHZ10):
+        out.append('the scan windows don\'t cover 88.1-107.9 MHz')
+    if not all(round(c / 1e5) % 2 == 0 and abs(c / 1e5 - round(c / 1e5)) < 1e-6 for c in p.scan_centers):
+        out.append('a scan window is not on an even tenth of a MHz')
+    if not p.stages or any(s.lo >= s.hi for s in p.stages) or len(p.default_gain) != len(p.stages):
+        out.append('no usable gain control')
+    elif p.clamp(p.default_gain) != tuple(p.default_gain):
+        out.append('the default gain is out of range')
+    return out
+
+
+def load_learned(path):
+    """Read the learned profiles from the settings file into LEARNED, and the usable
+    ones (made by this profiler version, passing profile_problems) into SDRS."""
+    for key in [k for k in SDRS if k not in BUILTIN_SDRS]:
+        del SDRS[key]
+    LEARNED.clear()
+    try:
+        with open(path, encoding='utf-8') as fh:
+            entries = json.load(fh).get('sdrs') or {}
+    except (OSError, ValueError, AttributeError):
+        return
+    for key, entry in entries.items() if isinstance(entries, dict) else ():
+        if not isinstance(entry, dict) or key in BUILTIN_SDRS:
+            continue
+        LEARNED[key] = entry
+        if entry.get('version') != PROFILER_VERSION or entry.get('error') or not entry.get('profile'):
+            continue
+        try:
+            p = profile_from_dict(entry['profile'])
+        except (KeyError, TypeError, ValueError) as e:
+            entry['error'] = f'unreadable profile: {e}'
+            continue
+        if p.key == key and not profile_problems(p):
+            SDRS[key] = p
+
+
+def save_learned(path, key, entry):
+    """Store (entry None: forget) one learned profile in the settings file, and reload them."""
+    entries = {k: v for k, v in LEARNED.items()}
+    if entry is None:
+        entries.pop(key, None)
+    else:
+        entries[key] = entry
+    save_config(path, None, sdrs=entries)
+    load_learned(path)
+
+
+def classify_sdr(found):
+    """A FoundSdr for one SoapySDR enumerate() result; None if it isn't a radio."""
+    found = {str(k): str(v) for k, v in dict(found).items()}
+    driver = found.get('driver', '')
+    if not driver or driver in SDR_SKIP_DRIVERS:
+        return None
+    r = FoundSdr(driver, found.get('serial', ''), found.get('label') or found.get('product') or driver, found)
+    key = _profile_for(found)
+    if key:
+        r.key, r.status = key, 'known'
+        return r
+    entry = LEARNED.get(r.id)
+    if r.id in SDRS:
+        r.key, r.status = r.id, 'learned'
+    elif entry and entry.get('version') == PROFILER_VERSION and entry.get('error'):
+        r.status, r.note = ('unusable' if entry.get('unusable') else 'failed'), entry['error']
+    elif entry:
+        r.note = 'profiled by an older version: profiled again'
+    return r
+
+
+def enumerate_sdrs():
+    """Every radio SoapySDR finds: [dict, ...]. Takes a few seconds (a B210's firmware loads)."""
     _soapy_env()
     import SoapySDR
     out = []
-    for driver in ('uhd', 'sdrplay', 'rtlsdr'):
+    for args in ('', 'driver=uhd' + uhd_image_args()):   # (UHD: its images named, see uhd_image_args)
         try:
-            results = SoapySDR.Device.enumerate(f'driver={driver}' + (uhd_image_args() if driver == 'uhd' else ''))
+            out += [dict(f) for f in SoapySDR.Device.enumerate(args)]
         except Exception:  # noqa: BLE001 - a driver that can't look (no service, no module) finds nothing
+            pass
+    return out
+
+
+def scan_sdrs(found=None):
+    """The radios attached, classified: [FoundSdr, ...], usable ones widest window first.
+    found: enumerate_sdrs()'s result, if already looked for."""
+    out, seen = [], set()
+    for f in enumerate_sdrs() if found is None else found:
+        r = classify_sdr(f)
+        if not r:
             continue
-        for found in results:
-            found = dict(found)
-            key = _profile_for(found)
-            if key:
-                out.append((key, found.get('serial', ''), found.get('label') or SDRS[key].name))
-    return sorted(out, key=lambda f: -SDRS[f[0]].span)
+        ident = (r.driver, r.serial or r.label)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(r)
+    return sorted(out, key=lambda r: (not r.usable, -SDRS[r.key].span if r.usable else 0, r.label))
+
+
+def find_sdrs(inventory=None):
+    """The SDRs attached that the monitor can use, widest window first:
+    [(SDRS key, serial, label), ...]. inventory: scan_sdrs()'s result, if already scanned."""
+    return [(r.key, r.serial, r.label) for r in (scan_sdrs() if inventory is None else inventory) if r.usable]
 
 
 def choose_sdr(wanted, found, required=False):
@@ -749,7 +932,8 @@ def choose_sdr(wanted, found, required=False):
         if wanted in ('auto', key):
             return key, serial, label, ''
     if not found:
-        raise SdrNotFound(f'No SDR found. {APP_NAME} looks for a B210, an RSP1A or RSP1B, and an RTL-SDR: '
+        raise SdrNotFound(f'No SDR found that {APP_NAME} can use. It knows the B210, the RSP1A and RSP1B '
+                          'and the RTL-SDR, and profiles any other SoapySDR radio the first time it sees it: '
                           'is one plugged in, with its driver installed (for an RSP, the SDRplay API '
                           'service running), and no other program using it?')
     names = ', '.join(label for _, _, label in found)
@@ -789,27 +973,66 @@ def _retry(open_device, attempts=5):
 _IN_CHILD = False   # True in a helper process started by _in_child
 
 
-def _in_child(func, *args, progress=None):
-    """func(*args) (band_scan or calibrate_startup) in a helper process, for an SDR that
-    can't be closed in-process (closes_cleanly False): the helper opens it, does the work
-    and exits without closing it, so the monitor can then open it for the receivers.
+class SdrUnusable(RuntimeError):
+    """The profiler found the radio can't be used at all (it doesn't tune FM, has no gain control...)."""
+
+
+class ProfileCancelled(RuntimeError):
+    """Profiling was skipped or cancelled while it ran."""
+
+
+_SDR_CALLS = ('band_scan', 'calibrate_startup')   # _in_child calls on the SDR in use; the others name their radio
+
+
+def _in_child(func, *args, progress=None, timeout=None, cancel=None, what=None):
+    """func(*args) in a helper process. band_scan and calibrate_startup run there for
+    an SDR that can't be closed in-process (closes_cleanly False): the helper opens it,
+    does the work and exits without closing it, so the monitor can then open it for the
+    receivers. The profiler's steps (profile_probe, close_test, cpu_check) and
+    enumerate_sdrs always run there: a radio not yet profiled may crash as it closes.
     Returns func's result as JSON gives it back (tuples as lists); the helper's progress
-    lines go to progress(text)."""
-    spec = json.dumps({'func': func, 'sdr': SDR.key, 'device': SDR.device, 'args': args})
+    lines go to progress(text). The helper is killed after timeout seconds, or once the
+    threading.Event cancel is set (raising ProfileCancelled). what: the radio, for errors."""
+    mine = func in _SDR_CALLS
+    spec = json.dumps({'func': func, 'sdr': SDR.key if mine else None, 'device': SDR.device if mine else None,
+                       'args': args})
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), '--child-call', spec],
-                            stdout=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+                            stdout=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    done = threading.Event()
+    killed = []
+
+    def watch():
+        deadline = time.monotonic() + timeout if timeout else None
+        while not done.wait(0.2):
+            if (cancel and cancel.is_set()) or (deadline and time.monotonic() > deadline):
+                killed.append('cancelled' if cancel and cancel.is_set() else f'no answer in {timeout:g} s')
+                proc.kill()
+                return
+
+    if timeout or cancel:
+        threading.Thread(target=watch, daemon=True).start()
     result, error = None, None
-    for line in proc.stdout:
-        if line.startswith('CHILD-PROGRESS ') and progress:
-            progress(line[len('CHILD-PROGRESS '):].rstrip('\n'))
-        elif line.startswith('CHILD-RESULT '):
-            result = json.loads(line[len('CHILD-RESULT '):])
-        elif line.startswith('CHILD-ERROR '):
-            error = line[len('CHILD-ERROR '):].strip()
-    proc.wait()
+    try:
+        for line in proc.stdout:
+            if line.startswith('CHILD-PROGRESS ') and progress:
+                progress(line[len('CHILD-PROGRESS '):].rstrip('\n'))
+            elif line.startswith('CHILD-RESULT '):
+                result = json.loads(line[len('CHILD-RESULT '):])
+            elif line.startswith('CHILD-ERROR '):
+                error = line[len('CHILD-ERROR '):].strip()
+        proc.wait()
+    finally:
+        done.set()
+    if killed and killed[0] == 'cancelled':
+        raise ProfileCancelled('cancelled')
     if result is None:
-        raise RuntimeError(f'{SDR.name} {func.replace("_", " ")}: '
-                           + (error or f'the helper process ended ({proc.returncode})'))
+        detail = (error.removeprefix('UNUSABLE ') if error else killed[0] if killed else
+                  f'the helper process ended ({proc.returncode})')
+        e = (SdrUnusable if error and error.startswith('UNUSABLE ') else RuntimeError)(
+            f'{what or SDR.name} {func.replace("_", " ")}: {detail}')
+        e.detail = detail
+        raise e
     return result
 
 
@@ -818,18 +1041,452 @@ def _child_call(spec_json):
     global _IN_CHILD, SDR
     spec = json.loads(spec_json)
     _IN_CHILD = True
-    use_sdr(spec['sdr'])
-    SDR = replace(SDR, device=spec['device'])
+    if spec['sdr']:
+        use_sdr(spec['sdr'])
+        SDR = replace(SDR, device=spec['device'])
+
+    def say(text):
+        print('CHILD-PROGRESS ' + text, flush=True)
+
+    calls = {'band_scan': band_scan,
+             'calibrate_startup': lambda *a: calibrate_startup(*a, progress=say),
+             'enumerate_sdrs': enumerate_sdrs,
+             'profile_probe': lambda device: profile_probe(device, lambda step, text: say(f'{step}|{text}')),
+             'close_test': close_test,
+             'cpu_check': cpu_check}
     try:
-        if spec['func'] == 'band_scan':
-            result = band_scan(*spec['args'])
-        else:
-            result = calibrate_startup(*spec['args'], progress=lambda text: print('CHILD-PROGRESS ' + text, flush=True))
-        print('CHILD-RESULT ' + json.dumps(result), flush=True)
+        result = calls[spec['func']](*spec['args'])
+        print('CHILD-RESULT ' + json.dumps(_finite(result)), flush=True)
     except Exception as e:  # noqa: BLE001 - reported to the monitor, which shows it
-        print('CHILD-ERROR ' + (str(e) or type(e).__name__).replace('\n', ' '), flush=True)
+        print('CHILD-ERROR ' + ('UNUSABLE ' if isinstance(e, SdrUnusable) else '')
+              + (str(e) or type(e).__name__).replace('\n', ' '), flush=True)
     sys.stdout.flush()
     os._exit(0)
+
+
+# ---------------------------------------------------------------- SDR profiler
+# profile_sdr measures a radio no built-in profile fits and makes it an SdrProfile.
+# Each step runs in a helper process (_in_child), as a radio not yet profiled may
+# crash as it closes (the B210 does). probe_device does steps 1-4 on one open device;
+# it takes the SoapySDR device as an argument so the tests can give it a simulated one.
+
+_RX, _CF32, _OVERFLOW, _TIMEOUT = 1, 'CF32', -4, -1   # SoapySDR's SOAPY_SDR_RX, _CF32, _OVERFLOW, _TIMEOUT
+PROFILE_RATES = tuple(QUAD_RATE * k for k in (80, 50, 40, 28, 25, 20, 16, 8, 6))  # 30.72 ... 2.304 MS/s
+PROFILE_RATE_S = 3.0       # each rate streamed this long, fastest first...
+PROFILE_CONFIRM_S = 8.0    # ...and the first clean one again for this long
+PROFILE_FLAT_DB = 1.0      # the window's usable part: its noise floor within this of the middle's
+PROFILE_FLAT_CENTRES = (88.6e6, 92.2e6, 95.8e6, 99.4e6, 103.0e6, 106.6e6)  # the filter, median of these tunings
+PROFILE_CLOSES = 5         # opened, streamed and closed this many times, each in its own helper (a B210
+                           # crashes in 20-50% of closes: 5 clean ones is 3-33% likely even so)
+PROFILE_CPU_S = 10.0       # one receiver run this long (after 5 s to settle) for the CPU check
+PROFILE_CPU_HZ = 98.1e6    # ...on this channel
+PROFILE_STEPS = ('Reading what it can do', 'Finding the fastest rate it streams without loss',
+                 'Finding a starting gain', 'Measuring its filter', 'Checking it closes cleanly',
+                 'Measuring the CPU one receiver takes', 'Checking the profile')
+
+
+class _Stream:
+    """A CF32 stream on SoapySDR device dev, counting overflows and timeouts."""
+
+    def __init__(self, dev):
+        self.dev = dev
+        self.stream = dev.setupStream(_RX, _CF32)
+        dev.activateStream(self.stream)
+        self.buf = np.empty(65536, np.complex64)
+        self.overflows = self.timeouts = self.errors = 0
+
+    def read(self, n, keep=True, deadline=None):
+        """n samples (keep: returned, else only counted); fewer if deadline (monotonic) passes."""
+        out = np.empty(n if keep else 0, np.complex64)
+        got = 0
+        while got < n and (deadline is None or time.monotonic() < deadline):
+            sr = self.dev.readStream(self.stream, [self.buf], min(len(self.buf), n - got), timeoutUs=200000)
+            if sr.ret > 0:
+                if keep:
+                    out[got:got + sr.ret] = self.buf[:sr.ret]
+                got += sr.ret
+            elif sr.ret == _OVERFLOW:
+                self.overflows += 1
+            elif sr.ret == _TIMEOUT:
+                self.timeouts += 1
+            else:
+                self.errors += 1
+                if self.errors > 20:
+                    raise RuntimeError(f'reading samples fails ({sr.ret})')
+        return out[:got] if keep else got
+
+    def close(self):
+        try:
+            self.dev.deactivateStream(self.stream)
+            self.dev.closeStream(self.stream)
+        except Exception:  # noqa: BLE001 - (closing a stream that failed)
+            pass
+
+
+def _ranges(rs):
+    return [(float(r.minimum()), float(r.maximum()), float(r.step())) for r in rs]
+
+
+def _offered(value, ranges, listed, tol=1.0):
+    """The value the driver takes for `value` (a listed one within tol, as UHD lists
+    30.72 MS/s as 30720000.024), or None if it doesn't offer it."""
+    for v in listed:
+        if abs(v - value) <= tol:
+            return v
+    for lo, hi, step in ranges:
+        if lo - tol <= value <= hi + tol:
+            if step <= 0 or hi - lo <= tol or abs((value - lo) / step - round((value - lo) / step)) * step <= tol:
+                return value
+    return None
+
+
+def probe_caps(dev):
+    """What SoapySDR says the radio can do (step 1)."""
+    def safe(f, default):
+        try:
+            return f()
+        except Exception:  # noqa: BLE001 - a driver that doesn't say
+            return default
+
+    gains = safe(lambda: [str(g) for g in dev.listGains(_RX, 0)], [])
+    return {'hardware': safe(lambda: str(dev.getHardwareKey()), ''),
+            'freq': safe(lambda: _ranges(dev.getFrequencyRange(_RX, 0)), []),
+            'rate_ranges': safe(lambda: _ranges(dev.getSampleRateRange(_RX, 0)), []),
+            'rates_listed': safe(lambda: [float(r) for r in dev.listSampleRates(_RX, 0)], []),
+            'bw_ranges': safe(lambda: _ranges(dev.getBandwidthRange(_RX, 0)), []),
+            'bw_listed': safe(lambda: [float(b) for b in dev.listBandwidths(_RX, 0)], []),
+            'gains': gains,
+            'gain_ranges': {g: safe(lambda g=g: _ranges([dev.getGainRange(_RX, 0, g)])[0], None) for g in gains},
+            'overall_gain': safe(lambda: _ranges([dev.getGainRange(_RX, 0)])[0], None)}
+
+
+def _gain_stage(caps):
+    """One gain control: the radio's only gain element, else its overall gain."""
+    gains = [g for g in caps['gains'] if caps['gain_ranges'].get(g)]
+    if len(gains) == 1:
+        lo, hi, _ = caps['gain_ranges'][gains[0]]
+        if hi > lo:
+            return GainStage(gains[0], 'Gain', lo, hi)
+    if caps['overall_gain'] and caps['overall_gain'][1] > caps['overall_gain'][0]:
+        lo, hi, _ = caps['overall_gain']
+        return GainStage('', 'Gain', lo, hi)
+    return None
+
+
+def _bandwidth_for(rate, caps):
+    """The analog filter to set for `rate`: 80% of it where the filter is continuous (UHD
+    lists such a range's two ends as its "bandwidths"), else the widest listed up to 85%;
+    0 to leave the driver's."""
+    for lo, hi, _ in caps['bw_ranges']:
+        if hi > lo and lo <= 0.8 * rate:
+            return float(min(hi, 0.8 * rate))
+    listed = [b for b in caps['bw_listed'] if 0 < b <= 0.85 * rate]
+    return max(listed) if listed else 0.0
+
+
+def _rate_runs(dev, rate, bandwidth, seconds):
+    """(clean, why not) streaming `seconds` at rate: every sample, no overflows or stalls, in real time."""
+    dev.setSampleRate(_RX, 0, rate)
+    if bandwidth:
+        try:
+            dev.setBandwidth(_RX, 0, bandwidth)
+        except Exception:  # noqa: BLE001 - (kept as the driver has it)
+            pass
+    st = _Stream(dev)
+    try:
+        st.read(int(rate * 0.3), keep=False, deadline=time.monotonic() + 3)    # (the start can stutter)
+        st.overflows = st.timeouts = st.errors = 0
+        n = int(rate * seconds)
+        t0 = time.monotonic()
+        got = st.read(n, keep=False, deadline=t0 + seconds * 2 + 2)
+        elapsed = max(time.monotonic() - t0, 1e-6)
+    except RuntimeError as e:
+        return False, str(e)
+    finally:
+        st.close()
+    if got < n:
+        return False, f'only {got / n:.0%} of the samples came'
+    if st.overflows or st.errors:
+        return False, f'{st.overflows + st.errors} overflow{"s" * (st.overflows + st.errors != 1)}'
+    if st.timeouts:
+        return False, f'stalled {st.timeouts} time{"s" * (st.timeouts != 1)}'
+    if got / elapsed < 0.99 * rate:
+        return False, f'delivers only {got / elapsed / 1e6:.2f} MS/s'
+    return True, 'clean'
+
+
+def probe_rates(dev, caps, say):
+    """Step 2: the fastest rate (a multiple of QUAD_RATE) that streams without loss.
+    Returns (rate, the value the driver takes for it, bandwidth, [report lines])."""
+    tried = []
+    for rate in PROFILE_RATES:
+        value = _offered(rate, caps['rate_ranges'], caps['rates_listed'])
+        if value is None:     # (UHD lists only its master clock's rates, yet re-clocks for another)
+            try:
+                dev.setSampleRate(_RX, 0, rate)
+                actual = float(dev.getSampleRate(_RX, 0))
+                value = actual if abs(actual - rate) <= 1 else None
+            except Exception:  # noqa: BLE001 - a rate it refuses
+                value = None
+        if value is None:
+            continue
+        bw = _bandwidth_for(rate, caps)
+        ok, why = _rate_runs(dev, value, bw, PROFILE_RATE_S)
+        if ok:
+            ok, why = _rate_runs(dev, value, bw, PROFILE_CONFIRM_S)
+            why = why if ok else f'{why} (in the longer run)'
+        tried.append(f'{rate / 1e6:g} MS/s {why}')
+        say(2, tried[-1])
+        if ok:
+            return rate, value, bw, tried
+    if not tried:
+        raise SdrUnusable('it offers none of the sample rates the monitor can use '
+                          f'({", ".join(f"{r / 1e6:g}" for r in sorted(PROFILE_RATES))} MS/s)')
+    raise RuntimeError('it streamed none of the rates without losing samples: ' + '; '.join(tried))
+
+
+def _set_gain_fn(dev, stage):
+    return (lambda v: dev.setGain(_RX, 0, stage.name, v)) if stage.name else (lambda v: dev.setGain(_RX, 0, v))
+
+
+def probe_gain(dev, rate, stage):
+    """Step 3: the most gain (from the least, in 1/20ths of the range) that keeps the ADC
+    peaks under CAL_PEAK_DBFS in the middle of the band: the band scan's starting gain."""
+    set_gain = _set_gain_fn(dev, stage)
+    step = max(1.0, (stage.hi - stage.lo) / 20)
+    g = best = stage.lo
+    st = _Stream(dev)
+    try:
+        while True:
+            set_gain(g)
+            st.read(int(rate * 0.1), keep=False)
+            mag = np.abs(st.read(int(rate * 0.1)))
+            if not len(mag):
+                raise RuntimeError('no samples came')
+            peak_db = 20 * math.log10(float(np.percentile(mag, 99.99)) + 1e-12)
+            if np.max(mag) >= CAL_CLIP or peak_db > CAL_PEAK_DBFS:
+                break
+            best = g
+            if g >= stage.hi:
+                break
+            g = min(stage.hi, g + step)
+    finally:
+        st.close()
+    return round(best, 1)
+
+
+def probe_flat(dev, rate, nfft=1024):
+    """Step 4: how far either side of the centre the window is flat (Hz): the noise
+    floor's shape, the median of PROFILE_FLAT_CENTRES' (each tuning puts the stations
+    in other bins, the filter stays), within PROFILE_FLAT_DB of the middle's level."""
+    shapes = []
+    for c in PROFILE_FLAT_CENTRES:
+        dev.setFrequency(_RX, 0, c)
+        st = _Stream(dev)
+        try:
+            st.read(int(rate * 0.1), keep=False)
+            x = st.read(min(int(rate * 0.2), nfft * 2000))
+        finally:
+            st.close()
+        frames = x[:len(x) // nfft * nfft].reshape(-1, nfft)
+        if not len(frames):
+            raise RuntimeError('no samples came')
+        spec = np.mean(np.abs(np.fft.fft(frames * np.hanning(nfft), axis=1)) ** 2, axis=0)
+        shapes.append(10 * np.log10(np.fft.fftshift(spec) + 1e-30))
+    shape = np.median(shapes, axis=0)
+    shape = np.median(np.lib.stride_tricks.sliding_window_view(np.pad(shape, 4, mode='edge'), 9), axis=1)
+    # The level: the middle half's, without the bins near DC (an RTL-SDR's DC hump is wide).
+    mid, guard = nfft // 2, nfft // 50
+    ref = np.median(np.r_[shape[mid - nfft // 4:mid - guard], shape[mid + guard + 1:mid + nfft // 4]])
+
+    def edge(direction):
+        """The outermost bin, walking in from Nyquist, where 3 in a row are at the level."""
+        for i in range(nfft // 2 - 3, guard, -1):
+            k = mid + direction * i
+            if np.all(shape[min(k, k + 2 * direction):max(k, k + 2 * direction) + 1] >= ref - PROFILE_FLAT_DB):
+                return i + 2
+        return guard
+
+    return min(edge(1), edge(-1)) * rate / nfft
+
+
+def probe_device(dev, say=None):
+    """Steps 1-4 on SoapySDR device dev: a dict for derive_profile. say(step, text)."""
+    say = say or (lambda step, text: None)
+    say(1, '')
+    caps = probe_caps(dev)
+    if not any(lo <= 87.5e6 and hi >= 108e6 for lo, hi, _ in caps['freq']):
+        raise SdrUnusable('it doesn\'t tune 87.5-108 MHz')
+    stage = _gain_stage(caps)
+    if not stage:
+        raise SdrUnusable('it has no gain control')
+    try:
+        dev.setGainMode(_RX, 0, False)
+    except Exception:  # noqa: BLE001 - (a radio with no AGC)
+        pass
+    dev.setFrequency(_RX, 0, 98.0e6)
+    _set_gain_fn(dev, stage)((stage.lo + stage.hi) / 2)
+    say(1, f'{caps["hardware"] or "?"}; gain: {stage.name or "overall"} {stage.lo:g}-{stage.hi:g} dB')
+    rate, value, bw, tried = probe_rates(dev, caps, say)
+    gain = probe_gain(dev, value, stage)
+    say(3, f'{gain:g} dB')
+    half = probe_flat(dev, value)
+    say(4, f'flat to \u00b1{half / 1e6:.2f} MHz')
+    return {'caps': caps, 'rate': rate, 'rate_value': value, 'bandwidth': bw, 'tried': tried,
+            'stage': asdict(stage), 'gain': gain, 'flat_half': half}
+
+
+def profile_probe(device, say=None):
+    """probe_device on the radio with SoapySDR device arguments `device` (in a helper)."""
+    _soapy_env()
+    import SoapySDR
+    dev = _retry(lambda: SoapySDR.Device(device))
+    return probe_device(dev, say)
+
+
+def close_test(device, rate):
+    """Open, stream and close the radio (in a helper): True, unless closing crashes the helper."""
+    _soapy_env()
+    import SoapySDR
+    dev = _retry(lambda: SoapySDR.Device(device))
+    dev.setSampleRate(_RX, 0, rate)
+    dev.setFrequency(_RX, 0, 98.0e6)   # (an RTL-SDR left at 0 Hz switches to direct sampling)
+    st = _Stream(dev)
+    got = st.read(int(rate * 0.5), keep=False, deadline=time.monotonic() + 5)
+    st.close()
+    dev.close()
+    return got    # (0: it opened but sent nothing: see profile_sdr)
+
+
+def cpu_check(profile, freq_hz, gain):
+    """% of one CPU core the process takes with one receiver on profile (in a helper)."""
+    p = profile_from_dict(profile)
+    SDRS[p.key] = p
+    use_sdr(p.key)
+    tb = FmMonitor({0: freq_hz}, tuple(gain))
+    tb.start()
+    deadline = time.monotonic() + 10
+    while not tb.stations[0].meter.last_update:
+        if time.monotonic() > deadline:
+            raise RuntimeError('no samples reached the receiver')
+        time.sleep(0.2)
+    time.sleep(3)
+    c0, t0 = time.process_time(), time.monotonic()
+    time.sleep(PROFILE_CPU_S)
+    cpu = round((time.process_time() - c0) / (time.monotonic() - t0) * 100)
+    if p.closes_cleanly:      # (else the helper exits without closing it)
+        tb.stop()
+        tb.wait()
+    return cpu
+
+
+def _floor_tenth(hz):
+    return round(math.floor(hz / 1e5 + 1e-9) * 1e5)
+
+
+def scan_centres(half_width):
+    """The fewest band-scan windows, each on an even tenth of a MHz and using
+    half_width either side, that cover 88.1-107.9 MHz."""
+    lo, hi = 88.1e6, 107.9e6
+    for n in range(1, 200):
+        centres = tuple(float(round((lo + (2 * k + 1) * (hi - lo) / (2 * n)) / 2e5) * 2e5) for k in range(n))
+        if all(any(abs(ch * 1e5 - c) <= half_width for c in centres) for ch in CHANNELS_MHZ10):
+            return centres
+    raise ValueError(f'no scan windows of \u00b1{half_width / 1e6:g} MHz cover the band')
+
+
+def sdr_name(found):
+    """A short name for a radio: its product, else its label without the serial."""
+    name = found.args.get('product') or (found.label.replace(found.serial, '') if found.serial else found.label)
+    return re.sub(r'[\s:\[\]()#-]+$', '', re.sub(r'^[\s:\[\]()#-]+', '', name)).strip() or found.driver
+
+
+def derive_profile(found, probe, closes_cleanly):
+    """The SdrProfile for radio found (a FoundSdr) from probe_device's measurements."""
+    rate, half = probe['rate'], min(probe['flat_half'], probe['rate'] / 2)
+    # A station's channel (+/-CHAN_PASS_HZ around it) must lie in the flat part, the
+    # station at most EDGE_HZ (span/2 + 150 kHz) from the centre, and inside Nyquist.
+    span = max(0, _floor_tenth(min(2 * (half - 150e3 - CHAN_PASS_HZ),
+                                   2 * (rate / 2 - 150e3 - CHAN_PASS_HZ - 35e3) - 0.1e6, 20.4e6)))
+    half_width = _floor_tenth(min(half - 0.2e6, rate / 2 - 0.25e6))   # (room for IBOC's sidebands)
+    if half_width < 0.2e6:
+        raise SdrUnusable(f'its window is too narrow (flat to \u00b1{half / 1e6:.2f} MHz)')
+    stage = GainStage(**probe['stage'])
+    device = f'driver={found.driver}' + (f',serial={found.serial}' if found.serial else '')
+    if found.driver == 'uhd':    # (gr-soapy takes only the rates its master clock divides to: see SDRS' B210)
+        device += f',master_clock_rate={rate:.0f}'
+    return SdrProfile(found.id, sdr_name(found), device,
+                      rate, float(probe['bandwidth']), float(span), scan_centres(half_width), float(half_width),
+                      (stage,), (min(max(probe['gain'], stage.lo), stage.hi),),
+                      hint='Is the {name} plugged in, with its driver, and no other program using it?',
+                      closes_cleanly=bool(closes_cleanly))
+
+
+def profile_sdr(found, progress=None, cancel=None):
+    """Profile radio `found` (a FoundSdr), each step in a helper process. Returns its
+    settings-file entry (save_learned): the profile, or the error that stopped it.
+    progress(step, text): step 1-7 (PROFILE_STEPS) and what it found. cancel: a
+    threading.Event; setting it stops the profiling (ProfileCancelled)."""
+    say = progress or (lambda step, text: None)
+    entry = {'version': PROFILER_VERSION, 'driver': found.driver, 'serial': found.serial, 'label': found.label,
+             'profiled': time.strftime('%Y-%m-%d %H:%M'), 'report': []}
+
+    def note(step, text):
+        if text:
+            entry['report'].append(f'{PROFILE_STEPS[step - 1]}: {text}')
+        say(step, text)
+
+    def from_child(line):
+        step, _, text = line.partition('|')
+        if step.isdigit():
+            note(int(step), text)
+
+    device = f'driver={found.driver}' + (f',serial={found.serial}' if found.serial else '')
+    if found.driver == 'uhd':
+        device += uhd_image_args()
+    try:
+        probe = _in_child('profile_probe', device, progress=from_child, cancel=cancel, timeout=240, what=found.label)
+        note(5, '')
+        clean = 0
+        for _ in range(PROFILE_CLOSES):
+            try:
+                got = _in_child('close_test', device, probe['rate_value'], cancel=cancel, timeout=30, what=found.label)
+            except ProfileCancelled:
+                raise
+            except RuntimeError:
+                continue     # (the helper crashed or hung closing it)
+            if not got:
+                raise RuntimeError('it stopped sending samples after it was closed and opened again: '
+                                   'unplug it, plug it in again, and profile it again')
+            clean += 1
+        note(5, f'{clean} of {PROFILE_CLOSES} closes clean'
+                + ('' if clean == PROFILE_CLOSES else ': it is never closed while the monitor runs'))
+        p = derive_profile(found, probe, clean == PROFILE_CLOSES)
+        note(6, '')
+        try:
+            cpu = _in_child('cpu_check', profile_to_dict(p), PROFILE_CPU_HZ, list(p.default_gain),
+                            cancel=cancel, timeout=60, what=found.label)
+        except ProfileCancelled:
+            raise
+        except RuntimeError as e:
+            raise RuntimeError(f'a receiver couldn\'t run on it: {e}') from None
+        entry['cpu'] = cpu
+        cores = os.cpu_count() or 1
+        note(6, f'{cpu}% of one core with one receiver'
+                + (f' (four would take {min(100, round(cpu * 4 / cores))}% of this PC\'s {cores} cores)'
+                   if cpu * 4 / cores > 50 else ''))
+        problems = profile_problems(p)
+        if problems:
+            raise RuntimeError('; '.join(problems))
+        entry['profile'] = profile_to_dict(p)
+        note(7, f'{p.name}: {sdr_summary(p)}')
+    except ProfileCancelled:
+        raise
+    except SdrUnusable as e:
+        entry['error'], entry['unusable'] = getattr(e, 'detail', str(e)), True
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:
+        entry['error'] = getattr(e, 'detail', str(e)) or type(e).__name__
+    return entry
 
 
 def pick_initial(found, n=3):
@@ -969,7 +1626,8 @@ def _sdr_direct(gain, center_hz=None):
     dev.setGainMode(SOAPY_SDR_RX, 0, False)
 
     def set_gain(*g):
-        SDR.apply_gain(lambda name, v: dev.setGain(SOAPY_SDR_RX, 0, name, v), g)
+        SDR.apply_gain(lambda name, v: dev.setGain(SOAPY_SDR_RX, 0, name, v) if name else
+                       dev.setGain(SOAPY_SDR_RX, 0, v), g)
 
     set_gain(*gain)
     if center_hz:
@@ -1339,7 +1997,7 @@ def make_source(center_hz, gain):
         src.set_bandwidth(0, SDR.bandwidth)
     src.set_frequency(0, center_hz)
     src.set_gain_mode(0, False)
-    SDR.apply_gain(lambda name, v: src.set_gain(0, name, v), gain)
+    SDR.apply_gain(lambda name, v: src.set_gain(0, name, v) if name else src.set_gain(0, v), gain)
     for key, value in SDR.settings:
         try:
             src.write_setting(key, value)
@@ -3657,7 +4315,7 @@ class FmMonitor(gr.top_block):
         tap = self.tap_iq()
 
         def set_gain(*g):
-            SDR.apply_gain(lambda name, v: self.src.set_gain(0, name, v), g)
+            SDR.apply_gain(lambda name, v: self.src.set_gain(0, name, v) if name else self.src.set_gain(0, v), g)
 
         try:
             freqs = [st.freq_hz for st in self.stations]
@@ -7847,6 +8505,113 @@ class NotifyForm(QtWidgets.QWidget):
         job['label'].setStyleSheet(f'color: {GREEN if ok else RED};')
 
 
+class SdrList(QtWidgets.QGroupBox):
+    """Settings' SDR section: each radio attached (and those profiled here that aren't
+    plugged in), what the monitor knows of it; look for radios, profile one, read its
+    profiling report, forget a profile. win: the MainWindow, which does the work."""
+
+    changed = QtCore.pyqtSignal()   # the profiles changed
+
+    STATUS = {'known': 'built-in profile', 'learned': 'profiled here', 'new': 'new: not profiled yet',
+              'failed': 'profiling failed', 'unusable': 'can\'t be used'}
+
+    def __init__(self, win):
+        super().__init__('SDRs')
+        self.win = win
+        layout = QtWidgets.QVBoxLayout(self)
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderLabels(['SDR', 'Status', 'Profile'])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setMinimumHeight(120)
+        self.tree.currentItemChanged.connect(lambda *_: self._buttons())
+        self.tree.itemDoubleClicked.connect(lambda *_: self._report())
+        layout.addWidget(self.tree)
+        row = QtWidgets.QHBoxLayout()
+        self.scan_btn = QtWidgets.QPushButton('Look for SDRs')
+        self.scan_btn.setToolTip('Find radios plugged in since the start (the SDR in use is left alone)')
+        self.profile_btn = QtWidgets.QPushButton('Profile…')
+        self.profile_btn.setToolTip('Measure this radio so the monitor can use it (about two minutes)')
+        self.report_btn = QtWidgets.QPushButton('Report…')
+        self.report_btn.setToolTip('What profiling it found')
+        self.forget_btn = QtWidgets.QPushButton('Forget')
+        self.forget_btn.setToolTip('Delete its profile: it is new again the next time it is plugged in')
+        for b, f in ((self.scan_btn, self._scan), (self.profile_btn, self._profile), (self.report_btn, self._report),
+                     (self.forget_btn, self._forget)):
+            b.clicked.connect(f)
+            row.addWidget(b)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.refresh()
+
+    def refresh(self):
+        inventory = self.win.sdr_inventory
+        rows = [(r, r.id if r.id in LEARNED else None) for r in inventory]
+        attached = {r.id for r in inventory}
+        rows += [(None, key) for key in LEARNED if key not in attached]
+        self.tree.clear()
+        for r, key in rows:
+            entry = LEARNED.get(key, {}) if key else {}
+            if r:
+                status = 'in use' if self.win._in_use(r) else self.STATUS[r.status]
+                label = r.label
+            else:
+                status = 'not plugged in'
+                label = entry.get('label', key)
+            pkey = r.key if r and r.usable else key if key in SDRS else None
+            profile = (f'{SDRS[pkey].name}, {sdr_summary(SDRS[pkey])}' if pkey else
+                       entry.get('error', '') or (r.note if r else ''))
+            item = QtWidgets.QTreeWidgetItem([label, status, profile])
+            item.setToolTip(2, profile)
+            item.setData(0, QtCore.Qt.UserRole, (r, key))
+            self.tree.addTopLevelItem(item)
+        for col in (0, 1):
+            self.tree.resizeColumnToContents(col)
+        self.scan_btn.setText('Looking…' if self.win._sdr_job else 'Look for SDRs')
+        self._buttons()
+
+    def _current(self):
+        item = self.tree.currentItem()
+        return item.data(0, QtCore.Qt.UserRole) if item else (None, None)
+
+    def _buttons(self):
+        r, key = self._current()
+        self.scan_btn.setEnabled(not self.win._sdr_job)
+        self.profile_btn.setEnabled(bool(r) and r.status != 'known' and not self.win._in_use(r))
+        self.report_btn.setEnabled(key in LEARNED)
+        self.forget_btn.setEnabled(key in LEARNED and key != SDR.key)
+
+    def _scan(self):
+        self.win.rescan_sdrs(done=self.refresh, ask=False)
+        self.refresh()
+
+    def _profile(self):
+        r, _ = self._current()
+        if r:
+            self.win.profile_sdr(r, offer_switch=False)
+            self.refresh()
+            self.changed.emit()
+
+    def _report(self):
+        _, key = self._current()
+        entry = LEARNED.get(key)
+        if not entry:
+            return
+        lines = [f'{entry.get("label", key)} ({key}), profiled {entry.get("profiled", "?")}', '']
+        lines += entry.get('report') or []
+        if entry.get('error'):
+            lines += ['', ('Can\'t be used: ' if entry.get('unusable') else 'Failed: ') + entry['error']]
+        QtWidgets.QMessageBox.information(self, APP_NAME, '\n'.join(lines))
+
+    def _forget(self):
+        _, key = self._current()
+        if key and QtWidgets.QMessageBox.question(
+                self, APP_NAME, f'Forget the profile of the {LEARNED[key].get("label", key)}? It is profiled again '
+                'the next time it is plugged in at a start.') == QtWidgets.QMessageBox.Yes:
+            self.win.forget_sdr(key)
+            self.refresh()
+            self.changed.emit()
+
+
 class AppSettingsDialog(QtWidgets.QDialog):
     """Notifications (email, webhook, which events), the SDR to prefer (sdr: 'auto'
     or an SDRS key; in_use: what this run found, for the note) and start with
@@ -7854,26 +8619,28 @@ class AppSettingsDialog(QtWidgets.QDialog):
 
     RUN_SETUP = 2
 
-    def __init__(self, parent, settings, notifier, sdr='auto', in_use='', record=False, keep_days=KEEP_DAYS):
+    def __init__(self, parent, settings, notifier, sdr='auto', in_use='', record=False, keep_days=KEEP_DAYS,
+                 win=None):
         super().__init__(parent)
         self.setWindowTitle(f'{APP_NAME} settings')
         self.setMinimumWidth(600)
         layout = QtWidgets.QVBoxLayout(self)
         self.form = NotifyForm(settings, notifier)
         layout.addWidget(self.form)
+        self.sdr_list = SdrList(win) if win else None
+        if self.sdr_list:
+            self.sdr_list.changed.connect(lambda: self._fill_sdr_box(self.sdr()))
+            layout.addWidget(self.sdr_list)
         row = QtWidgets.QHBoxLayout()
-        row.addWidget(QtWidgets.QLabel('SDR:'))
+        row.addWidget(QtWidgets.QLabel('SDR to use:'))
         self.sdr_box = QtWidgets.QComboBox()
-        self.sdr_box.addItem('Automatic: the widest window plugged in', 'auto')
-        for key, p in SDRS.items():
-            note = SetupWizard.SDR_NOTES.get(key, 'stations up to {span} apart').format(span=f'{p.span / 1e6:g} MHz')
-            self.sdr_box.addItem(f'{p.name} when plugged in ({note})', key)
-        self.sdr_box.setCurrentIndex(max(0, self.sdr_box.findData(sdr)))
+        self._fill_sdr_box(sdr)
         self.sdr_box.setToolTip('With more than one SDR plugged in, the one to use. If it isn\'t plugged in, '
                                 'whichever is. --sdr overrides it.')
         row.addWidget(self.sdr_box, 1)
         layout.addLayout(row)
-        note = QtWidgets.QLabel((f'In use now: {in_use}. ' if in_use else '') + 'A change applies at the next start.')
+        note = QtWidgets.QLabel((f'In use now: {in_use}. ' if in_use else '') + 'A change applies at the next start '
+                                '(or switch now with the SDR chip).')
         note.setWordWrap(True)
         note.setStyleSheet(f'color: {DIM};')
         layout.addWidget(note)
@@ -7908,6 +8675,15 @@ class AppSettingsDialog(QtWidgets.QDialog):
 
     def sdr(self):
         return self.sdr_box.currentData()
+
+    def _fill_sdr_box(self, sdr):
+        """The preference choices: automatic and each profile (built-in or learned)."""
+        self.sdr_box.clear()
+        self.sdr_box.addItem('Automatic: the widest window plugged in', 'auto')
+        for key, p in SDRS.items():
+            who = '' if key in BUILTIN_SDRS else f' {LEARNED.get(key, {}).get("serial", "")}'.rstrip()
+            self.sdr_box.addItem(f'{p.name}{who} when plugged in ({SetupWizard.sdr_note(key)})', key)
+        self.sdr_box.setCurrentIndex(max(0, self.sdr_box.findData(sdr)))
 
     def _accept(self):
         problems = self.form.problems()
@@ -8042,6 +8818,14 @@ class SetupWizard(QtWidgets.QWizard):
                  'rtlsdr': 'stations up to {span} apart: often only one or two',
                  'b210': 'the whole FM band at once; needs USB 3'}
 
+    @classmethod
+    def sdr_note(cls, key):
+        """'stations up to 7.2 MHz apart' and the like, for SDRS[key]."""
+        p = SDRS[key]
+        if key not in cls.SDR_NOTES:
+            return sdr_summary(p).split(', ', 1)[1]
+        return cls.SDR_NOTES[key].format(span=f'{p.span / 1e6:g} MHz')
+
     def _sdr(self):
         page = _WizardPage('Which SDR?',
                            'The receiver all the stations are taken from. One SDR window holds every open '
@@ -8055,18 +8839,41 @@ class SetupWizard(QtWidgets.QWizard):
         page.body.addWidget(auto)
         self.sdr_buttons['auto'] = auto
         for key, p in SDRS.items():
-            note = self.SDR_NOTES.get(key, 'stations up to {span} apart').format(span=f'{p.span / 1e6:g} MHz')
-            button = QtWidgets.QRadioButton(f'{p.name} — {p.rate / 1e6:g} MS/s, {note}')
+            who = '' if key in BUILTIN_SDRS else f' ({LEARNED.get(key, {}).get("label", key)}, profiled here)'
+            button = QtWidgets.QRadioButton(f'{p.name}{who} — {p.rate / 1e6:g} MS/s, {self.sdr_note(key)}')
             button.setChecked(key == self.cfg.sdr)
             group.addButton(button)
             page.body.addWidget(button)
             self.sdr_buttons[key] = button
         page.body.addSpacing(12)
+        row = QtWidgets.QHBoxLayout()
+        self.sdr_found_label = QtWidgets.QLabel('Plugged in now: (not looked yet)')
+        self.sdr_found_label.setWordWrap(True)
+        look = QtWidgets.QPushButton('Look for SDRs')
+        look.setToolTip('List the radios plugged in now (takes a few seconds)')
+        look.clicked.connect(self._look_for_sdrs)
+        row.addWidget(self.sdr_found_label, 1)
+        row.addWidget(look, 0, QtCore.Qt.AlignTop)
+        page.body.addLayout(row)
+        page.body.addSpacing(12)
         page.body.addWidget(self._note('A chosen SDR is used when it is plugged in; otherwise whichever is. '
                                        'Receivers that don’t fit a narrower SDR’s window aren’t opened. '
+                                       f'Any other SoapySDR radio is profiled (measured, about two minutes) the '
+                                       f'first time {APP_NAME} starts with it plugged in, and can then be chosen. '
                                        'Changed here, the SDR changes at the next start; --sdr overrides it.'))
         page.body.addStretch(1)
         return page
+
+    def _look_for_sdrs(self):
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            inventory = scan_sdrs(_in_child('enumerate_sdrs', timeout=90, what='SDR'))
+            text = ('\n'.join(r.describe() for r in inventory) or 'none (is the SDR plugged in, with its driver?)')
+        except RuntimeError as e:
+            text = f'could not look: {e}'
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self.sdr_found_label.setText(f'Plugged in now:\n{text}')
 
     def sdr(self):
         return next((k for k, b in self.sdr_buttons.items() if b.isChecked()), self.cfg.sdr)
@@ -8765,9 +9572,10 @@ def load_config(path):
     return out
 
 
-def save_config(path, panels, notify=None, app=None):
-    """Write the open receivers and their settings, the notification settings and
-    the app settings (atomically); a part given as None keeps what the file has."""
+def save_config(path, panels, notify=None, app=None, sdrs=None):
+    """Write the open receivers and their settings, the notification settings,
+    the app settings and the learned SDR profiles ({key: entry}, save_learned)
+    (atomically); a part given as None keeps what the file has."""
     try:
         with open(path, encoding='utf-8') as fh:
             data = json.load(fh)
@@ -8783,6 +9591,8 @@ def save_config(path, panels, notify=None, app=None):
         data['notify'] = notify.to_dict()
     if app is not None:
         data['app'] = app.to_dict()
+    if sdrs is not None:
+        data['sdrs'] = sdrs
     tmp = path + '.tmp'
     try:
         with open(tmp, 'w', encoding='utf-8') as fh:
@@ -9426,6 +10236,8 @@ class MainWindow(QtWidgets.QWidget):
         self._show_recording()
         self.chips['sdr'].setToolTip('The SDR in use: click to switch to another one plugged in')
         self.sdr_found = []    # [(SDRS key, serial, label)] attached at start-up, set by main()
+        self.sdr_inventory = []  # [FoundSdr]: every radio attached, from the start or the last scan_sdrs
+        self._sdr_job = None   # a radio scan running off the GUI thread (rescan_sdrs)
         self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr, _sdr_lost), else None
         self.restart_extra = []  # options for that restart (_sdr_lost: --recovering)
         top.addWidget(self.chip_row, 1)
@@ -9635,7 +10447,7 @@ class MainWindow(QtWidgets.QWidget):
     def _app_settings(self):
         app = self.app_config or AppConfig(setup_done=True)
         dialog = AppSettingsDialog(self, self.notify_settings, self.notifier, app.sdr, self.sdr_report,
-                                   self.recorder.on, app.keep_days)
+                                   self.recorder.on, app.keep_days, win=self)
         result = dialog.exec_()
         if result == AppSettingsDialog.RUN_SETUP:
             self.run_setup()
@@ -9713,26 +10525,142 @@ class MainWindow(QtWidgets.QWidget):
                      f'older than {days} days')
 
 
+    @staticmethod
+    def _in_use(r):
+        """Whether radio r (a FoundSdr) is the SDR the monitor is using."""
+        return r.usable and r.key == SDR.key and (not r.serial or f'serial={r.serial}' in SDR.device
+                                                  or 'serial=' not in SDR.device)
+
     def _sdr_menu(self):
-        """The SDR chip's drop-down: the SDRs found at start-up, to switch to."""
+        """The SDR chip's drop-down: the SDRs attached, to switch to; new ones to profile;
+        a scan for radios plugged in since."""
         menu = QtWidgets.QMenu(self)
         title = menu.addAction('Switch to (the monitor restarts on it and sets its gain):')
         title.setEnabled(False)
         busy = bool(self._recovery or self._cal)
-        for key, serial, label in self.sdr_found:
-            p = SDRS[key]
-            reach = SetupWizard.SDR_NOTES.get(key, 'stations up to {span} apart').format(span=f'{p.span / 1e6:g} MHz')
-            action = menu.addAction(f'{p.name}  ({reach})')
+        usable = [r for r in self.sdr_inventory if r.usable]
+        for r in usable:
+            p = SDRS[r.key]
+            action = menu.addAction(f'{p.name}  ({SetupWizard.sdr_note(r.key)})')
             action.setCheckable(True)
-            current = key == SDR.key and (not serial or f'serial={serial}' in SDR.device)
+            current = self._in_use(r)
             action.setChecked(current)
             action.setEnabled(not current and not busy)
-            action.setToolTip(label)
-            action.triggered.connect(lambda _=False, k=key: self.switch_sdr(k))
-        if len(self.sdr_found) < 2:
-            note = menu.addAction('No other SDR was plugged in at start-up')
+            action.setToolTip(r.label)
+            action.triggered.connect(lambda _=False, k=r.key: self.switch_sdr(k))
+        if len(usable) < 2:
+            note = menu.addAction('No other SDR it can use is plugged in')
             note.setEnabled(False)
+        others = [r for r in self.sdr_inventory if not r.usable]
+        if others:
+            menu.addSeparator()
+        for r in others:
+            if r.status == 'unusable':
+                action = menu.addAction(r.describe())
+                action.setEnabled(False)
+                continue
+            action = menu.addAction(f'Profile the {r.label}…  ({r.describe().split(": ", 1)[-1]})')
+            action.setEnabled(not busy and not self._sdr_job)
+            action.triggered.connect(lambda _=False, r=r: self.profile_sdr(r))
+        menu.addSeparator()
+        scan = menu.addAction('Looking for SDRs…' if self._sdr_job else 'Look for SDRs plugged in since')
+        scan.setEnabled(not self._sdr_job)
+        scan.triggered.connect(lambda: self.rescan_sdrs())
+        menu.addAction('SDR settings…').triggered.connect(self._app_settings)
         return menu
+
+    def rescan_sdrs(self, done=None, ask=True):
+        """Look for the radios attached now (in a helper process, off the GUI thread: the
+        SDR in use is left alone). New ones are logged and notified, and (ask) offered for
+        profiling. done(): called when the scan ends."""
+        if self._sdr_job:
+            return
+        job = self._sdr_job = {}
+
+        def run():
+            try:
+                job['found'] = _in_child('enumerate_sdrs', timeout=90, what='SDR')
+            except Exception as e:  # noqa: BLE001 - reported in the event log
+                job['error'] = e
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.log('SDR: looking for radios')
+
+        def poll():
+            if thread.is_alive():
+                QtCore.QTimer.singleShot(200, poll)
+                return
+            self._sdr_job = None
+            if 'error' in job:
+                self.log(f'SDR: looking for radios failed: {job["error"]}')
+            else:
+                before = {r.id for r in self.sdr_inventory}
+                inventory = scan_sdrs(job['found'])
+                if not any(self._in_use(r) for r in inventory):   # (one in use may not be listed)
+                    inventory += [r for r in self.sdr_inventory if self._in_use(r)]
+                self._set_inventory(inventory)
+                self.log('SDR: attached: ' + '; '.join(('in use: ' if self._in_use(r) else '') + r.describe()
+                                                       for r in inventory))
+                for r in [r for r in inventory if r.id not in before]:
+                    self.notifier.event('sdr', f'New SDR found: {r.describe()}')
+            if done:
+                done()
+            if ask and 'found' in job:
+                for r in [r for r in self.sdr_inventory if r.status == 'new']:
+                    if QtWidgets.QMessageBox.question(
+                            self, APP_NAME, f'New SDR found: {r.label}.\n\nProfile it now? {APP_NAME} measures it '
+                            'once (about two minutes) so it can use it; the monitor keeps running meanwhile.'
+                    ) == QtWidgets.QMessageBox.Yes:
+                        self.profile_sdr(r)
+
+        QtCore.QTimer.singleShot(200, poll)
+
+    def _set_inventory(self, inventory):
+        self.sdr_inventory = inventory
+        self.sdr_found = find_sdrs(inventory)
+        self._update_window()
+
+    def profile_sdr(self, r, offer_switch=True):
+        """Profile radio r (a FoundSdr) with a progress dialog, save and log it, and offer to switch to it."""
+        if self._in_use(r):
+            QtWidgets.QMessageBox.information(
+                self, APP_NAME, f'The {r.label} is in use. To profile it again, switch to another SDR first, or '
+                f'close {APP_NAME} and run it with --profile-sdr {r.serial or r.id}.')
+            return
+        self.log(f'SDR: profiling the {r.label}')
+        try:
+            entry = run_profile_dialog(self, r)
+        except Exception as e:  # noqa: BLE001 - reported in the event log
+            self.log(f'SDR: profiling the {r.label} failed: {e}')
+            return
+        if entry is None:
+            self.log(f'SDR: profiling the {r.label} cancelled')
+            return
+        if self.config_path:
+            save_learned(self.config_path, r.id, entry)
+        text = profile_event(r, entry)
+        self.log(f'SDR: {text}')
+        self.notifier.event('sdr', text)
+        self._set_inventory(scan_sdrs([x.args for x in self.sdr_inventory]))
+        if entry.get('profile') and offer_switch and r.id in SDRS and not self._recovery:
+            self.switch_sdr(r.id)        # (asks first)
+        elif not entry.get('profile'):
+            QtWidgets.QMessageBox.warning(self, APP_NAME, text[0].upper() + text[1:])
+
+    def forget_sdr(self, key):
+        """Delete learned profile `key`; the radio is new again the next time it is seen."""
+        if key == SDR.key:
+            QtWidgets.QMessageBox.information(self, APP_NAME, 'That SDR is in use: switch to another one first.')
+            return
+        label = LEARNED.get(key, {}).get('label', key)
+        if self.config_path:
+            save_learned(self.config_path, key, None)
+        if self.app_config and self.app_config.sdr == key:
+            self.app_config = replace(self.app_config, sdr='auto')
+            self.save()
+        self.log(f'SDR: forgot the profile of the {label}')
+        self._set_inventory(scan_sdrs([x.args for x in self.sdr_inventory]))
 
     def switch_sdr(self, key):
         """Restart the monitor on SDR `key` (asked first): a new SDR has its own sample
@@ -10153,7 +11081,9 @@ class MainWindow(QtWidgets.QWidget):
         c = self.tb.center_hz
         lo, hi = self.tb.window_hz()
         window = f'{lo / 1e6:.1f}\u2013{hi / 1e6:.1f} MHz'
-        chips = {'sdr': f'{SDR.name}  {c / 1e6:.2f} MHz  ▾', 'window': f'Window {window}',
+        waiting = sum(r.status == 'new' for r in self.sdr_inventory)
+        chips = {'sdr': f'{SDR.name}  {c / 1e6:.2f} MHz' + (f'  ·  {waiting} new SDR' if waiting else '') + '  ▾',
+                 'window': f'Window {window}',
                  'rate': f'{SAMP_RATE / 1e6:.1f} MS/s', 'gain': self._gain_text(),
                  'found': f'{self.n_found} stations found' if self.scanned else 'no scan'}
         for key, text in chips.items():
@@ -10321,6 +11251,7 @@ class MainWindow(QtWidgets.QWidget):
         state = {
             'ready': True, 'app': APP_NAME, 'time': time.strftime('%H:%M:%S'),
             'chips': [self.chips[k].text().rstrip(' ▾') for k in ('sdr', 'window', 'rate', 'gain', 'found')],
+            'sdrs': [('In use: ' if self._in_use(r) else '') + r.describe() for r in self.sdr_inventory],
             'add': {'enabled': self.add_btn.isEnabled(), 'tip': self.add_btn.toolTip()},
             'calibrating': bool(self._cal),
             'antenna': self._antenna_state(),
@@ -10470,11 +11401,20 @@ def build_parser(width=100):
     ap.add_argument('--recovering', action='store_true', help=argparse.SUPPRESS)  # (restarted: the SDR was lost)
     ap.add_argument('--no-scan', action='store_true',
                     help='skip the band scan; dropdowns then list every channel')
-    ap.add_argument('--sdr', choices=['auto'] + list(SDRS),
-                    help='the SDR: auto (whichever is attached; with several, the widest window), or '
+    ap.add_argument('--sdr', type=str.lower,
+                    help='the SDR: auto (whichever is attached; with several, the widest window), '
                          + ', '.join(f'{k} ({p.name}, {p.rate / 1e6:g} MS/s, stations within '
-                                     f'{p.span / 1e6:g} MHz)' for k, p in SDRS.items())
-                         + ', which must then be attached (default: as set in Setup, else auto)')
+                                     f'{p.span / 1e6:g} MHz)' for k, p in SDRS.items() if k in BUILTIN_SDRS)
+                         + ', or a profiled SDR\'s key (--scan-sdrs lists them), which must then be '
+                           'attached (default: as set in Setup, else auto)')
+    ap.add_argument('--scan-sdrs', action='store_true',
+                    help='list the SDRs attached (known, profiled here, or new) and exit')
+    ap.add_argument('--profile-sdr', metavar='SDR',
+                    help='profile the attached SDR with this serial or key (also one already profiled, '
+                         'or a built-in kind, to compare) and exit; the monitor must not be using it')
+    ap.add_argument('--no-sdr-profile', action='store_true',
+                    help='don\'t profile new SDRs at the start (they are listed, and can be profiled '
+                         'from Settings or the SDR chip)')
     sdrplay = SDRS['rsp1a']
     ap.add_argument('--lna', type=int, help='SDRplay LNA state 0-9, higher = less gain (default: calibrated at '
                                             f'start-up; {sdrplay.default_gain[0]} if only --ifgr is given)')
@@ -10553,6 +11493,9 @@ def resolve_args(args, app):
     args.web_bind = args.web_bind or app.web_bind
     args.web_password_hash = app.web_password_hash
     args.sdr_required = bool(args.sdr)   # --sdr names one that must be attached; Setup's is a preference
+    if args.sdr and args.sdr != 'auto' and args.sdr not in SDRS:
+        build_parser().error(f'--sdr {args.sdr}: not a built-in or profiled SDR (have: auto, '
+                             + ', '.join(SDRS) + '; --scan-sdrs lists the SDRs attached)')
     args.sdr = args.sdr or app.sdr       # 'auto' or an SDRS key; main() looks for what is attached
     if args.sdr != 'auto':
         configure_sdr(args, args.sdr)
@@ -10584,7 +11527,9 @@ def detect_sdr(args, progress=None):
     return a line for the log saying which, and why. progress(text): while waiting
     for a lost SDR to come back (--recovering)."""
     service = sdrplay_service_state(SDRPLAY_SERVICE_WAIT_S)
-    found = args.sdr_found = find_sdrs()
+    if getattr(args, 'sdr_inventory', None) is None:
+        args.sdr_inventory = scan_sdrs()
+    found = args.sdr_found = find_sdrs(args.sdr_inventory)
     if args.after_pid:   # switched to: the old monitor has only just let go of it, so look again
         args.sdr_required = False   # (and rather than not start, fall back to what's there)
         since = time.monotonic()
@@ -10600,7 +11545,8 @@ def detect_sdr(args, progress=None):
                 progress(f'Waiting for the {SDRS[args.sdr].name} to come back… ({waited:.0f} s)')
             time.sleep(2 if look < SWITCH_LOOKS else 5)
             service = sdrplay_service_state(SDRPLAY_SERVICE_WAIT_S)
-            found = args.sdr_found = find_sdrs()
+            args.sdr_inventory = scan_sdrs()
+            found = args.sdr_found = find_sdrs(args.sdr_inventory)
     if service == 'stopped' and not any(k.startswith('rsp') for k, _, _ in found):
         found_note = (f'the SDRplay API service didn\'t start within {SDRPLAY_SERVICE_WAIT_S} s, '
                       'so no RSP could be found')
@@ -10622,6 +11568,119 @@ def detect_sdr(args, progress=None):
            'found automatically' if args.sdr == 'auto' else 'as set in Setup')
     return (f'{label} ({how})' + (f'; also attached: {", ".join(others)}' if others else '')
             + (f'; {found_note}' if found_note else ''))
+
+
+def profile_event(found, entry):
+    """The log line and notification for a radio profiled (entry: profile_sdr's)."""
+    if entry.get('profile'):
+        p = profile_from_dict(entry['profile'])
+        return (f'SDR {found.label} profiled: {p.name}, {sdr_summary(p)}'
+                + (f', {entry["cpu"]}% of a CPU core per receiver' if 'cpu' in entry else '')
+                + ('' if p.closes_cleanly else '; it is never closed while the monitor runs'))
+    return (f'SDR {found.label} ' + ('can\'t be used' if entry.get('unusable') else 'could not be profiled')
+            + f': {entry.get("error", "?")}')
+
+
+def run_profile_dialog(parent, found, cancel_text='Cancel'):
+    """profile_sdr(found) with a progress dialog (the GUI keeps running meanwhile).
+    Returns its entry, or None if cancelled."""
+    dialog = QtWidgets.QProgressDialog(parent)
+    dialog.setWindowTitle(APP_NAME)
+    dialog.setRange(0, len(PROFILE_STEPS))
+    dialog.setCancelButtonText(cancel_text)
+    dialog.setAutoClose(False)
+    dialog.setAutoReset(False)
+    dialog.setMinimumDuration(0)
+    dialog.setMinimumWidth(560)
+    dialog.setWindowModality(QtCore.Qt.ApplicationModal)
+    head = (f'Profiling the {found.label}…\n{APP_NAME} measures a new SDR once (its sample rate, filter, '
+            'gain and CPU load) so it can use it. This takes about two minutes.')
+    state = {'step': 1, 'text': '', 'entry': None, 'error': None, 'done': False}
+    cancel = threading.Event()
+
+    def progress(step, text):
+        state['step'], state['text'] = step, text
+
+    def work():
+        try:
+            state['entry'] = profile_sdr(found, progress, cancel)
+        except ProfileCancelled:
+            pass
+        except Exception as e:  # noqa: BLE001 - shown by the caller
+            state['error'] = e
+        finally:
+            state['done'] = True
+
+    dialog.canceled.connect(cancel.set)
+    threading.Thread(target=work, daemon=True).start()
+    dialog.show()
+    while not state['done']:
+        if dialog.wasCanceled():
+            cancel.set()
+        step = state['step']
+        dialog.setValue(step - 1)
+        dialog.setLabelText('Stopping…' if cancel.is_set() else
+                            f'{head}\n\nStep {step} of {len(PROFILE_STEPS)}: {PROFILE_STEPS[step - 1]}…'
+                            + (f'\n{state["text"]}' if state['text'] else ''))
+        QtWidgets.QApplication.processEvents()
+        time.sleep(0.05)
+    cancelled = cancel.is_set()
+    dialog.canceled.disconnect()   # (closing it emits canceled too)
+    dialog.close()
+    if state['error']:
+        raise state['error']
+    return None if cancelled else state['entry']
+
+
+def profile_new_sdrs(args):
+    """At the start: profile each new radio in args.sdr_inventory (a dialog shows it,
+    Skip leaves it for later), save the profiles, and classify the radios again.
+    Returns lines for the log and notifications."""
+    events = []
+    for r in [r for r in args.sdr_inventory if r.status == 'new']:
+        entry = run_profile_dialog(None, r, 'Skip: profile it later')
+        if entry is None:
+            events.append(f'new SDR found: {r.label}; not profiled yet (skipped). Profile it from the SDR '
+                          'chip or Settings.')
+            continue
+        save_learned(args.config, r.id, entry)
+        events.append('new ' + profile_event(r, entry))
+    args.sdr_inventory = scan_sdrs([r.args for r in args.sdr_inventory])
+    return events
+
+
+def sdr_cli(args):
+    """--scan-sdrs and --profile-sdr: the exit code."""
+    inventory = scan_sdrs()
+    if args.scan_sdrs:
+        print('No radios found.' if not inventory else
+              '\n'.join(f'{r.status:9} {r.key or r.id:28} {r.describe()}' for r in inventory))
+        return 0
+    want = args.profile_sdr.lower()
+    r = next((r for r in inventory if want in (r.serial.lower(), r.id, r.key)), None)
+    if not r:
+        print(f'No radio attached with the serial or key {args.profile_sdr}. Attached:\n'
+              + '\n'.join(f'  {r.serial or "-":20} {r.id:28} {r.label}' for r in inventory))
+        return 1
+    print(f'Profiling {r.label} ({r.id})', flush=True)
+    entry = profile_sdr(r, lambda step, text: print(f'[{step}/{len(PROFILE_STEPS)}] {PROFILE_STEPS[step - 1]}'
+                                                    + (f': {text}' if text else ''), flush=True))
+    print(profile_event(r, entry))
+    if entry.get('profile'):
+        p = profile_from_dict(entry['profile'])
+        print(f'  rate {p.rate / 1e6:g} MS/s, filter {p.bandwidth / 1e6:g} MHz, span {p.span / 1e6:g} MHz, '
+              f'scan {", ".join(f"{c / 1e6:g}" for c in p.scan_centers)} MHz ±{p.scan_half_width / 1e6:g}, '
+              f'{p.gain_text(p.default_gain)} ({p.stages[0].lo:g}-{p.stages[0].hi:g}), '
+              f'closes cleanly: {p.closes_cleanly}')
+    if r.status == 'known':
+        b = SDRS[r.key]
+        print(f'  built-in {b.name}: rate {b.rate / 1e6:g} MS/s, filter {b.bandwidth / 1e6:g} MHz, '
+              f'span {b.span / 1e6:g} MHz, scan ±{b.scan_half_width / 1e6:g} MHz '
+              '(a built-in kind keeps its own profile: this one is not saved)')
+    else:
+        save_learned(args.config, r.id, entry)
+        print(f'Saved in {args.config} as {r.id}.')
+    return 0 if entry.get('profile') else 1
 
 
 def first_run_setup(args):
@@ -10736,6 +11795,9 @@ def main():
     if sys.argv[1:2] == ['--child-call']:   # a helper process for _in_child, not the monitor
         _child_call(sys.argv[2])
     args = parse_args()
+    load_learned(args.config)
+    if args.scan_sdrs or args.profile_sdr:
+        sys.exit(sdr_cli(args))
     if args.after_pid:
         wait_for_exit(args.after_pid)
     clear_cache(stale=True)  # caches left by a session that didn't close cleanly
@@ -10758,6 +11820,16 @@ def main():
             splash.showMessage(f'{text}\n', QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter, QtGui.QColor('#9aa0a6'))
             app.processEvents()
 
+        args.sdr_inventory = scan_sdrs()
+        new = [r for r in args.sdr_inventory if r.status == 'new']
+        sdr_events = []
+        if new and not (args.no_sdr_profile or args.recovering or args.after_pid):
+            splash.hide()       # (it stays on top of the profiling dialog)
+            sdr_events = profile_new_sdrs(args)
+            splash.show()
+            app.processEvents()
+        elif new and args.no_sdr_profile:
+            sdr_events = [f'new SDR found: {r.label}; not profiled (--no-sdr-profile)' for r in new]
         sdr_report = detect_sdr(args, waiting)
         print('SDR:', sdr_report, flush=True)
         saved = {} if args.freqs else load_config(args.config)
@@ -10798,10 +11870,15 @@ def main():
     win.args = args
     win.sdr_report = sdr_report
     win.sdr_found = args.sdr_found
+    win.sdr_inventory = args.sdr_inventory
     win.app_config = app_cfg
     win.set_recording(app_cfg.record, save=False)
     win.prune()
     win.set_notify(load_notify(args.config))
+    for text in sdr_events:
+        win.log(f'SDR: {text}')
+        win.notifier.event('sdr', text[0].upper() + text[1:])
+    win._update_window()   # (the SDR chip counts radios not profiled yet)
     win.save()
     # Windows only knows the frame size once the window exists, so open it
     # invisible, centre it, then reveal it: it never appears anywhere else.

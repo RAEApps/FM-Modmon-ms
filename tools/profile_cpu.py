@@ -1,6 +1,8 @@
-r"""Where FM-Modmon-ms spends its CPU, on the real RSP1A.
+r"""Where FM-Modmon-ms spends its CPU, on a real SDR (the one the monitor would
+use; --sdr picks another, a profiled one too). The SDR profiler's CPU step
+(cpu_check) gives only the total for one receiver; this splits it up.
 
-Close the monitor first (this needs the RSP1A), then:
+Close the monitor first (this needs the SDR), then:
 
     C:\ProgramData\radioconda\python.exe tools\profile_cpu.py
 

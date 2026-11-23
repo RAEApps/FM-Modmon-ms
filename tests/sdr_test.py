@@ -200,7 +200,30 @@ app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class Win(QtWidgets.QWidget):   # what MainWindow._sdr_menu uses
-    _recovery = _cal = None
+    _recovery = _cal = _sdr_job = None
+    _in_use = staticmethod(rm.MainWindow._in_use)
+    sdr_inventory = []
+
+    @property
+    def sdr_found(self):
+        return rm.find_sdrs(self.sdr_inventory)
+
+    @sdr_found.setter
+    def sdr_found(self, records):   # (the tests give enumerate() records)
+        self.sdr_inventory = rm.scan_sdrs(records)
+
+    def rescan_sdrs(self):
+        pass
+
+    def profile_sdr(self, r):
+        pass
+
+    def _app_settings(self):
+        pass
+
+
+def found_list(*records):   # noqa: F811 - (for the menu: the records themselves)
+    return list(records)
 
 
 win = Win()
@@ -217,6 +240,15 @@ check('switch menu: nothing offered while calibrating', not any(a.isEnabled() fo
 win._cal, win.sdr_found = None, found_list(B210)
 notes = [a.text() for a in rm.MainWindow._sdr_menu(win).actions() if not a.isCheckable()]
 check('switch menu: says when nothing else is plugged in', any('No other SDR' in t for t in notes), notes)
+AIRSPY = {'driver': 'airspy', 'label': 'AirSpy One [a74068c82f5a5853]', 'serial': 'a74068c82f5a5853'}
+win.sdr_found = found_list(B210, AIRSPY, {'driver': 'audio', 'label': 'Speakers'})
+texts = [a.text() for a in rm.MainWindow._sdr_menu(win).actions()]
+check('switch menu: a new SDR is offered for profiling', any(t.startswith('Profile the AirSpy One') for t in texts), texts)
+check('switch menu: sound cards aren\'t SDRs', not any('Speakers' in t for t in texts))
+check('switch menu: look for SDRs plugged in since', any(t.startswith('Look for SDRs') for t in texts))
+for key in rm.BUILTIN_SDRS:
+    problems = rm.profile_problems(rm.SDRS[key])
+    check(f'{rm.SDRS[key].name}: profile_problems passes it', not problems, problems)
 rm.use_sdr('rsp1a')
 
 print('\nall ok' if not bad else f'\n{len(bad)} WRONG')

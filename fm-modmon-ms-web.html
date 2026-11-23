@@ -1447,8 +1447,11 @@ function render(s) {
   state = s; control = s.access.control;
   renderAccess(s.access);
   document.title = s.receivers.map(r => r.title).join(' · ') + ' – FM-Modmon-ms';
-  const chips = $('#chips'), sig = JSON.stringify(s.chips);
-  if (chips._sig !== sig) { chips._sig = sig; chips.replaceChildren(...s.chips.map(c => h('span', 'chip', c))); chips.style.display = 'contents'; }
+  const chips = $('#chips'), sig = JSON.stringify([s.chips, s.sdrs]);
+  if (chips._sig !== sig) {
+    chips._sig = sig; chips.replaceChildren(...s.chips.map(c => h('span', 'chip', c))); chips.style.display = 'contents';
+    if (s.sdrs && chips.firstChild) chips.firstChild.title = 'SDRs plugged in:\n' + s.sdrs.join('\n');  /* (switched and profiled on the monitor's PC) */
+  }
   const cal = $('#cal');
   cal.disabled = !control || s.calibrating || !!s.antenna;
   setText(cal, s.calibrating ? '⟲  Calibrating…' : '⟲  Recalibrate gain');
