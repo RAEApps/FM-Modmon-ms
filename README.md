@@ -54,7 +54,9 @@ Per station, refreshed 10× a second:
 Normal readings are grey; amber means abnormal or not judged, red out of limits or an
 alarm (ISA-101 high-performance HMI). Each station row has peak modulation against the
 limit in force with a 2 s peak hold, RF and AM bars, a 5-minute sparkline and an
-annunciator with every alarm in a fixed place (raised, holding off, not judged, off).
+annunciator with every alarm in a fixed place (raised, holding off, not judged, off). A
+status cell at the row's left shows its most urgent alarm's priority, and the row turns red
+while one of its alarms waits to be acknowledged (see Alarms).
 The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
 Audio cards, listing what a station doesn't carry once instead of as dashes, and a History
 tab: the readings as stacked strips over 1 minute to 1 hour with one cursor across them.
@@ -83,6 +85,20 @@ the limit, carrier frequency out of tolerance), each limit adjustable per receiv
 | Pilot | 8–10%, 19 kHz ± 2 Hz | same |
 | Subcarriers | ≤ 20% total in stereo, 30% in mono; ≤ 10% above 75 kHz | ≤ 20% total in stereo or mono; ≤ 10% above 76 kHz |
 | Carrier frequency | ± 2000 Hz | ± 1000 Hz |
+
+**Priorities.** Each alarm has a priority, set per receiver in its settings: **1** (red
+square: carrier, silence, wrong PI), **2** (yellow triangle: over-deviation, pilot lost, RDS,
+AUX, alert) or **3** (cyan diamond: the rest). The shape and number go with the colour
+everywhere, so they read apart without it.
+
+**Acknowledging** (as ISA-18.2). Every alarm waits to be acknowledged, also after it has
+cleared, so a burst at 03:00 is still there in the morning. While one waits, a banner under
+the header shows the most urgent, the receiver's row is red and its lamp has a white ring;
+a cleared alarm keeps its lamp's outline until acknowledged. Acknowledge from the banner
+(one, or all), the Ack column of the Alarms tab (or its right-click menu), or by
+right-clicking a lamp or a row; the web page does the same (with the controls), and the
+log records when and from where. Settings can sound a tone every 4 s while a priority 1
+alarm waits (off by default); the web page has its own Sound switch.
 
 Alarms go to the event log and optionally to email (SMTP) and webhooks (JSON, Slack,
 Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout, and warns of ADC
@@ -346,6 +362,8 @@ C:\ProgramData\radioconda\python.exe tests\verify_meas.py
 C:\ProgramData\radioconda\python.exe tests\rules_test.py
 ```
 
+`tests\alarm_ack_test.py` checks alarm priorities and acknowledging (lamp states, the row's
+status cell, the banner, the log, the web command and the alarm sound).
 `tests\setup_test.py` checks the setup wizard, the password hash, Credential Manager and
 the web sign-in. `tests\radiovis_test.py` checks the RadioDNS slideshow (SSE, HTTP and
 Stomp, SRV failover, trigger times, bad slides) against local fake servers.

@@ -122,8 +122,8 @@ lamps = p.annunciator.states
 check('AUX: the annunciator lights AUX, not RDS', lamps.get('BACKUP') == 'raised' and lamps.get('RDS') == 'clear'
       and rm.Annunciator.SHORT['BACKUP'] == 'AUX', lamps)
 check('AUX: the event names the AUX transmitter and what is fine',
-      [(d, up) for d, up, _ in changes] == [('possibly on the auxiliary/backup transmitter, without RDS (AUX)', True)]
-      and 'auxiliary/backup transmitter, without RDS' in changes[0][2] and 'pilot' in changes[0][2], changes)
+      [(d, up) for _, d, up, _ in changes] == [('possibly on the auxiliary/backup transmitter, without RDS (AUX)', True)]
+      and 'auxiliary/backup transmitter, without RDS' in changes[0][3] and 'pilot' in changes[0][3], changes)
 check('AUX: logged in the history', [(n, up) for _, n, up in p.history.alarm_log] == [('BACKUP', True)],
       list(p.history.alarm_log))
 states = settle(p, rds_seen=True, alarms={'BACKUP': False})
