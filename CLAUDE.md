@@ -26,6 +26,9 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
 - `tests\alarm_ack_test.py` covers alarm priorities and acknowledgement. The alarm log (`AlarmTable.episodes`)
   is the one record of what waits to be acknowledged; `MainWindow._sync_unacked` copies it to each
   receiver's `alarms.unacked` for its lamps, status cell and row tint. Run it after touching alarms.
+- `tests\theme_test.py` holds the visual system: every colour in the GUI code and the web page must be a
+  `THEME` value (add a token, don't add a hex), type sizes from `TYPE`, corners from `RADIUS`, no emoji,
+  and the text colours' contrast. The stylesheet is `APP_QSS` with `%token%` placeholders (`app_qss()`).
 - `tests\inventory_test.py` covers the SDR inventory and profiler (a simulated radio; no SDR needed).
   On hardware: `fm-modmon-ms.py --scan-sdrs` and `--profile-sdr SERIAL --config <a copy>` (a built-in kind
   is printed beside its built-in profile, not saved).

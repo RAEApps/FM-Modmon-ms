@@ -52,7 +52,11 @@ Per station, refreshed 10× a second:
 ## The window
 
 Normal readings are grey; amber means abnormal or not judged, red out of limits or an
-alarm (ISA-101 high-performance HMI). Each station row has peak modulation against the
+alarm, and blue selected or clickable (ISA-101 high-performance HMI). The window and the
+web page draw from one palette (`THEME`), four type sizes and square 3 px corners; readings
+are set in Consolas, whose digits keep their width as values change. The header holds the
+status line (SDR, gain, recording), the player, Settings and a Tools menu (recalibrate the
+gain, tune the antenna). Each station row has peak modulation against the
 limit in force with a 2 s peak hold, RF and AM bars, a 5-minute sparkline and an
 annunciator with every alarm in a fixed place (raised, holding off, not judged, off). A
 status cell at the row's left shows its most urgent alarm's priority, and the row turns red
@@ -110,7 +114,7 @@ stations' alarms are held until it clears).
 
 ## Antenna tuning
 
-**Antenna tune** (at the top of the window or the web page) helps get the most from an antenna:
+**Antenna tune** (the window's Tools menu, or the web page's button) helps get the most from an antenna:
 its length, position, direction, or which antenna to use. It holds the gain where it is and
 measures each open station's S/N over the noise floor five times a second. The **score** is the
 weakest station's S/N, because the monitor is only as good as its worst station. Each bar has a
