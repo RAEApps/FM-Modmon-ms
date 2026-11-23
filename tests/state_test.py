@@ -203,5 +203,83 @@ src = sources(p)
 check('no nrsc5: IBOC disabled', not src['iboc0']['enabled'] and 'nrsc5' in src['iboc0']['tip'], src['iboc0'])
 check('analog never greyed', not src['analog']['dim'] and src['analog']['enabled'], src['analog'])
 
+# The detail view sits right under the row of the receiver it shows.
+host = QtWidgets.QWidget()
+win = types.SimpleNamespace(rows_box=QtWidgets.QVBoxLayout(host), details=QtWidgets.QStackedWidget(), panels=[],
+                            selected=None)
+win.rows_box.addWidget(win.details)
+for slot in range(3):
+    p = types.SimpleNamespace(slot=slot, row=rm.StationRow(), detail=QtWidgets.QWidget(), window=None)
+    win.panels.append(p)
+    win.rows_box.removeWidget(win.details)
+    win.rows_box.insertWidget(slot, p.row)
+    win.details.addWidget(p.detail)
+for name in ('focus', '_place_details'):
+    setattr(win, name, types.MethodType(getattr(rm.MainWindow, name), win))
+win._sync_player = lambda: None     # (the header's player: checked below)
+
+
+def layout_order():
+    items = [win.rows_box.itemAt(i).widget() for i in range(win.rows_box.count())]
+    return ['detail' if w is win.details else f'row{next(p.slot for p in win.panels if p.row is w)}' for w in items]
+
+
+for sel, want, title in ((0, ['row0', 'detail', 'row1', 'row2'], 'detail under the first row when it is selected'),
+                         (2, ['row0', 'row1', 'row2', 'detail'], '...under the last row when that is selected'),
+                         (1, ['row0', 'row1', 'detail', 'row2'], '...and back up under the middle one')):
+    win.focus(win.panels[sel])
+    check(title, layout_order() == want, layout_order())
+# popped out: its window is raised, and the detail stays under the receiver it still shows
+win.panels[0].window = types.SimpleNamespace(raise_=lambda: None, activateWindow=lambda: None)
+win.focus(win.panels[0])
+check('a popped-out receiver leaves the detail where it is', layout_order() == ['row0', 'row1', 'detail', 'row2'],
+      layout_order())
+
+# The header's player plays the selected receiver; selecting another while listening switches to it.
+plays = []
+pwin = types.SimpleNamespace(listen_btn=QtWidgets.QPushButton(), listen_label=QtWidgets.QLabel(), panels=[],
+                             selected=None)
+pwin.listen_btn.setCheckable(True)
+for slot in range(2):
+    p = types.SimpleNamespace(slot=slot, play=QtWidgets.QPushButton(), source=QtWidgets.QComboBox(),
+                              station=types.SimpleNamespace(freq_hz=(94.5e6, 101.7e6)[slot]),
+                              title=('94.5 ONE', '101.7 TWO')[slot])
+    p.play.setCheckable(True)
+    pwin.panels.append(p)
+for name in ('_sync_player', '_listen'):
+    setattr(pwin, name, types.MethodType(getattr(rm.MainWindow, name), pwin))
+
+
+def on_play(panel, on):   # MainWindow._on_play: one at a time, then the player follows
+    plays.append((panel.slot, on))
+    if on:
+        for q in pwin.panels:
+            if q is not panel and q.play.isChecked():
+                q.play.setChecked(False)
+    pwin._sync_player()
+
+
+for p in pwin.panels:
+    p.play.toggled.connect(lambda on, p=p: on_play(p, on))
+pwin.listen_btn.toggled.connect(lambda on: pwin._listen(on))   # (as MainWindow wires it)
+pwin.selected = pwin.panels[0]
+pwin._sync_player()
+check('player: the selected receiver\'s source shows, the other\'s is hidden',
+      (pwin.panels[0].source.isHidden(), pwin.panels[1].source.isHidden()) == (False, True))
+pwin.listen_btn.setChecked(True)
+check('player: Listen plays the selected receiver', [p.play.isChecked() for p in pwin.panels] == [True, False])
+check('...and says which, the button now Stop', (pwin.listen_label.text(), pwin.listen_btn.text())
+      == ('Rx 1 · 94.5 ONE', '■  Stop'), (pwin.listen_label.text(), pwin.listen_btn.text()))
+pwin.selected = pwin.panels[1]
+pwin._sync_player()
+check('player: selecting another receiver while listening switches the audio to it',
+      [p.play.isChecked() for p in pwin.panels] == [False, True] and pwin.listen_label.text() == 'Rx 2 · 101.7 TWO',
+      ([p.play.isChecked() for p in pwin.panels], pwin.listen_label.text()))
+pwin.listen_btn.setChecked(False)
+check('player: Stop stops it', not any(p.play.isChecked() for p in pwin.panels) and not pwin.listen_btn.isChecked())
+pwin.selected = pwin.panels[0]
+pwin._sync_player()
+check('player: not listening, selecting another plays nothing', not any(p.play.isChecked() for p in pwin.panels))
+
 print('\nall state checks passed' if not failed else f'\n{len(failed)} FAILED: {failed}')
 sys.exit(1 if failed else 0)

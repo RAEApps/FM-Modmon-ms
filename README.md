@@ -57,7 +57,10 @@ limit in force with a 2 s peak hold, RF and AM bars, a 5-minute sparkline and an
 annunciator with every alarm in a fixed place (raised, holding off, not judged, off). A
 status cell at the row's left shows its most urgent alarm's priority, and the row turns red
 while one of its alarms waits to be acknowledged (see Alarms).
-The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
+Click a row to select its receiver: its detail view opens right under that row (double-click
+to give it its own window). The player in the header always plays the selected receiver, with
+that receiver's audio source: Listen starts it, and selecting another receiver while listening
+switches the audio to that one (the web page's player does the same in the browser). The detail view has Modulation (with a peak-distribution histogram), Multiplex, RDS and
 Audio cards, listing what a station doesn't carry once instead of as dashes, and a History
 tab: the readings as stacked strips over 1 minute to 1 hour with one cursor across them.
 Under it, the Alarms tab lists each alarm once, with how long it lasted.
@@ -92,8 +95,8 @@ AUX, alert) or **3** (cyan diamond: the rest). The shape and number go with the 
 everywhere, so they read apart without it.
 
 **Acknowledging** (as ISA-18.2). Every alarm waits to be acknowledged, also after it has
-cleared, so a burst at 03:00 is still there in the morning. While one waits, a banner under
-the header shows the most urgent, the receiver's row is red and its lamp has a white ring;
+cleared, so a burst at 03:00 is still there in the morning. While one waits, a banner over
+the alarm log shows the most urgent, the receiver's row is red and its lamp has a white ring;
 a cleared alarm keeps its lamp's outline until acknowledged. Acknowledge from the banner
 (one, or all), the Ack column of the Alarms tab (or its right-click menu), or by
 right-clicking a lamp or a row; the web page does the same (with the controls), and the

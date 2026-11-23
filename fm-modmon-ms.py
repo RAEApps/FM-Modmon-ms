@@ -20,8 +20,10 @@ has a dropdown of the stations found and a button to remove it. The 9.6 MS/s
 SDR window re-centres on the receivers' stations, so a station is only
 offered when it fits within 7.2 MHz of the others. Each receiver gets its own
 channel filter, stereo WBFM demodulator, RDS decoder and measurement blocks,
-and its own "radio" panel. Each panel has a Play button; one station plays
-at a time (stereo, 75 us de-emphasis; falls back to mono without a pilot).
+and its own row, with its detail view right under it when selected. The
+header's player plays the selected receiver (its own audio source), and
+follows the selection while listening; one station plays at a time (stereo,
+75 us de-emphasis; falls back to mono without a pilot).
 
 Other SDRs (SDRS): the RSP1B, as the RSP1A; an RTL-SDR at 2.304 MS/s
 (stations within 1.4 MHz; --gain in dB); an Ettus B210 at 30.72 MS/s (the
@@ -7186,7 +7188,7 @@ class StationPanel(QtCore.QObject):
         buttons.addWidget(self.remove_btn)
         row.addLayout(buttons)
 
-        # ---- the detail view: this receiver in depth, under the rows or in its own window
+        # ---- the detail view: this receiver in depth, under its row or in its own window
         self.window = None      # its DetailWindow while popped out
         self.detail = QtWidgets.QFrame()
         self.detail.setObjectName('detail')
@@ -7397,7 +7399,7 @@ class StationPanel(QtCore.QObject):
         self.source = QtWidgets.QComboBox()
         for key, label in AUDIO_SOURCES:
             self.source.addItem(label, key)
-        self.source.setToolTip('What Play plays')
+        self.source.setToolTip("This receiver's audio source: what Listen plays (on this PC and the web page)")
         self.source.activated.connect(lambda i: on_source(self, self.source.itemData(i)) if on_source else None)
         self.play = QtWidgets.QPushButton('▶  Play')
         self.play.setCheckable(True)
@@ -10609,6 +10611,30 @@ class MainWindow(QtWidgets.QWidget):
         self.switch_to = None  # the SDRS key the monitor restarts on (switch_sdr, _sdr_lost), else None
         self.restart_extra = []  # options for that restart (_sdr_lost: --recovering)
         top.addWidget(self.chip_row, 1)
+        # The player: always here, playing the selected receiver with its own audio source;
+        # selecting another receiver while listening switches to it (_sync_player).
+        self.player = QtWidgets.QFrame()
+        self.player.setObjectName('player')
+        pl = QtWidgets.QHBoxLayout(self.player)
+        pl.setContentsMargins(6, 2, 6, 2)
+        pl.setSpacing(6)
+        self.listen_btn = QtWidgets.QPushButton('▶  Listen')
+        self.listen_btn.setCheckable(True)
+        self.listen_btn.setMinimumHeight(30)
+        self.listen_btn.setToolTip('Play the selected receiver on this PC; select another receiver to switch to it')
+        self.listen_btn.setStyleSheet('QPushButton { font-weight: 600; padding: 3px 10px; }'
+                                      'QPushButton:checked { background: #2f6db5; color: white;'
+                                      ' border: 1px solid #8ab4f8; border-radius: 6px; }'
+                                      'QPushButton:checked:hover { background: #3a7cc6; }')
+        self.listen_btn.toggled.connect(self._listen)
+        self.listen_label = QtWidgets.QLabel('')
+        self.listen_label.setStyleSheet(f'color: {DIM};')
+        self.source_slot = QtWidgets.QHBoxLayout()   # each receiver's audio source; only the selected one's shows
+        self.source_slot.setContentsMargins(0, 0, 0, 0)
+        pl.addWidget(self.listen_btn)
+        pl.addWidget(self.listen_label)
+        pl.addLayout(self.source_slot)
+        top.addWidget(self.player)
         self.help_btn = QtWidgets.QPushButton('?')
         self.help_btn.setObjectName('help')
         self.help_btn.setFixedSize(32, 32)
@@ -10649,8 +10675,7 @@ class MainWindow(QtWidgets.QWidget):
         self.add_btn.clicked.connect(self._add_receiver)
         top.addWidget(self.add_btn)
         layout.addLayout(top)
-        self.banner = AlarmBanner(self.acknowledge)
-        layout.addWidget(self.banner)
+        self.banner = AlarmBanner(self.acknowledge)   # (in the console, over the alarm log)
         self._beep = QtCore.QTimer(self)   # the optional alarm sound (Settings)
         self._beep.timeout.connect(self._alarm_sound)
         self._beep.start(ALARM_BEEP_S * 1000)
@@ -10663,8 +10688,8 @@ class MainWindow(QtWidgets.QWidget):
         self.rows_box = QtWidgets.QVBoxLayout()   # one StationRow per receiver
         self.rows_box.setSpacing(4)
         box.addLayout(self.rows_box)
-        self.details = QtWidgets.QStackedWidget()  # the selected receiver's detail view
-        box.addWidget(self.details)
+        self.details = QtWidgets.QStackedWidget()  # the selected receiver's detail view, right under its row
+        self.rows_box.addWidget(self.details)
         box.addStretch(1)
         self.selected = None
         self.scroll = ReceiverScroll(receivers)
@@ -10687,6 +10712,7 @@ class MainWindow(QtWidgets.QWidget):
         logs.addWidget(self.log_view)
         logs.setFixedHeight(104)
         self.log_tabs.currentChanged.connect(logs.setCurrentIndex)
+        events_box.addWidget(self.banner)
         events_box.addWidget(self.log_tabs, 0, QtCore.Qt.AlignLeft)
         events_box.addWidget(logs)
         events.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
@@ -10739,14 +10765,19 @@ class MainWindow(QtWidgets.QWidget):
         self.panels.sort(key=lambda p: p.slot)
         if self.web and self.ffmpeg and self.web.formats:
             self.web.audio[slot + 1] = WebAudio(self.ffmpeg, st.web_tap)
+        self.rows_box.removeWidget(self.details)   # (the rows in slot order, then the detail placed again)
         self.rows_box.insertWidget(self.panels.index(panel), panel.row)
         self.details.addWidget(panel.detail)
+        panel.play.hide()                          # the header's player plays it (_sync_player)
+        self.source_slot.addWidget(panel.source)
+        panel.source.hide()
         if self.selected is None:
             self.focus(panel)
+        self._place_details()
 
     def focus(self, panel):
-        """Select a receiver: its row is highlighted and its detail shown (or, when
-        popped out, its window raised)."""
+        """Select a receiver: its row is highlighted and its detail shown right under
+        it (or, when popped out, its window raised)."""
         self.selected = panel
         for p in self.panels:
             p.row.set_selected(p is panel)
@@ -10756,6 +10787,45 @@ class MainWindow(QtWidgets.QWidget):
         elif panel is not None:
             self.details.setCurrentWidget(panel.detail)
         self.details.setVisible(self.details.count() > 0)
+        self._place_details()
+        self._sync_player()
+
+    def _listen(self, on):
+        """The header's Listen / Stop: play the selected receiver, or stop."""
+        if on and self.selected is not None:
+            self.selected.play.setChecked(True)
+        elif not on:
+            for p in self.panels:
+                p.play.setChecked(False)
+        self._sync_player()
+
+    def _sync_player(self):
+        """The header's player follows the selected receiver: its audio source shows,
+        and while listening the audio switches to it."""
+        sel = self.selected
+        for p in self.panels:
+            p.source.setVisible(p is sel)
+        if self.listen_btn.isChecked() and sel is not None and not sel.play.isChecked():
+            sel.play.setChecked(True)      # (_on_play stops the one playing, and comes back here)
+            return
+        playing = next((p for p in self.panels if p.play.isChecked()), None)
+        self.listen_btn.blockSignals(True)
+        self.listen_btn.setChecked(playing is not None)
+        self.listen_btn.blockSignals(False)
+        self.listen_btn.setText('■  Stop' if playing else '▶  Listen')
+        self.listen_btn.setEnabled(sel is not None)
+        who = playing or sel
+        self.listen_label.setText('' if who is None else f'Rx {who.slot + 1} · {who.title}')
+
+    def _place_details(self):
+        """Put the detail view right under the row of the receiver it shows, so which
+        receiver it belongs to is plain (after the last row if it shows none)."""
+        shown = next((p for p in self.panels if p.detail is self.details.currentWidget()), None)
+        if shown and self.rows_box.indexOf(self.details) == self.rows_box.indexOf(shown.row) + 1:
+            return
+        self.rows_box.removeWidget(self.details)
+        self.rows_box.insertWidget(self.rows_box.indexOf(shown.row) + 1 if shown else self.rows_box.count(),
+                                   self.details)
 
     def pop_out(self, panel):
         """A receiver's detail in its own window, or (popped out already) back."""
@@ -10765,7 +10835,7 @@ class MainWindow(QtWidgets.QWidget):
         self.details.removeWidget(panel.detail)
         panel.window = DetailWindow(self, panel, self._pop_in)
         panel.pop_btn.setText('\u21a9  Dock')
-        panel.pop_btn.setToolTip('Put this receiver back under the station rows')
+        panel.pop_btn.setToolTip('Put this receiver back in the main window, under its row')
         panel.window.show()
         docked = [p for p in self.panels if not p.window]
         self.focus(docked[0] if docked else panel)
@@ -11431,8 +11501,11 @@ class MainWindow(QtWidgets.QWidget):
             return
         title = panel.title
         self._clear_alarms(panel, 'receiver removed')
+        if self.selected is panel:
+            self.selected = None           # (so the player doesn't start it again as it stops)
         if panel.play.isChecked():
             panel.play.setChecked(False)
+        self.source_slot.removeWidget(panel.source)
         self._set_feed(panel, False)
         audio = self.web.audio.pop(panel.slot + 1, None) if self.web else None
         if audio:
@@ -11445,11 +11518,10 @@ class MainWindow(QtWidgets.QWidget):
         self.panels.remove(panel)
         self.rows_box.removeWidget(panel.row)
         self.details.removeWidget(panel.detail)
-        for w in (panel.row, panel.detail):
+        for w in (panel.row, panel.detail, panel.source):   # (its source list lives in the header's player)
             w.deleteLater()
         panel.deleteLater()
-        if self.selected is panel:
-            self.selected = None
+        if self.selected is None:
             self.focus(self.panels[0])
         self._feed_clients.pop(panel.slot, None)
         self._update_window()
@@ -11533,6 +11605,7 @@ class MainWindow(QtWidgets.QWidget):
                     p.play.setChecked(False)
         self._apply_audio(panel)
         panel.play.setText('\u25a0  Stop audio' if on else '\u25b6  Play audio')
+        self._sync_player()
 
     def _on_source(self, panel, key):
         if key == panel.settings.audio_source:
@@ -11633,6 +11706,7 @@ class MainWindow(QtWidgets.QWidget):
             self.alarm_table.redraw()   # the running durations
         if self._ticks % UPDATE_HZ == 0:
             self.banner.tick()
+            self._sync_player()   # (the station's name, once its PS is known)
         for p in self.panels:
             if p.feed and p.feed.clients != self._feed_clients.get(p.slot, 0):
                 n, was = p.feed.clients, self._feed_clients.get(p.slot, 0)
