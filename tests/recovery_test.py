@@ -293,5 +293,24 @@ except ValueError:
 check('another error: raised at once, no retry', (got, len(tries)), ('ValueError', 1))
 rm.time = real_time
 
+# A B210's start-up scan and calibration run in a helper that is killed if it hangs.
+calls = []
+real_child, real_sdr = rm._in_child, rm.SDR
+
+
+def fake_child(func, *args, **kw):
+    calls.append((func, kw.get('timeout')))
+    return ([], {}) if func == 'band_scan' else ([30.0], 'ok')
+
+
+rm._in_child, rm.SDR = fake_child, rm.replace(rm.SDR, closes_cleanly=False)
+try:
+    rm.band_scan((30.0,))
+    rm.calibrate_startup([98.1e6], (30.0,))
+finally:
+    rm._in_child, rm.SDR = real_child, real_sdr
+check('B210 start-up helpers have a timeout', calls,
+      [('band_scan', rm.HELPER_TIMEOUT_S), ('calibrate_startup', rm.HELPER_TIMEOUT_S)])
+
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
 sys.exit(1 if bad else 0)

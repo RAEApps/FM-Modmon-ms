@@ -174,5 +174,28 @@ check('sound: off by default', off == 0)
 check('sound: on, a priority 1 waiting: a tone', on == 1 if os.name == 'nt' else True)
 check('sound: acknowledged: quiet', len(starts) == on)
 
+# the log's length: only episodes acknowledged and cleared are forgotten, never one still waiting
+log = rm.AlarmTable()
+log.KEEP = 5
+log.raised('k', 'S', 'waits', '', name='OLD', slot=0)          # cleared, never acknowledged
+log.cleared('k', 'waits')
+log.raised('k', 'S', 'up', '', name='UP', slot=0)              # acknowledged, still raised
+log.acknowledge([log.episodes[-1]['id']])
+for i in range(20):                                             # a flapping alarm, each acknowledged
+    log.raised('k', 'S', 'flap', '', name='FLAP', slot=0)
+    log.cleared('k', 'flap')
+    log.acknowledge([log.episodes[-1]['id']])
+names = [e['name'] for e in log.episodes]
+check('log: trimmed to KEEP', len(log.episodes), 5)
+check('log: an old one waiting to be acknowledged is kept', 'OLD' in names and len(log.unacked()) == 1, names)
+check('log: one still raised is kept', 'UP' in names, names)
+log.cleared('k', 'up')
+check('log: ...and can still be cleared', [e['end'] is not None for e in log.episodes if e['name'] == 'UP'], [True])
+
+eps = [{'id': i, 'acked': None if i == 3 else 1.0} for i in range(150)]
+web = types.SimpleNamespace(alarm_table=types.SimpleNamespace(episodes=eps))
+sent = [e['id'] for e in rm.MainWindow._web_episodes(web)]
+check('web: the newest 100 and an older one still waiting, oldest first', sent, [3] + list(range(50, 150)))
+
 print('\nall ok' if not bad else f'\n{len(bad)} WRONG')
 sys.exit(1 if bad else 0)

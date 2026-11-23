@@ -418,6 +418,7 @@ CAL_TOLERANCE_DB = 1.5     # ...the least gain whose stations' S/N is this close
 CAL_CLIP = 0.9            # ...and any sample at this fraction of full scale means overload
 CAL_LNA_STATES = range(9, -1, -1)  # SDRplay: tried from least gain to most
 CAL_STEP_DB = 3.0          # one gain stage (RTL-SDR, B210): raised this much at a time
+HELPER_TIMEOUT_S = 300     # start-up scan / calibration in a helper (B210): killed if not done in this long
 IQ_TAP_BATCH = 65536       # live calibration reads the SDR in batches this big
 TUNE_RATE_HZ = 5           # antenna tuning: S/N measured this many times a second...
 TUNE_SAMPLES = 1 << 19     # ...each from this many IQ samples (128 spectra of 4096)...
@@ -1522,7 +1523,7 @@ def band_scan(gain, verbose=False):
     outside the receivers' channel filters, so it is detected here.
     """
     if not SDR.closes_cleanly and not _IN_CHILD:
-        found, iboc_scan = _in_child('band_scan', list(gain))
+        found, iboc_scan = _in_child('band_scan', list(gain), timeout=HELPER_TIMEOUT_S)
         return [tuple(f) for f in found], {int(f): info for f, info in iboc_scan.items()}
     with _sdr_direct(gain) as rsp:
         return _scan(rsp, verbose, gain)
@@ -1763,7 +1764,8 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
 def calibrate_startup(receivers_hz, gain, progress=None):
     """Gain calibration on the SDR before the receiver opens it."""
     if not SDR.closes_cleanly and not _IN_CHILD:
-        gain, report = _in_child('calibrate_startup', list(receivers_hz), list(gain), progress=progress)
+        gain, report = _in_child('calibrate_startup', list(receivers_hz), list(gain), progress=progress,
+                                 timeout=HELPER_TIMEOUT_S)
         return tuple(gain), report
     center = _centre(receivers_hz)
     with _sdr_direct(gain, center) as rsp:
@@ -6019,6 +6021,7 @@ class AlarmTable(QtWidgets.QTableWidget):
     acknowledged (ISA-18.2), raised or cleared: click its Ack cell, or right-click."""
     COLS = ('Pri', 'Raised', 'Station', 'Alarm', 'Duration', 'Cleared', 'Ack', 'Measured')
     ACK_COL = 6
+    KEEP = 500   # episodes kept, besides any still waiting to be acknowledged
 
     def __init__(self):
         super().__init__(0, len(self.COLS))
@@ -6048,8 +6051,21 @@ class AlarmTable(QtWidgets.QTableWidget):
                               'station': station, 'desc': desc, 'start': t or time.time(), 'end': None,
                               'detail': detail, 'acked': None, 'acked_by': ''})
         self._next_id += 1
-        self.episodes = self.episodes[-500:]
+        self._trim()
         self.redraw()
+
+    def _trim(self):
+        """Forget the oldest episodes past KEEP, but only ones acknowledged and cleared:
+        one still waiting stays however many there are."""
+        over = len(self.episodes) - self.KEEP
+        if over > 0:
+            kept = []
+            for e in self.episodes:
+                if over and e['acked'] is not None and e['end'] is not None:
+                    over -= 1
+                else:
+                    kept.append(e)
+            self.episodes = kept
 
     def cleared(self, key, desc, t=None):
         for e in reversed(self.episodes):
@@ -11476,6 +11492,11 @@ class MainWindow(QtWidgets.QWidget):
         if self.antenna:
             self.antenna.tuner.reset_hold()
 
+    def _web_episodes(self):
+        """The alarm log for the web page: the newest 100, and any older one still waiting."""
+        eps = self.alarm_table.episodes
+        return [e for i, e in enumerate(eps) if i >= len(eps) - 100 or e['acked'] is None]
+
     def _antenna_state(self):
         if not self.antenna:
             return None
@@ -11763,7 +11784,7 @@ class MainWindow(QtWidgets.QWidget):
             'alarm_means': Annunciator.MEANS,
             'alarm_episodes': [{k: e[k] for k in ('id', 'slot', 'name', 'priority', 'station', 'desc', 'start', 'end',
                                                   'detail', 'acked', 'acked_by')}
-                               for e in self.alarm_table.episodes[-100:]],
+                               for e in self._web_episodes()],
             'alarm_waiting': [e['id'] for e in self.alarm_table.unacked()],
             'priority_colours': PRIORITY_COLOURS, 'priority_names': PRIORITY_NAMES,
             'alarm_beep_s': ALARM_BEEP_S,
