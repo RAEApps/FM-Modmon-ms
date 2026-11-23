@@ -1304,6 +1304,7 @@ class FmMeter(gr.sync_block):
         self._rds_fft = None    # (block length, envelope length) the RDS measurement is set up for
         self._rds_hist = deque()  # per block: z² averaged down (RDS_ZZ_AVG), the last RDS_AVG_S
         self._rds_samples = 0     # MPX samples since the RDS measurement started (its 57 kHz phase)
+        self._rds_rest = None     # MPX past the last whole RDS block, for the next
         self._env_sum = 0.0
         self._env = []                                       # |IQ| chunks for this update
         self._rds_win = None
@@ -1374,27 +1375,34 @@ class FmMeter(gr.sync_block):
         57 kHz (an encoder not locked to the pilot), which puts the line at twice
         the offset: the strongest within 2 x RDS_SEARCH_HZ is taken. Each block is
         Hann-windowed: unwindowed, the sidelobes of loud audio reach 57 kHz with a
-        fixed phase and read as RDS."""
-        n = len(x)
+        fixed phase and read as RDS. The blocks are one update long whatever x's
+        length (the flowgraph's chunks vary, more so when it runs behind): the
+        samples past the last whole block wait for the next call."""
+        n = self._period
         df = QUAD_RATE / n
         k0, kw = round(57e3 / df), int(RDS_BW / df)
         m = 1 << (2 * kw + 1).bit_length()
-        if self._rds_fft != (n, m):   # (first block, or a new block length: start over)
+        if self._rds_fft != (n, m):   # (first block: set up)
             self._rds_fft = (n, m)
             self._rds_win = np.hanning(n).astype(np.float32)
             t = np.arange(m) * (n / QUAD_RATE / m)
             self._rds_shift = np.exp(-2j * np.pi * (57e3 - k0 * df) * t)   # bin k0 -> exactly 57 kHz
             self._rds_hist.clear()
-        start = self._rds_samples
-        self._rds_samples += n
+            self._rds_rest = np.zeros(0, np.float32)
         # float32 FFT: 3x faster, and its error sits far below any RDS
-        sel = spfft.rfft(x.astype(np.float32, copy=False) * self._rds_win)[k0 - kw:k0 + kw + 1] / np.sinc(57e3 / QUAD_RATE)
-        spec = np.zeros(m, complex)
-        spec[:kw + 1], spec[m - kw:] = sel[kw:], sel[:kw]
-        z = np.fft.ifft(spec) * (2 * m / n)   # complex envelope: A cos(wt + p) -> A e^(jp)
-        # on the 57 kHz phase running from the first block
-        z *= self._rds_shift * np.exp(-2j * np.pi * (57000 * start % int(QUAD_RATE)) / QUAD_RATE)
-        self._rds_hist.append((z * z).reshape(-1, RDS_ZZ_AVG).mean(axis=1))
+        x = np.concatenate((self._rds_rest, x.astype(np.float32, copy=False)))
+        whole = len(x) // n * n
+        self._rds_rest = x[whole:]
+        for block in x[:whole].reshape(-1, n):
+            start = self._rds_samples
+            self._rds_samples += n
+            sel = spfft.rfft(block * self._rds_win)[k0 - kw:k0 + kw + 1] / np.sinc(57e3 / QUAD_RATE)
+            spec = np.zeros(m, complex)
+            spec[:kw + 1], spec[m - kw:] = sel[kw:], sel[:kw]
+            z = np.fft.ifft(spec) * (2 * m / n)   # complex envelope: A cos(wt + p) -> A e^(jp)
+            # on the 57 kHz phase running from the first block
+            z *= self._rds_shift * np.exp(-2j * np.pi * (57000 * start % int(QUAD_RATE)) / QUAD_RATE)
+            self._rds_hist.append((z * z).reshape(-1, RDS_ZZ_AVG).mean(axis=1))
         while len(self._rds_hist) * n > RDS_AVG_S * QUAD_RATE:
             self._rds_hist.popleft()
         zz = np.concatenate(self._rds_hist)
