@@ -332,6 +332,11 @@ exits without closing it (Windows releases it), and when the B210 goes silent th
 restarts itself on it instead of reopening it in place (about half a minute; it waits for the
 B210 to come back, and after a minute uses another SDR if one is plugged in).
 
+Unplugging the B210 while the monitor runs (or a USB drop that disconnects it) ends the
+monitor at once, with no "SDR lost" event or notification: UHD 4.8 aborts the process when
+the device disappears mid-stream. Start the monitor again once the B210 is back. Where the
+B210 must run unattended, prefer the RSP1A.
+
 An RTL-SDR's 8-bit ADC has much less headroom than the others, and its window takes only
 stations within 1.4 MHz of each other, often just one or two. Saved receivers that don't
 fit the window are left closed. On an RTL-SDR without a TCXO, the frequency error shows up
