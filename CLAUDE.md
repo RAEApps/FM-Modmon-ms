@@ -21,6 +21,8 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\web_test.py` covers the web server (GETs, POST checks, sign-in, sessions, the command queue).
   `tests\recovery_test.py` covers SDR loss: the watchdog, reopening in place, and the B210's restart.
   `tests\sdr_test.py` covers the SDR profiles (`SDRS`: RSP1A, RSP1B, RTL-SDR, B210) and a station at each one's rate.
+  `tests\antenna_test.py` covers antenna tuning (`window_snrs`, `AntennaTuner`, `AntennaLoop` on a
+  synthetic flowgraph, the window and web controls).
 - SDRs: one `SdrProfile` each in `SDRS`; `use_sdr()` sets `SAMP_RATE`, `CHAN_DECIM`, `MAX_SPAN` and the
   other rate-derived globals from it. Every station is decimated to the same `QUAD_RATE` (384 kS/s).
   At start-up `detect_sdr()` finds what is plugged in (`find_sdrs`, `choose_sdr`) and switches to it.

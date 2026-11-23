@@ -89,6 +89,19 @@ Microsoft Teams, Discord). A watchdog reopens the SDR after a USB dropout, and w
 overload (wideband peaks at full scale, which make every receiver's readings false; the
 stations' alarms are held until it clears).
 
+## Antenna tuning
+
+**Antenna tune** (at the top of the window or the web page) helps get the most from an antenna:
+its length, position, direction, or which antenna to use. It holds the gain where it is and
+measures each open station's S/N over the noise floor five times a second. The **score** is the
+weakest station's S/N, because the monitor is only as good as its worst station. Each bar has a
+tick at its best so far. Mark each setting you try (*dipole 75 cm*, *loop facing NE*) and the
+marks are ranked by score. Watch each station's AM / multipath as well: a longer antenna can
+pick up more reflections. Watch the ADC peaks too: too much signal overloads the SDR, and the
+window says so. The web page can play a tone that rises a semitone for each dB of score, so you
+can tune from a phone without looking at it. The receivers' alarms are held while tuning, and
+recalibrating the gain waits until tuning stops.
+
 ## Recording
 
 Off until you start it: click the **REC** chip at the top of the window (or tick it in
@@ -312,6 +325,8 @@ old event logs and records.
 (batching, retries, the test message). `tests\web_test.py` checks the web version's pages,
 sign-in, sessions and controls. `tests\recovery_test.py` checks what happens when the SDR is
 lost: reopening it, and restarting on a B210.
+`tests\antenna_test.py` checks antenna tuning: the S/N readings on a synthetic band, the score,
+peak hold and marks, and the live measurement surviving the SDR being reopened.
 `tests\sdr_test.py` checks each SDR's rate, window and scan, how `--sdr` and the setup
 pick it, and a synthetic station through a receiver at each SDR's sample rate.
 
