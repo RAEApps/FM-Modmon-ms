@@ -23,6 +23,9 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\sdr_test.py` covers the SDR profiles (`SDRS`: RSP1A, RSP1B, RTL-SDR, B210) and a station at each one's rate.
   `tests\antenna_test.py` covers antenna tuning (`window_snrs`, `AntennaTuner`, `AntennaLoop` on a
   synthetic flowgraph, the window and web controls).
+- `tests\alarm_ack_test.py` covers alarm priorities and acknowledgement. The alarm log (`AlarmTable.episodes`)
+  is the one record of what waits to be acknowledged; `MainWindow._sync_unacked` copies it to each
+  receiver's `alarms.unacked` for its lamps, status cell and row tint. Run it after touching alarms.
 - `tests\inventory_test.py` covers the SDR inventory and profiler (a simulated radio; no SDR needed).
   On hardware: `fm-modmon-ms.py --scan-sdrs` and `--profile-sdr SERIAL --config <a copy>` (a built-in kind
   is printed beside its built-in profile, not saved).

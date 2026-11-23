@@ -107,6 +107,12 @@ software that reads one of those over TCP (address <this-pc>:7711) can
 decode the groups itself. The feed follows whatever station its receiver
 is tuned to, and closes when the receiver is removed. Alarms and station changes go to
 the event log in the window, the web view and logs/fm-modmon-ms_events_YYYY-MM-DD.log.
+Each alarm has a priority (1-3, per receiver: colour, shape and number) and waits to be
+acknowledged, raised or since cleared (ISA-18.2): a banner under the header shows the
+most urgent, its row turns red and its lamp gets a white ring until someone acknowledges
+it (the banner, the Alarms tab's Ack column, right-clicking a lamp or row, or the web
+page). Settings can sound a tone while a priority 1 alarm waits.
+
 Recording (off until started: the REC chip at the top, or Settings) writes
 each receiver's readings once a minute to
 records/fm-modmon-ms_<MHz>_YYYY-MM-DD.csv: the minute's peaks (modulation,
@@ -4465,12 +4471,46 @@ TEXT_LIT = '#e3e4e6'    # a flag that is set, a value
 # (BORDER 3.3); disabled controls (exempt) stay readable at DISABLED 3.3.
 BORDER, BORDER_HOVER, DISABLED = '#6f747c', '#9aa0a6', '#6f747c'
 LCD = 'background: #0b1a0b; border: 1px solid #1f3a1f; border-radius: 6px;'
+# Alarm priorities (ISA-18.2): each a colour and a shape (square, triangle, diamond)
+# and its number, so they read apart in greyscale too. Priority 2's yellow is not
+# AMBER, which means "pending / not judged".
+PRIORITY_COLOURS = {1: '#ff5c5c', 2: '#f2c14e', 3: '#4fb3c4'}
+PRIORITY_NAMES = {1: 'high', 2: 'medium', 3: 'low'}
+
+
+def priority_shape(p, rect):
+    """The QPolygonF of priority p's shape filling rect (a QRectF)."""
+    c, l, r, t, b = rect.center(), rect.left(), rect.right(), rect.top(), rect.bottom()
+    if p == 1:
+        pts = [(l, t), (r, t), (r, b), (l, b)]
+    elif p == 2:
+        pts = [(c.x(), t), (r, b), (l, b)]
+    else:
+        pts = [(c.x(), t), (r, c.y()), (c.x(), b), (l, c.y())]
+    return QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in pts])
+
+
+@functools.lru_cache(maxsize=None)
+def priority_icon(p, filled=True, size=12):
+    """A small QIcon of priority p's shape: filled (raised) or outlined (cleared)."""
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pm)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    colour = QtGui.QColor(PRIORITY_COLOURS[p])
+    painter.setPen(QtGui.QPen(colour, 1.5))
+    painter.setBrush(colour if filled else QtCore.Qt.NoBrush)
+    painter.drawPolygon(priority_shape(p, QtCore.QRectF(1.5, 1.5, size - 3, size - 3)))
+    painter.end()
+    return QtGui.QIcon(pm)
 
 APP_QSS = """
 QWidget { font-family: "Segoe UI"; font-size: 9pt; }
 QToolTip { background: #2b2d31; color: #e0e0e0; border: 1px solid #3c4043; padding: 4px 6px; }
 QFrame#row { background: #1e1f22; border: 1px solid #2e3035; border-left: 5px solid #1e1f22; border-radius: 6px; }
 QFrame#row[selected="true"] { background: #1c2636; border: 1px solid #5b8fd6; border-left: 5px solid #8ab4f8; }
+QFrame#row[unacked="true"] { background: #2c1b1e; }
+QFrame#row[selected="true"][unacked="true"] { background: #2c1b1e; border: 1px solid #5b8fd6; border-left: 5px solid #8ab4f8; }
 QFrame#row[selected="true"] QComboBox#freq { color: #8ab4f8; }
 QFrame#detail { background: #1b1c20; border: 1px solid #3d5f8f; border-radius: 6px; }
 QLabel#colHead { color: #8c9197; font-family: Consolas; font-size: 7pt; font-weight: 600; letter-spacing: 1px; }
@@ -4759,9 +4799,9 @@ class Meter(QtWidgets.QWidget):
 
 # Widths of a station row's fixed columns (the text column takes the rest); the
 # column headings above the rows use the same widths.
-ROW_COLS = (('station', 'Station', 250), ('text', 'Text · RT+ · flags', 0),
+ROW_COLS = (('status', '', 26), ('station', 'Station', 250), ('text', 'Text · RT+ · flags', 0),
             ('tapes', 'Now · peak hold · limit ▼', 300), ('trend', 'Trend · 5 min', 176),
-            ('alarms', 'Alarms', 150))
+            ('alarms', 'Alarms', 216))
 TAPE_COLOURS = {None: NORMAL, 'warn': '#f0a35e', 'alarm': RED, 'off': '#5d6167'}
 
 
@@ -4897,10 +4937,19 @@ class StationRow(QtWidgets.QFrame):
         frequency in the accent colour (children restyled too, for that)."""
         if self.property('selected') != on:
             self.setProperty('selected', on)
-            for w in [self] + self.findChildren(QtWidgets.QComboBox):
-                self.style().unpolish(w)
-                self.style().polish(w)
-            self.update()
+            self._restyle()
+
+    def set_unacked(self, on):
+        """A red tint while one of its alarms waits to be acknowledged."""
+        if bool(self.property('unacked')) != on:
+            self.setProperty('unacked', on)
+            self._restyle()
+
+    def _restyle(self):
+        for w in [self] + self.findChildren(QtWidgets.QComboBox):
+            self.style().unpolish(w)
+            self.style().polish(w)
+        self.update()
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton and self.on_click:
@@ -4923,6 +4972,13 @@ class AlarmDef(NamedTuple):
     clean_only: bool = False
     what: str = ''       # what raises it, in a sentence (its explanation, on a click)
     source: str = ''     # the rule or standard behind it
+    priority: int = 3    # its default priority, 1 (high) to 3 (low); each receiver can change it
+
+
+# The default priorities: off air, silent or the wrong station first; then what
+# breaks the service (over-deviation, stereo, RDS, alerts); the rest, low.
+ALARM_PRIORITY = {'CARRIER': 1, 'SILENCE': 1, 'PI': 1,
+                  'EXCEEDANCE': 2, 'PILOT': 2, 'RDS': 2, 'ALERT': 2, 'BACKUP': 2}
 
 
 _FCC_ISED_MOD = ('FCC 47 CFR 73.1570(b)(2); ISED BPR-3 3.13.2 and BETS-6 A.2.2.4 (which give the allowance '
@@ -4972,6 +5028,7 @@ ALARM_DEFS = (
              what='A data service on air for 5 minutes without a 15 s gap is no longer seen: about 75 s after '
                   'an RDS service stops (judged only while RDS itself decodes), about 60 s after SCA data does.'),
 )
+ALARM_DEFS = tuple(d._replace(priority=ALARM_PRIORITY.get(d.name, 3)) for d in ALARM_DEFS)
 # How each alarm that waits for good reception is judged (the others: always, once tuned).
 _CLEAN = f'AM / multipath under {CLEAN_AM_PCT:g}%, S/N over 25 dB and the carrier not low'
 ALARM_JUDGED = {
@@ -5308,22 +5365,85 @@ def out_of_range(r):
     return out
 
 
+def alarm_status(states, priorities):
+    """(priority, raised, unacked) for a station row's status cell: the highest
+    priority among its alarms raised or waiting to be acknowledged, whether one of
+    those is still raised, and whether any alarm waits to be acknowledged; None if none."""
+    lit = [n for n, s in states.items() if s in Annunciator.PRIORITY_STATES]
+    if not lit:
+        return None
+    best = min(priorities.get(n, 3) for n in lit)
+    top = [n for n in lit if priorities.get(n, 3) == best]
+    return (best, any(states[n] in ('unack', 'raised') for n in top),
+            any(s in ('unack', 'cleared_unack') for s in states.values()))
+
+
+class AlarmStatus(QtWidgets.QWidget):
+    """A station row's first column: the shape and number of the highest priority
+    alarm raised (filled) or cleared but not acknowledged (outlined), with a white
+    ring while it waits to be acknowledged; empty when all is clear."""
+
+    def __init__(self):
+        super().__init__()
+        self.status = None
+        self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+
+    def set_status(self, status):
+        """status: alarm_status()'s (priority, raised, unacked) or None."""
+        if status != self.status:
+            self.status = status
+            if status:
+                p, raised, unacked = status
+                self.setToolTip(f'Priority {p} ({PRIORITY_NAMES[p]}) alarm '
+                                + ('raised' if raised else 'cleared') + (', not acknowledged' if unacked else '')
+                                + '. Right-click the row to acknowledge.')
+            else:
+                self.setToolTip('No alarm raised or waiting to be acknowledged')
+            self.update()
+
+    def paintEvent(self, event):
+        if not self.status:
+            return
+        p, raised, unacked = self.status
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        colour = QtGui.QColor(PRIORITY_COLOURS[p])
+        s, num_h = 12.0, 13.0
+        cx, top = self.width() / 2, max(0.0, (self.height() - s - 2 - num_h) / 2)
+        shape = QtCore.QRectF(cx - s / 2, top + 1, s, s)
+        painter.setPen(QtGui.QPen(QtGui.QColor('#ffffff') if unacked else colour, 1.5))
+        painter.setBrush(colour if raised else QtCore.Qt.NoBrush)
+        painter.drawPolygon(priority_shape(p, shape))
+        font = QtGui.QFont('Consolas', 9, QtGui.QFont.Bold)
+        painter.setFont(font)
+        painter.setPen(colour)
+        painter.drawText(QtCore.QRectF(0, shape.bottom() + 2, self.width(), num_h), QtCore.Qt.AlignCenter, str(p))
+
+
 class Annunciator(QtWidgets.QWidget):
     """Every alarm as a lamp in a fixed grid, in the same place on every row, like
     a transmitter remote control's annunciator panel. The lamp's look says the
-    alarm's state (StationPanel._alarm_states); hover one for what it means."""
+    alarm's state (StationPanel._alarm_states); hover one for what it means. A raised
+    alarm takes its priority's colour and shape; unacknowledged, it has a white
+    ring; raised and since cleared but not acknowledged, its outline stays."""
     COLS = 4
     SHORT = {d.name: d.short for d in ALARM_DEFS}
-    # state: (fill, text, outline or None, hatched)
+    # state: (fill, text, outline or None, hatched); None = the alarm's priority colour
     LOOK = {'clear': ('#26282d', '#7d838a', None, False),
             'waiting': ('#26282d', '#4f545a', None, False),
-            'raised': ('#7a1f26', '#ffe0e0', '#c24a52', False),
+            'unack': (None, '#141414', None, False),
+            'raised': (None, '#141414', None, False),
+            'cleared_unack': ('#1d1f23', None, None, False),
             'pending': ('#4a3a1c', '#f0a35e', None, False),
             'suppressed': ('#26282d', '#f0a35e', None, True),
             'off': (None, '#4f545a', '#3a3d44', False)}
+    PRIORITY_STATES = ('unack', 'raised', 'cleared_unack')
     MEANS = {'clear': 'clear', 'waiting': 'not judged yet (just tuned, the SDR just re-adjusted, no readings yet, '
                                        'or not enough held yet)',
-             'raised': 'RAISED', 'pending': 'its condition holds; raises once its delay has run',
+             'unack': 'RAISED, not acknowledged (right-click to acknowledge)',
+             'raised': 'RAISED, acknowledged',
+             'cleared_unack': 'raised and since cleared, not acknowledged (right-click to acknowledge)',
+             'pending': 'its condition holds; raises once its delay has run',
              'suppressed': 'not judged now: reception not clean or not valid enough (it counts as clear meanwhile)',
              'off': 'switched off for this receiver (Settings)'}
 
@@ -5331,20 +5451,30 @@ class Annunciator(QtWidgets.QWidget):
         super().__init__()
         self.states = {}
         self.notes = {}
+        self.priorities = {d.name: d.priority for d in ALARM_DEFS}
         self.on_click = None    # on_click(alarm name, its lamp's rect in global coordinates)
+        self.on_menu = None     # on_menu(alarm name, global position): the right-click menu
         self.setMinimumHeight(50)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.setMouseTracking(True)
 
     def sizeHint(self):
-        return QtCore.QSize(150, 50)
+        return QtCore.QSize(216, 50)
 
-    def set_states(self, states, notes=None):
-        """states: {alarm: state}; notes: {alarm: extra text for its tooltip}."""
+    def set_states(self, states, notes=None, priorities=None):
+        """states: {alarm: state}; notes: {alarm: extra text for its tooltip};
+        priorities: {alarm: 1-3} (default: each alarm's own)."""
         notes = notes or {}
-        if states != self.states or notes != self.notes:
-            self.states, self.notes = dict(states), dict(notes)
+        priorities = dict(priorities or self.priorities)
+        if states != self.states or notes != self.notes or priorities != self.priorities:
+            self.states, self.notes, self.priorities = dict(states), dict(notes), priorities
             self.update()
+
+    def contextMenuEvent(self, event):
+        for name, _, rect in self._cells():
+            if rect.contains(QtCore.QPointF(event.pos())) and self.on_menu:
+                self.on_menu(name, event.globalPos())
+                return
 
     def _cells(self):
         rows = (len(ALARM_DEFS) + self.COLS - 1) // self.COLS
@@ -5362,7 +5492,14 @@ class Annunciator(QtWidgets.QWidget):
         font.setBold(True)
         p.setFont(font)
         for name, _, rect in self._cells():
-            fill, text, outline, hatched = self.LOOK[self.states.get(name, 'waiting')]
+            state = self.states.get(name, 'waiting')
+            fill, text, outline, hatched = self.LOOK[state]
+            prio = self.priorities.get(name, 3)
+            colour = PRIORITY_COLOURS[prio]
+            if state in ('unack', 'raised'):
+                fill = colour
+            if state == 'cleared_unack':
+                text = outline = colour
             p.setPen(QtCore.Qt.NoPen)
             if fill:
                 p.setBrush(QtGui.QColor(fill))
@@ -5371,18 +5508,33 @@ class Annunciator(QtWidgets.QWidget):
                 p.setBrush(QtGui.QBrush(QtGui.QColor('#5a4424'), QtCore.Qt.BDiagPattern))
                 p.drawRoundedRect(rect, 2, 2)
             if outline:
-                p.setPen(QtGui.QPen(QtGui.QColor(outline), 1, QtCore.Qt.SolidLine if fill else QtCore.Qt.DashLine))
+                width = 1.5 if state == 'cleared_unack' else 1
+                p.setPen(QtGui.QPen(QtGui.QColor(outline), width, QtCore.Qt.SolidLine if fill else QtCore.Qt.DashLine))
                 p.setBrush(QtCore.Qt.NoBrush)
-                p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2)
+                p.drawRoundedRect(rect.adjusted(0.75, 0.75, -0.75, -0.75), 2, 2)
+            if state == 'unack':       # the white ring: someone needs to look at it
+                p.setPen(QtGui.QPen(QtGui.QColor('#ffffff'), 1.5))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawRoundedRect(rect.adjusted(0.75, 0.75, -0.75, -0.75), 2, 2)
+            label = QtCore.QRectF(rect)
+            if state in self.PRIORITY_STATES:   # the priority's shape at the left, so it reads without colour
+                s = min(rect.height() - 5, 5.0)
+                shape = QtCore.QRectF(rect.left() + 2.5, rect.center().y() - s / 2, s, s)
+                p.setPen(QtGui.QPen(QtGui.QColor(text), 1))
+                p.setBrush(QtGui.QColor(text) if state != 'cleared_unack' else QtCore.Qt.NoBrush)
+                p.drawPolygon(priority_shape(prio, shape))
+                label.setLeft(shape.right() + 1)
             p.setPen(QtGui.QColor(text))
-            p.drawText(rect, QtCore.Qt.AlignCenter, self.SHORT[name])
+            p.drawText(label, QtCore.Qt.AlignCenter, self.SHORT[name])
 
     def event(self, event):
         if event.type() == QtCore.QEvent.ToolTip:
             for name, desc, rect in self._cells():
                 if rect.contains(QtCore.QPointF(event.pos())):
                     state = self.states.get(name, 'waiting')
-                    tip = f'<b>{self.SHORT[name]}</b>: {desc}<br>{self.MEANS[state]}'
+                    prio = self.priorities.get(name, 3)
+                    tip = (f'<b>{self.SHORT[name]}</b>: {desc} (priority {prio}, {PRIORITY_NAMES[prio]})'
+                           f'<br>{self.MEANS[state]}')
                     if self.notes.get(name):
                         tip += f'<br>{_html(self.notes[name])}'
                     QtWidgets.QToolTip.showText(event.globalPos(), tip + '<br><i>Click for details.</i>', self,
@@ -5860,8 +6012,11 @@ class HistoryView(QtWidgets.QWidget):
 
 class AlarmTable(QtWidgets.QTableWidget):
     """The alarms of this session, one row per alarm (raised to cleared) with how
-    long it lasted, newest first; the ones still raised in red, their time running."""
-    COLS = ('Raised', 'Station', 'Alarm', 'Duration', 'Cleared', 'Measured')
+    long it lasted, newest first: its priority's shape and number, the ones still
+    raised in their priority's colour, their time running. Every alarm waits to be
+    acknowledged (ISA-18.2), raised or cleared: click its Ack cell, or right-click."""
+    COLS = ('Pri', 'Raised', 'Station', 'Alarm', 'Duration', 'Cleared', 'Ack', 'Measured')
+    ACK_COL = 6
 
     def __init__(self):
         super().__init__(0, len(self.COLS))
@@ -5873,15 +6028,24 @@ class AlarmTable(QtWidgets.QTableWidget):
         self.setWordWrap(False)
         hh = self.horizontalHeader()
         hh.setStretchLastSection(True)
-        for i, w in enumerate((130, 120, 200, 100, 70)):
+        for i, w in enumerate((40, 130, 120, 200, 100, 70, 150)):
             self.setColumnWidth(i, w)
         self.verticalHeader().setDefaultSectionSize(20)
-        self.episodes = []   # {'key', 'station', 'desc', 'start', 'end' (None while raised), 'detail'}
+        # {'id', 'key', 'slot', 'name', 'priority', 'station', 'desc', 'start', 'end' (None while raised),
+        #  'detail', 'acked' (None until acknowledged), 'acked_by'}
+        self.episodes = []
+        self._next_id = 1
+        self.on_ack = None   # on_ack([episode ids]): set by MainWindow
+        self.cellClicked.connect(self._clicked)
+        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
 
-    def raised(self, key, station, desc, detail, t=None):
+    def raised(self, key, station, desc, detail, t=None, name='', priority=3, slot=None):
         """key: which receiver and station (its title can change while the alarm is up)."""
-        self.episodes.append({'key': key, 'station': station, 'desc': desc, 'start': t or time.time(), 'end': None,
-                              'detail': detail})
+        self.episodes.append({'id': self._next_id, 'key': key, 'slot': slot, 'name': name, 'priority': priority,
+                              'station': station, 'desc': desc, 'start': t or time.time(), 'end': None,
+                              'detail': detail, 'acked': None, 'acked_by': ''})
+        self._next_id += 1
         self.episodes = self.episodes[-500:]
         self.redraw()
 
@@ -5895,6 +6059,44 @@ class AlarmTable(QtWidgets.QTableWidget):
     def raised_now(self):
         return sum(e['end'] is None for e in self.episodes)
 
+    def unacked(self):
+        """The episodes waiting to be acknowledged, oldest first."""
+        return [e for e in self.episodes if e['acked'] is None]
+
+    def acknowledge(self, ids, by='this PC', t=None):
+        """Acknowledge the episodes with these ids; returns those that were waiting."""
+        ids, now, done = set(ids), t or time.time(), []
+        for e in self.episodes:
+            if e['id'] in ids and e['acked'] is None:
+                e['acked'], e['acked_by'] = now, by
+                done.append(e)
+        if done:
+            self.redraw()
+        return done
+
+    def _episode_at(self, row):
+        rows = list(reversed(self.episodes))
+        return rows[row] if 0 <= row < len(rows) else None
+
+    def _clicked(self, row, col):
+        e = self._episode_at(row)
+        if col == self.ACK_COL and e and e['acked'] is None and self.on_ack:
+            self.on_ack([e['id']])
+
+    def _menu(self, pos):
+        rows = sorted({i.row() for i in self.selectedIndexes()} | {self.rowAt(pos.y())} - {-1})
+        picked = [e for e in (self._episode_at(r) for r in rows) if e and e['acked'] is None]
+        waiting = self.unacked()
+        menu = QtWidgets.QMenu(self)
+        some = menu.addAction(f'Acknowledge {"this alarm" if len(picked) == 1 else f"{len(picked)} alarms"}')
+        some.setEnabled(bool(picked))
+        some.triggered.connect(lambda: self.on_ack and self.on_ack([e['id'] for e in picked]))
+        every = menu.addAction(f'Acknowledge all ({len(waiting)})')
+        every.setEnabled(bool(waiting))
+        every.triggered.connect(lambda: self.on_ack and self.on_ack([e['id'] for e in waiting]))
+        menu.exec_(self.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
     def redraw(self):
         """Fill the table (and keep the running durations going): call once a second."""
         now = time.time()
@@ -5902,10 +6104,14 @@ class AlarmTable(QtWidgets.QTableWidget):
         if self.rowCount() != len(rows):
             self.setRowCount(len(rows))
         for r, e in enumerate(rows):
-            on = e['end'] is None
-            cells = (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(e['start'])), e['station'], e['desc'],
+            on, unacked = e['end'] is None, e['acked'] is None
+            ack = ('Acknowledge' if unacked else
+                   time.strftime('%H:%M:%S', time.localtime(e['acked'])) + f' · {e["acked_by"]}')
+            cells = (str(e['priority']), time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(e['start'])),
+                     e['station'], e['desc'],
                      duration_text((now if on else e['end']) - e['start']) + (' …' if on else ''),
-                     'raised' if on else time.strftime('%H:%M:%S', time.localtime(e['end'])), e['detail'])
+                     'raised' if on else time.strftime('%H:%M:%S', time.localtime(e['end'])), ack, e['detail'])
+            colour = QtGui.QColor(PRIORITY_COLOURS[e['priority']] if on else '#c4c7cc')
             for c, text in enumerate(cells):
                 item = self.item(r, c)
                 if item is None:
@@ -5913,8 +6119,85 @@ class AlarmTable(QtWidgets.QTableWidget):
                     self.setItem(r, c, item)
                 if item.text() != text:
                     item.setText(text)
-                    item.setToolTip(text)
-                item.setForeground(QtGui.QColor(RED if on else '#c4c7cc'))
+                    item.setToolTip('Click to acknowledge' if c == self.ACK_COL and unacked else text)
+                if c == 0 and item.data(QtCore.Qt.UserRole) != (e['priority'], on):
+                    item.setData(QtCore.Qt.UserRole, (e['priority'], on))
+                    item.setIcon(priority_icon(e['priority'], filled=on))
+                font = item.font()
+                if font.bold() != (unacked and c in (0, 3)):
+                    font.setBold(unacked and c in (0, 3))
+                    item.setFont(font)
+                item.setForeground(QtGui.QColor(ACCENT) if c == self.ACK_COL and unacked else colour)
+
+
+def banner_episode(waiting):
+    """Of the alarm episodes waiting to be acknowledged, the one the banner shows:
+    the highest priority, still raised before cleared, then the newest."""
+    if not waiting:
+        return None
+    return min(waiting, key=lambda e: (e['priority'], e['end'] is not None, -e['start']))
+
+
+class AlarmBanner(QtWidgets.QFrame):
+    """Under the header while any alarm waits to be acknowledged: the most urgent
+    one (banner_episode), how many others wait, and Acknowledge / Acknowledge all.
+    Hidden otherwise, so its appearing is the cue."""
+    LOOK = {1: ('#3a1a1d', '#7a2a30'), 2: ('#33290f', '#6b5520'), 3: ('#13292d', '#2a5a63')}
+
+    def __init__(self, on_ack):
+        super().__init__()
+        self.setObjectName('banner')
+        self.on_ack = on_ack     # on_ack([episode ids])
+        self.waiting, self.shown = [], None
+        box = QtWidgets.QHBoxLayout(self)
+        box.setContentsMargins(10, 6, 10, 6)
+        box.setSpacing(10)
+        self.icon = QtWidgets.QLabel()
+        self.text = QtWidgets.QLabel()
+        self.text.setTextFormat(QtCore.Qt.RichText)
+        self.text.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.one = QtWidgets.QPushButton('Acknowledge')
+        self.one.setToolTip('Acknowledge the alarm shown')
+        self.one.clicked.connect(lambda: self.shown and self.on_ack([self.shown['id']]))
+        self.all = QtWidgets.QPushButton('Acknowledge all')
+        self.all.clicked.connect(lambda: self.on_ack([e['id'] for e in self.waiting]))
+        box.addWidget(self.icon)
+        box.addWidget(self.text, 1)
+        box.addWidget(self.one)
+        box.addWidget(self.all)
+        self.hide()
+
+    def set_episodes(self, waiting):
+        self.waiting = list(waiting)
+        self.shown = banner_episode(self.waiting)
+        self.setVisible(self.shown is not None)
+        self.tick()
+
+    def tick(self):
+        """Redraw (the running time): call once a second."""
+        e = self.shown
+        if e is None:
+            return
+        bg, line = self.LOOK[e['priority']]
+        colour = PRIORITY_COLOURS[e['priority']]
+        self.setStyleSheet(f'QFrame#banner {{ background: {bg}; border: 1px solid {line}; border-radius: 3px; }}'
+                           'QFrame#banner QLabel { background: transparent; color: #f2f2f2; }')
+        self.icon.setPixmap(priority_icon(e['priority'], filled=e['end'] is None, size=16).pixmap(16, 16))
+        short = next((d.short for d in ALARM_DEFS if d.name == e['name']), e['name'])
+        since = time.strftime('%H:%M:%S', time.localtime(e['start']))
+        if e['end'] is None:
+            state = f'raised since {since}, {duration_text(time.time() - e["start"])}'
+        else:
+            state = f'raised {since}, cleared {time.strftime("%H:%M:%S", time.localtime(e["end"]))}'
+        others = len(self.waiting) - 1
+        self.text.setText(
+            f'<b style="color:{colour}">{e["priority"]}&nbsp;&nbsp;{short}</b>&nbsp;&nbsp;'
+            f'{_html(e["station"])} · {_html(e["desc"])}'
+            f'&nbsp;&nbsp;<span style="color:#b9bcc2">{state} · not acknowledged'
+            + (f' · {others} more waiting' if others else '') + '</span>')
+        self.text.setToolTip(e['detail'] or '')
+        self.all.setText(f'Acknowledge all ({len(self.waiting)})')
+        self.all.setVisible(len(self.waiting) > 1)
 
 
 def column_heads():
@@ -6270,6 +6553,7 @@ class ReceiverSettings:
     rds_port: int = 0                # 0: the default, --rds-port + receiver number - 1
     audio_source: str = 'analog'     # an AUDIO_SOURCES key
     alarms: dict = field(default_factory=lambda: {name: True for name, *_ in ALARM_DEFS})
+    priorities: dict = field(default_factory=lambda: {d.name: d.priority for d in ALARM_DEFS})  # 1-3 per alarm
     silence_lufs: float = -45.0      # momentary loudness below this is silence
     silence_s: int = 10              # for this long
     min_snr_db: float = 15.0         # MPX S/N below this (or RF < -75 dBFS) is carrier low
@@ -6312,6 +6596,15 @@ class ReceiverSettings:
             out.expected_pi = ''
         alarms = out.alarms if isinstance(out.alarms, dict) else {}
         out.alarms = {name: bool(alarms.get(name, True)) for name, *_ in ALARM_DEFS}
+        prios = out.priorities if isinstance(out.priorities, dict) else {}
+
+        def prio(d):
+            try:
+                p = int(prios.get(d.name, d.priority))
+            except (TypeError, ValueError):
+                return d.priority
+            return p if p in PRIORITY_NAMES else d.priority
+        out.priorities = {d.name: prio(d) for d in ALARM_DEFS}
         out.name = str(out.name or '')
         out.rds_feed = bool(out.rds_feed)
 
@@ -6353,6 +6646,7 @@ class ReceiverSettings:
 
 
 ALARM_GRACE_S = 5  # ignore alarms this long after (re)tuning
+ALARM_BEEP_S = 4   # with the alarm sound on (Settings): a tone this often while a priority 1 alarm waits
 
 
 class StationAlarms:
@@ -6364,6 +6658,7 @@ class StationAlarms:
 
     def reset(self):
         self.active = set()
+        self.unacked = set()   # raised (or raised and since cleared) and not acknowledged: set by MainWindow
         self._pending = {}
         self.seen_pilot = self.seen_rds = False
         self._t0 = time.monotonic()
@@ -6757,6 +7052,13 @@ class StationPanel(QtCore.QObject):
         row.setContentsMargins(10, 5, 6, 5)
         row.setSpacing(12)
         widths = {key: w for key, _, w in ROW_COLS}
+        self.status_cell = AlarmStatus()
+        self.status_cell.setFixedWidth(widths['status'])
+        row.addWidget(self.status_cell)
+        self.on_ack = None   # on_ack(panel, alarm name or None for all): set by MainWindow
+        self.row.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.row.customContextMenuRequested.connect(
+            lambda pos: self._ack_menu(None, self.row.mapToGlobal(pos)))
 
         # Station selector: every station the scan found; ones that can't share
         # the SDR window with the other receivers are greyed out.
@@ -6865,6 +7167,7 @@ class StationPanel(QtCore.QObject):
         # every alarm, always in the same place: raised, holding off, not judged, off
         self.annunciator = Annunciator()
         self.annunciator.setFixedWidth(widths['alarms'])
+        self.annunciator.on_menu = self._ack_menu
         row.addWidget(self.annunciator)
 
         self.settings_btn = QtWidgets.QToolButton()
@@ -7238,12 +7541,31 @@ class StationPanel(QtCore.QObject):
                           (('What it is', _html(d.what)), ("How it's measured", _html(d.how)),
                            ('Right now', _coloured(_html(now), level))), d.source)
 
+    def _ack_menu(self, name, pos):
+        """The right-click menu on a lamp (name) or the row (None): acknowledge."""
+        waiting = sorted(self.alarms.unacked, key=lambda n: Annunciator.SHORT[n])
+        menu = QtWidgets.QMenu(self.row)
+        if name:
+            one = menu.addAction(f'Acknowledge {Annunciator.SHORT[name]}')
+            one.setEnabled(name in self.alarms.unacked)
+            one.triggered.connect(lambda: self.on_ack and self.on_ack(self, name))
+        every = menu.addAction(f'Acknowledge all on this receiver ({len(waiting)})' if waiting else
+                               'Nothing on this receiver to acknowledge')
+        every.setEnabled(bool(waiting))
+        every.triggered.connect(lambda: self.on_ack and self.on_ack(self, None))
+        menu.exec_(pos)
+        menu.deleteLater()
+
     def _explain_alarm(self, name, rect):
         d = next(a for a in ALARM_DEFS if a.name == name)
         state = self.annunciator.states.get(name, 'waiting')
-        word = {'clear': 'clear', 'waiting': 'not judged yet', 'raised': 'RAISED', 'pending': 'pending',
+        word = {'clear': 'clear', 'waiting': 'not judged yet', 'unack': 'RAISED, not acknowledged',
+                'raised': 'RAISED, acknowledged', 'cleared_unack': 'cleared, not acknowledged', 'pending': 'pending',
                 'suppressed': 'not judged now', 'off': 'off'}[state]
-        colour = {'raised': RED, 'pending': AMBER, 'suppressed': AMBER}.get(state, '#9aa0a6')
+        prio = self.settings.priorities.get(name, d.priority)
+        colour = (PRIORITY_COLOURS[prio] if state in Annunciator.PRIORITY_STATES else
+                  {'pending': AMBER, 'suppressed': AMBER}.get(state, '#9aa0a6'))
+        word += f' · priority {prio} ({PRIORITY_NAMES[prio]})'
         when = alarm_when(d, self.settings.silence_s if name == 'SILENCE' else d.hold)
         now = Annunciator.MEANS[state]
         now = now[0].upper() + now[1:] + '.'
@@ -7500,7 +7822,9 @@ class StationPanel(QtCore.QObject):
         for t in (*self.tapes.values(), *self.peak_tapes.values(), *self.mpx_tapes.values()):
             t.clear()
         self.meta.setText('')
-        self.annunciator.set_states({})
+        self.annunciator.set_states({}, priorities=self.settings.priorities)
+        self.status_cell.set_status(None)
+        self.row.set_unacked(False)
         self._trend_t = -math.inf
         self.web_trends = {}
         for spark in (self.spark, self.rds_spark, self.lufs_spark):
@@ -8047,16 +8371,20 @@ class StationPanel(QtCore.QObject):
 
     def _alarm_states(self, conditions, suppressed=(), waiting=()):
         """{alarm: state} for an annunciator: 'off' (switched off for this receiver),
-        'raised', 'waiting' (not judged yet: grace period after tuning, no readings,
-        or in `waiting`: not enough held yet), 'suppressed' (in `suppressed`, not judged now: reception not clean
-        or not valid enough), 'pending' (its condition holds, its delay is running) or 'clear'."""
+        'unack' (raised, not acknowledged), 'raised' (raised, acknowledged), 'cleared_unack'
+        (raised and since cleared, not acknowledged), 'waiting' (not judged yet: grace period
+        after tuning, no readings, or in `waiting`: not enough held yet), 'suppressed' (in
+        `suppressed`, not judged now: reception not clean or not valid enough), 'pending' (its
+        condition holds, its delay is running) or 'clear'."""
         out = {}
         pending = self.alarms.pending()
         for name, *_ in ALARM_DEFS:
             if not self.settings.alarms.get(name, True):
                 out[name] = 'off'
             elif name in self.alarms.active:
-                out[name] = 'raised'
+                out[name] = 'unack' if name in self.alarms.unacked else 'raised'
+            elif name in self.alarms.unacked:
+                out[name] = 'cleared_unack'
             elif conditions is None or not self.alarms.ready() or name in waiting:
                 out[name] = 'waiting'
             elif name in suppressed:
@@ -8069,7 +8397,7 @@ class StationPanel(QtCore.QObject):
 
     def refresh(self):
         """Measure, update every readout and the history; returns alarm changes
-        as [(description, raised, details), ...]."""
+        as [(alarm name, description, raised, details), ...]."""
         self.readings = r = self._measure()
         self._show(r)
         st = self.station
@@ -8134,7 +8462,7 @@ class StationPanel(QtCore.QObject):
                 for name, _, raised in changes:
                     self.history.log_alarm(time.time(), name, raised)
                 details = self._alarm_details(s, a, lim, limit, subcarriers, rate, pi)
-                changes = [(desc, raised, details.get(name, '')) for name, desc, raised in changes]
+                changes = [(name, desc, raised, details.get(name, '')) for name, desc, raised in changes]
         r['alarms'] = self._alarm_states(conditions, suppressed, waiting)
         self.history.add(time.time(), r)
         if time.monotonic() - self._trend_t >= TREND_S:
@@ -8157,8 +8485,23 @@ class StationPanel(QtCore.QObject):
             self.window.setWindowTitle(f'{self.title} \u2013 {APP_NAME}')
         if self.rt.toolTip() != r['rt']:
             self.rt.setToolTip(r['rt'])
-        self.annunciator.set_states(r['alarms'], self._alarm_notes(r))
+        self.show_alarms()
         return changes
+
+    def show_alarms(self):
+        """The lamps, the status cell and the row's tint from the latest alarm states
+        (again after an acknowledgement, without waiting for the next update)."""
+        r = self.readings
+        if not r or 'alarms' not in r:
+            return
+        for name in r['alarms']:    # (acknowledged since refresh() worked them out)
+            if r['alarms'][name] in ('unack', 'raised'):
+                r['alarms'][name] = 'unack' if name in self.alarms.unacked else 'raised'
+            elif r['alarms'][name] == 'cleared_unack' and name not in self.alarms.unacked:
+                r['alarms'][name] = 'clear'
+        self.annunciator.set_states(r['alarms'], self._alarm_notes(r), self.settings.priorities)
+        self.status_cell.set_status(alarm_status(r['alarms'], self.settings.priorities))
+        self.row.set_unacked(bool(self.alarms.unacked))
 
     def trends(self, n=88):
         """The last TREND_SPAN_S, bucketed for sparklines: {'peak', 'rds_rate', 'short_term'}
@@ -8628,7 +8971,7 @@ class AppSettingsDialog(QtWidgets.QDialog):
     RUN_SETUP = 2
 
     def __init__(self, parent, settings, notifier, sdr='auto', in_use='', record=False, keep_days=KEEP_DAYS,
-                 win=None):
+                 win=None, alarm_sound=False):
         super().__init__(parent)
         self.setWindowTitle(f'{APP_NAME} settings')
         self.setMinimumWidth(600)
@@ -8659,6 +9002,10 @@ class AppSettingsDialog(QtWidgets.QDialog):
                                           'folder; also the REC chip at the top)')
         self.record.setChecked(record)
         layout.addWidget(self.record)
+        self.alarm_sound = QtWidgets.QCheckBox(f'Sound a tone every {ALARM_BEEP_S} s while a priority 1 alarm waits '
+                                               'to be acknowledged')
+        self.alarm_sound.setChecked(alarm_sound)
+        layout.addWidget(self.alarm_sound)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel('Keep event logs and records for'))
         self.keep_days = QtWidgets.QSpinBox()
@@ -9071,12 +9418,22 @@ class ReceiverDialog(QtWidgets.QDialog):
 
         alarms = QtWidgets.QGroupBox('Alarms')
         grid = QtWidgets.QGridLayout(alarms)
-        self.alarm_checks = {}
-        for i, (name, _, desc, *_) in enumerate(ALARM_DEFS):
-            box = QtWidgets.QCheckBox(desc[0].upper() + desc[1:])
-            box.setChecked(settings.alarms.get(name, True))
-            self.alarm_checks[name] = box
+        self.alarm_checks, self.priority_boxes = {}, {}
+        for i, d in enumerate(ALARM_DEFS):
+            box = QtWidgets.QCheckBox(d.desc[0].upper() + d.desc[1:])
+            box.setChecked(settings.alarms.get(d.name, True))
+            self.alarm_checks[d.name] = box
             grid.addWidget(box, i, 0)
+            prio = QtWidgets.QComboBox()
+            for p, word in PRIORITY_NAMES.items():
+                prio.addItem(priority_icon(p), f'{p} {word}', p)
+            prio.setCurrentIndex(prio.findData(settings.priorities.get(d.name, d.priority)))
+            prio.setToolTip(f'Priority: how it shows on the lamps, the row and the banner, and whether it sounds '
+                            f'(1 only). Default {d.priority}.')
+            box.toggled.connect(prio.setEnabled)
+            prio.setEnabled(box.isChecked())
+            self.priority_boxes[d.name] = prio
+            grid.addWidget(prio, i, 3)
 
         def spin(value, lo, hi, suffix, decimals=0):
             w = QtWidgets.QDoubleSpinBox()
@@ -9194,6 +9551,7 @@ class ReceiverDialog(QtWidgets.QDialog):
             'rds_feed': self.feed.isChecked(),
             'rds_port': 0 if self.port.value() == self.default_port else self.port.value(),
             'alarms': {name: box.isChecked() for name, box in self.alarm_checks.items()},
+            'priorities': {name: box.currentData() for name, box in self.priority_boxes.items()},
             'silence_lufs': self.silence_lufs.value(),
             'silence_s': int(self.silence_s.value()),
             'min_snr_db': self.min_snr.value(),
@@ -9350,6 +9708,7 @@ class AppConfig:
     web_bind: str = '0.0.0.0'          # '127.0.0.1' = this PC only
     web_password_hash: str = ''        # hash_password(); '' = controls only in a browser on this PC
     record: bool = False               # write each receiver's readings once a minute (Recorder)
+    alarm_sound: bool = False          # a tone while a priority 1 alarm waits to be acknowledged
     keep_days: int = KEEP_DAYS         # delete event logs and records older than this; 0 = keep them
     detail_all: list = field(default_factory=list)  # detail cards showing all their readings (CARDS keys)
 
@@ -9373,6 +9732,7 @@ class AppConfig:
         out.web_password_hash = str(out.web_password_hash or '')
         cards = out.detail_all if isinstance(out.detail_all, list) else []
         out.record = bool(out.record)
+        out.alarm_sound = bool(out.alarm_sound)
         try:
             out.keep_days = max(0, min(3650, int(out.keep_days)))
         except (TypeError, ValueError):
@@ -10289,6 +10649,11 @@ class MainWindow(QtWidgets.QWidget):
         self.add_btn.clicked.connect(self._add_receiver)
         top.addWidget(self.add_btn)
         layout.addLayout(top)
+        self.banner = AlarmBanner(self.acknowledge)
+        layout.addWidget(self.banner)
+        self._beep = QtCore.QTimer(self)   # the optional alarm sound (Settings)
+        self._beep.timeout.connect(self._alarm_sound)
+        self._beep.start(ALARM_BEEP_S * 1000)
         self.header_text = ''
         receivers = QtWidgets.QWidget()
         box = QtWidgets.QVBoxLayout(receivers)
@@ -10310,6 +10675,7 @@ class MainWindow(QtWidgets.QWidget):
         self.log_view.setMaximumBlockCount(500)
         self.log_view.setFont(QtGui.QFont('Consolas', 9))
         self.alarm_table = AlarmTable()
+        self.alarm_table.on_ack = self.acknowledge
         self.log_tabs = QtWidgets.QTabBar()
         self.log_tabs.setObjectName('detailTabs')
         self.log_tabs.setDrawBase(False)
@@ -10361,6 +10727,7 @@ class MainWindow(QtWidgets.QWidget):
         panel.slot = slot
         panel.settings = settings or ReceiverSettings()
         panel.on_detail_all = self._set_detail_all
+        panel.on_ack = self._ack_panel
         panel.set_detail_all(self.app_config.detail_all if self.app_config else self._detail_all)
         panel.set_source(panel.settings.audio_source)
         st.audio_source = panel.settings.audio_source
@@ -10455,7 +10822,7 @@ class MainWindow(QtWidgets.QWidget):
     def _app_settings(self):
         app = self.app_config or AppConfig(setup_done=True)
         dialog = AppSettingsDialog(self, self.notify_settings, self.notifier, app.sdr, self.sdr_report,
-                                   self.recorder.on, app.keep_days, win=self)
+                                   self.recorder.on, app.keep_days, win=self, alarm_sound=app.alarm_sound)
         result = dialog.exec_()
         if result == AppSettingsDialog.RUN_SETUP:
             self.run_setup()
@@ -10472,6 +10839,11 @@ class MainWindow(QtWidgets.QWidget):
             self.log(f'settings: event logs and records kept {f"for {days} days" if days else "for ever"}')
             self._pruned_on = None
             self.prune()
+        sound = dialog.alarm_sound.isChecked()
+        if self.app_config and sound != self.app_config.alarm_sound:
+            self.app_config.alarm_sound = sound
+            self.save()
+            self.log(f'settings: alarm sound {"on" if sound else "off"}')
         self._apply_autostart(dialog.autostart.isChecked())
 
     def _apply_sdr(self, sdr):
@@ -11185,14 +11557,16 @@ class MainWindow(QtWidgets.QWidget):
                 self.log(f'receiver {panel.slot + 1}: IBOC not started: {e}')
         st.set_audio(key, on)
 
-    def _alarm_event(self, panel, desc, raised, detail=''):
+    def _alarm_event(self, panel, name, desc, raised, detail=''):
         key = (panel.slot, panel.station.freq_hz)
+        prio = panel.settings.priorities.get(name, 3)
         if raised:
-            self.alarm_table.raised(key, panel.title, desc, detail)
+            self.alarm_table.raised(key, panel.title, desc, detail, name=name, priority=prio, slot=panel.slot)
         else:
             self.alarm_table.cleared(key, desc)
-        self._alarm_tab()
-        text = f'{panel.title}: {"ALARM" if raised else "cleared"} - {desc}' + (f': {detail}' if detail else '')
+        self._sync_unacked()
+        text = (f'{panel.title}: {"ALARM" if raised else "cleared"} - {desc}' + (f': {detail}' if detail else '')
+                + (f' (priority {prio})' if raised else ''))
         self.log(text)
         if not self._recovery:
             self.notifier.event('raise' if raised else 'clear', text)
@@ -11202,18 +11576,63 @@ class MainWindow(QtWidgets.QWidget):
         them (retuned or removed), so email and webhooks see each one end."""
         for name, _, desc, *_ in ALARM_DEFS:
             if name in panel.alarms.active:
-                self._alarm_event(panel, desc, False, why)
+                self._alarm_event(panel, name, desc, False, why)
         panel.alarms.active.clear()
 
+    def acknowledge(self, ids, by='this PC'):
+        """Acknowledge the alarm episodes with these ids (the log, a lamp, a row, the
+        banner or the web page); each is logged once. Returns how many were waiting."""
+        done = self.alarm_table.acknowledge(ids, by)
+        for e in done:
+            self.log(f'{e["station"]}: acknowledged ({by}) - {e["desc"]}'
+                     + ('' if e['end'] is None else ' (cleared already)'))
+        self._sync_unacked()
+        return len(done)
+
+    def _alarm_sound(self):
+        """A short tone while a priority 1 alarm waits to be acknowledged, if the
+        alarm sound is on (Settings). Off a background thread: winsound.Beep blocks."""
+        if not (self.app_config and self.app_config.alarm_sound):
+            return
+        if not any(e['priority'] == 1 for e in self.alarm_table.unacked()):
+            return
+        if os.name == 'nt':
+            import winsound
+            threading.Thread(target=lambda: (winsound.Beep(880, 180), winsound.Beep(660, 180)), daemon=True).start()
+        else:
+            QtWidgets.QApplication.beep()
+
+    def _ack_panel(self, panel, name=None):
+        """Acknowledge a receiver's alarms waiting (name: only that one)."""
+        key = (panel.slot, panel.station.freq_hz)
+        self.acknowledge([e['id'] for e in self.alarm_table.unacked()
+                          if e['key'] == key and (name is None or e['name'] == name)])
+
+    def _sync_unacked(self):
+        """Each receiver's lamps from the log: an alarm of its current station waits
+        to be acknowledged while an episode of it does. Then the banner and log tab."""
+        waiting = self.alarm_table.unacked()
+        for p in self.panels:
+            key = (p.slot, p.station.freq_hz)
+            unacked = {e['name'] for e in waiting if e['key'] == key}
+            if unacked != p.alarms.unacked:
+                p.alarms.unacked = unacked
+                p.show_alarms()
+        self._alarm_tab()
+
     def _alarm_tab(self):
-        n = self.alarm_table.raised_now()
-        self.log_tabs.setTabText(0, f'Alarms \u00b7 {n} raised' if n else 'Alarms')
-        self.log_tabs.setTabTextColor(0, QtGui.QColor(RED if n else '#9aa0a6'))
+        n, waiting = self.alarm_table.raised_now(), len(self.alarm_table.unacked())
+        parts = [f'{n} raised'] * bool(n) + [f'{waiting} to acknowledge'] * bool(waiting)
+        self.log_tabs.setTabText(0, 'Alarms' + (' \u00b7 ' + ', '.join(parts) if parts else ''))
+        self.log_tabs.setTabTextColor(0, QtGui.QColor(RED if n or waiting else '#9aa0a6'))
+        self.banner.set_episodes(self.alarm_table.unacked())
 
     def _refresh(self):
         self._ticks = getattr(self, '_ticks', 0) + 1
         if self._ticks % UPDATE_HZ == 0 and self.alarm_table.raised_now():
             self.alarm_table.redraw()   # the running durations
+        if self._ticks % UPDATE_HZ == 0:
+            self.banner.tick()
         for p in self.panels:
             if p.feed and p.feed.clients != self._feed_clients.get(p.slot, 0):
                 n, was = p.feed.clients, self._feed_clients.get(p.slot, 0)
@@ -11223,8 +11642,8 @@ class MainWindow(QtWidgets.QWidget):
             if self.overload.active or self.antenna:
                 p.alarms.hold()   # the SDR's overload falsifies every reading, and antenna changes aren't the
                                   # stations' fault
-            for desc, raised, detail in p.refresh():
-                self._alarm_event(p, desc, raised, detail)
+            for name, desc, raised, detail in p.refresh():
+                self._alarm_event(p, name, desc, raised, detail)
             alert = p.station.iboc.status['alert'] if p.station.iboc else None
             if alert != getattr(p, 'last_alert', None):
                 if alert:
@@ -11268,8 +11687,12 @@ class MainWindow(QtWidgets.QWidget):
             'listeners': web.listeners(), 'max_listeners': WEB_MAX_LISTENERS,
             'alarm_defs': [[d.name, d.desc, d.short] for d in ALARM_DEFS],
             'alarm_means': Annunciator.MEANS,
-            'alarm_episodes': [{k: e[k] for k in ('station', 'desc', 'start', 'end', 'detail')}
+            'alarm_episodes': [{k: e[k] for k in ('id', 'slot', 'name', 'priority', 'station', 'desc', 'start', 'end',
+                                                  'detail', 'acked', 'acked_by')}
                                for e in self.alarm_table.episodes[-100:]],
+            'alarm_waiting': [e['id'] for e in self.alarm_table.unacked()],
+            'priority_colours': PRIORITY_COLOURS, 'priority_names': PRIORITY_NAMES,
+            'alarm_beep_s': ALARM_BEEP_S,
             'now': time.time(),
             'peak_hist': [PeakHistogram.LO, PeakHistogram.HI, PeakHistogram.STEP],
             'trend_span_s': TREND_SPAN_S, 'clean': [PEAK_AM_PCT, CLEAN_AM_PCT],
@@ -11335,6 +11758,20 @@ class MainWindow(QtWidgets.QWidget):
             elif not self.antenna_mark(str(args.get('label', ''))[:80]):
                 raise ValueError('nothing measured yet')
             return None
+        if action == 'ack':
+            # ids: those episodes; receiver: that receiver's waiting; neither: every one waiting
+            waiting = self.alarm_table.unacked()
+            if args.get('ids') is not None:
+                try:
+                    ids = {int(i) for i in args['ids']}
+                except (TypeError, ValueError):
+                    raise ValueError('ids: a list of alarm numbers') from None
+                pick = [e['id'] for e in waiting if e['id'] in ids]
+            elif args.get('receiver') is not None:
+                pick = [e['id'] for e in waiting if e['slot'] is not None and e['slot'] + 1 == args['receiver']]
+            else:
+                pick = [e['id'] for e in waiting]
+            return {'acknowledged': self.acknowledge(pick, by='web')}
         if action == 'add':
             if len(self.panels) >= MAX_RECEIVERS or self._candidate() is None:
                 raise ValueError(self.add_btn.toolTip() or 'no receiver can be added')

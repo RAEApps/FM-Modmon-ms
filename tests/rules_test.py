@@ -226,7 +226,7 @@ finally:
 lost = QtGui.QTextDocumentFragment.fromHtml(p.values['Data services'].text()).toPlainText()
 check('Data services row names it while on air', on_air.startswith('Alert FM Paging (7A)'), True)
 check('...and names it once lost', lost, 'Alert FM Paging (7A) lost')
-check('"data service lost" alarm names it', [(desc, raised, detail) for desc, raised, detail in changes],
+check('"data service lost" alarm names it', [(desc, raised, detail) for _, desc, raised, detail in changes],
       [('data service lost (paging, EWS, ODA or SCA data)', True,
         f'not on air for {rm.DATA_GAP_S:.0f}+ s: Alert FM (Paging (7A))')])
 
