@@ -14,7 +14,7 @@ one file: `fm-modmon-ms.py`, plus its web page `fm-modmon-ms-web.html`.
   `tests\centre_test.py` covers where the SDR centres (off DC, off IQ images, inside the IF filter).
   `tests\rds_feed_test.py` covers the RDS group TCP feed (a stalled client never blocks the decoder).
   `tests\gain_test.py` covers the band scan's and gain calibration's ADC headroom (a simulated, clipping RSP1A,
-  and a one-gain-stage SDR).
+  a one-gain-stage SDR, and one that delivers only zeros).
   `tests\record_test.py` covers the on-demand measurement records (`Recorder`, the REC chip) and
   `prune_files` (old event logs and records deleted after `keep_days`).
   `tests\notify_test.py` covers `Notifier` (email to a fake SMTP server, each webhook format, batching,

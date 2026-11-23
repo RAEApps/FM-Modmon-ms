@@ -339,6 +339,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1566,6 +1567,10 @@ def _scan_capture(rsp, gain):
         if gain is None:
             break
         rsp.set_gain(*gain)
+    if not np.any(x):   # open, but no signal at all: say so (its spectrum would be all zeros)
+        raise RuntimeError(f'the {SDR.name} is open but delivers only zeros (no signal at all, not even noise). '
+                           'Unplug it and plug it back in; check its driver or service is running, and that '
+                           'no other program is using it.')
     return x
 
 
@@ -1591,9 +1596,9 @@ def _scan(rsp, verbose, gain=None):
             k = int(round(off / bin_hz)) + nfft // 2
             half = int(60e3 / bin_hz)
             lsb, usb = psd[k - sb_hi:k - sb_lo + 1], psd[k + sb_lo:k + sb_hi + 1]
-            power[ch] = (10 * math.log10(np.mean(psd[k - half:k + half + 1])), floor,
+            power[ch] = (_db_floor(np.mean(psd[k - half:k + half + 1])), floor,
                          float(np.sum(psd[k - an_half:k + an_half + 1])),
-                         10 * math.log10(np.mean(lsb)), 10 * math.log10(np.mean(usb)),
+                         _db_floor(np.mean(lsb)), _db_floor(np.mean(usb)),
                          float(np.sum(lsb) + np.sum(usb)))
 
     found, iboc_scan = [], {}
@@ -1609,8 +1614,8 @@ def _scan(rsp, verbose, gain=None):
         _, floor, an, lsb_db, usb_db, sb = power[ch]
         if stations & {ch - 2, ch + 2}:
             iboc_scan[f] = 'adjacent'
-        elif min(lsb_db, usb_db) - floor >= IBOC_MIN_DB and 10 * math.log10(sb / an) >= IBOC_MIN_DBC:
-            iboc_scan[f] = 10 * math.log10(sb / an)
+        elif an > 0 and min(lsb_db, usb_db) - floor >= IBOC_MIN_DB and _db_floor(sb / an) >= IBOC_MIN_DBC:
+            iboc_scan[f] = _db_floor(sb / an)
         else:
             iboc_scan[f] = None
     if verbose:
@@ -1697,7 +1702,7 @@ def window_snrs(x, center_hz, freqs_hz):
     half = int(60e3 / bin_hz)
     for f in freqs_hz:
         k = int(round((f - center_hz) / bin_hz)) + nfft // 2
-        snrs.append(10 * math.log10(float(np.mean(psd[k - half:k + half + 1]))) - floor)
+        snrs.append(_db_floor(np.mean(psd[k - half:k + half + 1])) - floor)
     return peak_db, clipped, snrs
 
 
@@ -2027,6 +2032,31 @@ def make_source(center_hz, gain):
 
 def _db(power):
     return 10 * math.log10(power) if power > 1e-20 else -math.inf
+
+
+def startup_error_log(e):
+    """Write what stopped start-up, with its traceback, to the console and to a file (the
+    logs folder, else the temp folder when that isn't writable, as under Program Files);
+    returns the file's path, or None."""
+    text = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+    print(text, file=sys.stderr)
+    name = f'{APP_NAME.lower()}_startup_error.log'
+    for folder in (LOG_DIR, tempfile.gettempdir()):
+        path = os.path.join(folder, name)
+        try:
+            os.makedirs(folder, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")}  {APP_NAME} could not start\n\n{text}')
+            return path
+        except OSError:
+            continue
+    return None
+
+
+def _db_floor(power):
+    """dB of a power that can be exactly 0 (an SDR handing over zeros): -200 dB then,
+    never math.log10's "math domain error"."""
+    return 10 * math.log10(max(float(power), 1e-20))
 
 
 def _percentiles(x, qs):
@@ -13112,7 +13142,9 @@ def main():
         hint = ('\n\n' + SDR.hint.format(name=SDR.name)
                 if not isinstance(e, SdrNotFound) and re.search(r'rsp|sdrplay|rtl|uhd|soapy|device', str(e), re.I)
                 else '')
-        QtWidgets.QMessageBox.critical(None, APP_NAME, f'{APP_NAME} could not start:\n\n{e}{hint}')
+        where = startup_error_log(e)
+        QtWidgets.QMessageBox.critical(None, APP_NAME, f'{APP_NAME} could not start:\n\n{e}{hint}'
+                                       + (f'\n\nThe details are in {where}' if where else ''))
         if not SDR.closes_cleanly:     # (it may be open: never close it in-process)
             sys.stdout.flush()
             sys.stderr.flush()
