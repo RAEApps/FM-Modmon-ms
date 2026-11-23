@@ -2,8 +2,8 @@
 import importlib.util, json, os, socket, sys, tempfile, urllib.request
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.stdout.reconfigure(encoding='utf-8')
-APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py')
-spec = importlib.util.spec_from_file_location('fm', APP); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+from loadapp import load_app  # noqa: E402
+m = load_app()
 from PyQt5 import QtCore, QtWidgets
 app = QtWidgets.QApplication([])
 m.apply_dark_theme(app)

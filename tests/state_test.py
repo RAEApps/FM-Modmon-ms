@@ -1,15 +1,13 @@
 """The panel's plain readings (StationPanel.readings), the alarm states an
 annunciator shows, and the per-receiver History, against synthetic stations."""
-import importlib.util
 import os
 import sys
 import types
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 import numpy as np
 import fmtx
 from PyQt5 import QtWidgets

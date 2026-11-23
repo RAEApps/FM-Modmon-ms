@@ -419,6 +419,7 @@ CAL_CLIP = 0.9            # ...and any sample at this fraction of full scale mea
 CAL_LNA_STATES = range(9, -1, -1)  # SDRplay: tried from least gain to most
 CAL_STEP_DB = 3.0          # one gain stage (RTL-SDR, B210): raised this much at a time
 HELPER_TIMEOUT_S = 300     # start-up scan / calibration in a helper (B210): killed if not done in this long
+STOP_TIMEOUT_S = 10        # at exit, a B210's flowgraph given this long to stop (its samples may have stalled)
 IQ_TAP_BATCH = 65536       # live calibration reads the SDR in batches this big
 TUNE_RATE_HZ = 5           # antenna tuning: S/N measured this many times a second...
 TUNE_SAMPLES = 1 << 19     # ...each from this many IQ samples (128 spectra of 4096)...
@@ -638,6 +639,11 @@ class SdrProfile:
         is the SDR's overall gain (SoapySDR spreads it over its gain elements)."""
         for s, v in zip(self.stages, self.clamp(gain)):
             set_one(s.name, v)
+
+    @property
+    def sdrplay_gain(self):
+        """Its gain is SDRplay's LNA state and IF gain reduction (higher = less gain), not one gain in dB."""
+        return self.stages == _SDRPLAY_GAIN
 
 
 _SDRPLAY_GAIN = (GainStage('RFGR', 'LNA', 0, 9, ''), GainStage('IFGR', 'IFGR', 20, 59))  # higher = less gain
@@ -1532,7 +1538,7 @@ def band_scan(gain, verbose=False):
 def _less_gain(gain, by_db):
     """gain turned down by at least by_db (SDRplay: the IF gain first, then the
     LNA); None if it is already at the least."""
-    if len(SDR.stages) == 1:
+    if not SDR.sdrplay_gain:
         s = SDR.stages[0]
         return None if gain[0] <= s.lo else (max(s.lo, gain[0] - by_db),)
     lna, ifgr = gain
@@ -1612,7 +1618,7 @@ def _scan(rsp, verbose, gain=None):
     return found, iboc_scan
 
 
-class _Rsp:
+class _Capture:
     """What the band scan and gain calibration need from the SDR: tune(hz),
     set_gain(*gain) (one value per SDR.stages) and capture(n) -> complex64 IQ."""
 
@@ -1660,7 +1666,7 @@ def _sdr_direct(gain, center_hz=None):
         return out
 
     try:
-        yield _Rsp(lambda hz: dev.setFrequency(SOAPY_SDR_RX, 0, hz), set_gain, capture)
+        yield _Capture(lambda hz: dev.setFrequency(SOAPY_SDR_RX, 0, hz), set_gain, capture)
     finally:
         if not _IN_CHILD:   # (a helper process exits without closing it: see _in_child)
             dev.deactivateStream(stream)
@@ -1694,7 +1700,7 @@ def window_snrs(x, center_hz, freqs_hz):
 
 def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
     """Choose the gain for receiving freqs_hz with the SDR centred on
-    center_hz. rsp is an _Rsp already tuned there.
+    center_hz. rsp is an _Capture already tuned there.
 
     SDRplay: for each LNA state (least gain first) the IF gain reduction is
     set so the ADC's peaks sit at CAL_PEAK_DBFS. One gain stage (RTL-SDR,
@@ -1724,7 +1730,7 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
         last = [t[3] for t in tried[-3:]]
         return len(good) >= 4 and len(last) == 3 and max(last) - min(last) < 1.0  # antenna noise dominates
 
-    if len(SDR.stages) == 2:                     # SDRplay: LNA state, IF gain reduction
+    if SDR.sdrplay_gain:                         # LNA state, IF gain reduction
         ifgr = 40
         for lna in CAL_LNA_STATES:
             rsp.set_gain(lna, ifgr)
@@ -1757,7 +1763,7 @@ def calibrate_gain(rsp, center_hz, freqs_hz, progress=None):
     gain, peak_db, _, snr, worst = next(t for t in good if t[3] >= best - CAL_TOLERANCE_DB)
     report = (f'{SDR.gain_text(gain)}: stations {snr:.0f} dB over the floor on average '
               f'(weakest {worst:.0f} dB), '
-              f'ADC peaks {peak_db:.0f} dBFS ({len(tried)} {"LNA states" if len(SDR.stages) == 2 else "gains"} tried)')
+              f'ADC peaks {peak_db:.0f} dBFS ({len(tried)} {"LNA states" if SDR.sdrplay_gain else "gains"} tried)')
     return gain, report
 
 
@@ -3018,7 +3024,7 @@ class RdsGroupServer:
                     conn.close()
                     continue
                 self._clients[conn] = q
-            threading.Thread(target=self._writer, args=(conn, q), daemon=True).start()
+            threading.Thread(target=self._writer, args=(conn, q), daemon=True, name='rds-feed-writer').start()
         self._sock.close()
 
     def close(self):
@@ -4337,7 +4343,7 @@ class FmMonitor(gr.top_block):
 
         try:
             freqs = [st.freq_hz for st in self.stations]
-            gain, report = calibrate_gain(_Rsp(None, set_gain, tap.grab), self.center_hz, freqs, progress)
+            gain, report = calibrate_gain(_Capture(None, set_gain, tap.grab), self.center_hz, freqs, progress)
         except Exception:
             set_gain(*self.gain)
             raise
@@ -6484,7 +6490,7 @@ class StereoWindow(QtWidgets.QDialog):
         corr = (st.audio_meter.stats or {}).get('correlation')
         self.phase.set_value(corr, '-' if corr is None else f'{corr:+.2f}')
         self.readouts.setText('   \u00b7   '.join(
-            f'{n}: <b style="color:#e0e0e0">{QtGui.QTextDocumentFragment.fromHtml(panel.values[n].text()).toPlainText()}</b>'
+            f'{n}: <b style="color:#e0e0e0">{panel.plain_value(n)}</b>'
             for n in self.READOUTS))
 
 
@@ -6514,8 +6520,7 @@ class MpxWindow(QtWidgets.QDialog):
     def follow(self, panel):
         self.setWindowTitle(f'{panel.title} \u2013 MPX spectrum')
         self.spectrum.set_data(panel.readings.get('mpx_db'))
-        plain = lambda n: QtGui.QTextDocumentFragment.fromHtml(panel.values[n].text()).toPlainText()  # noqa: E731
-        self.readouts.setText('   \u00b7   '.join(f'{n}: <b style="color:#e0e0e0">{_html(plain(n))}</b>'
+        self.readouts.setText('   \u00b7   '.join(f'{n}: <b style="color:#e0e0e0">{_html(panel.plain_value(n))}</b>'
                                                 for n in self.READOUTS if n in panel.values))
 
 
@@ -8506,6 +8511,10 @@ class StationPanel(QtCore.QObject):
         self.show_alarms()
         return changes
 
+    def plain_value(self, name):
+        """A readout's text as shown, without its markup."""
+        return QtGui.QTextDocumentFragment.fromHtml(self.values[name].text()).toPlainText()
+
     def show_alarms(self):
         """The lamps, the status cell and the row's tint from the latest alarm states
         (again after an acknowledgement, without waiting for the next update)."""
@@ -9776,6 +9785,8 @@ class Notifier:
         self.results = queue.Queue()
         self.last_reply = {}            # channel -> the server's last answer to a message
         self._q = queue.Queue()
+        self._batch = []                # events being gathered by _run, not sent yet
+        self._lock = threading.Lock()
         threading.Thread(target=self._run, daemon=True).start()
 
     def enabled(self, kind):
@@ -9787,9 +9798,22 @@ class Notifier:
             self._q.put((time.strftime('%Y-%m-%d %H:%M:%S'), kind, text))
 
     def send_now(self, kind, text, timeout=8):
-        """Send one event at once, without retries (for "stopped", as the app exits)."""
-        if self.enabled(kind):
-            self._deliver([(time.strftime('%Y-%m-%d %H:%M:%S'), kind, text)], retries=(), timeout=timeout)
+        """Send one event at once, without retries (for "stopped", as the app exits),
+        with any still waiting to go."""
+        self.flush(timeout, [(time.strftime('%Y-%m-%d %H:%M:%S'), kind, text)] if self.enabled(kind) else [])
+
+    def flush(self, timeout=8, more=()):
+        """Send now, without retries, the events still waiting to go (and `more`)."""
+        with self._lock:
+            batch, self._batch = self._batch, []
+        while True:
+            try:
+                batch.append(self._q.get_nowait())
+            except queue.Empty:
+                break
+        batch += more
+        if batch:
+            self._deliver(batch, retries=(), timeout=timeout)
 
     def test(self, settings, password=None):
         """Send a test message with `settings` (and an SMTP password not stored yet);
@@ -9801,14 +9825,21 @@ class Notifier:
 
     def _run(self):
         while True:
-            batch = [self._q.get()]
+            event = self._q.get()
             deadline = time.monotonic() + NOTIFY_BATCH_S
-            while (left := deadline - time.monotonic()) > 0:
+            while True:
+                with self._lock:
+                    self._batch.append(event)
+                if (left := deadline - time.monotonic()) <= 0:
+                    break
                 try:
-                    batch.append(self._q.get(timeout=left))
+                    event = self._q.get(timeout=left)
                 except queue.Empty:
                     break
-            self._deliver(batch)
+            with self._lock:
+                batch, self._batch = self._batch, []
+            if batch:           # (empty: flush sent them)
+                self._deliver(batch)
 
     def _deliver(self, batch, settings=None, retries=NOTIFY_RETRY_S, timeout=15, report=True, password=None):
         s = settings or self.settings
@@ -11228,7 +11259,7 @@ class MainWindow(QtWidgets.QWidget):
         if change:
             text = (f'SDR overload: the {SDR.name}\'s wideband samples reach {_dbfs(peak):.1f} dBFS (clipping from '
                     f'{_dbfs(CAL_CLIP):.1f}): every receiver\'s readings may be false. Recalibrate gain, '
-                    + ('or with --lna / --ifgr use less gain (higher values)' if len(SDR.stages) == 2 else
+                    + ('or with --lna / --ifgr use less gain (higher values)' if SDR.sdrplay_gain else
                        'or use less gain (--gain)'))
         else:
             text = f'SDR overload cleared: no wideband peak at {_dbfs(CAL_CLIP):.1f} dBFS for {ADC_OVERLOAD_CLEAR_S} s'
@@ -11243,7 +11274,7 @@ class MainWindow(QtWidgets.QWidget):
             text = (f'SDR lost: no samples from the {SDR.name} for {silent:.0f} s; '
                     f'restarting {APP_NAME} to reopen it')
             self.log(text)
-            self.notifier.send_now('sdr', text)   # (now: this process ends in a moment)
+            self.notifier.event('sdr', text)   # (sent as this process ends, in a moment)
             self.save()
             self.switch_to, self.restart_extra = SDR.key, ['--recovering']
             QtWidgets.QApplication.quit()
@@ -11949,7 +11980,7 @@ def build_parser(width=100):
                            'attached (default: as set in Setup, else auto)')
     ap.add_argument('--scan-sdrs', action='store_true',
                     help='list the SDRs attached (known, profiled here, or new) and exit')
-    ap.add_argument('--profile-sdr', metavar='SDR',
+    ap.add_argument('--profile-sdr', metavar='SERIAL',
                     help='profile the attached SDR with this serial or key (also one already profiled, '
                          'or a built-in kind, to compare) and exit; the monitor must not be using it')
     ap.add_argument('--no-sdr-profile', action='store_true',
@@ -12048,7 +12079,7 @@ def configure_sdr(args, key, serial='', error=None):
     it can't take (default: the command-line error, which exits)."""
     error = error or build_parser().error
     use_sdr(key, serial)
-    sdrplay = len(SDR.stages) == 2
+    sdrplay = SDR.sdrplay_gain
     if args.gain_db is not None and sdrplay:
         error(f'the {SDR.name} takes --lna and --ifgr, not --gain')
     if (args.lna is not None or args.ifgr is not None) and not sdrplay:
@@ -12291,6 +12322,20 @@ RESTART_DROP = {'--sdr': 1, '--lna': 1, '--ifgr': 1, '--gain': 1, '--after-pid':
                 '--recovering': 0}
 
 
+def stop_flowgraph(tb, timeout=None):
+    """tb.stop() and tb.wait(). With a timeout they run in a thread, given up on after
+    that long: when a B210's samples have stalled, wait() can block for ever, and that
+    process ends with os._exit anyway. Returns whether it stopped."""
+    if timeout is None:
+        tb.stop()
+        tb.wait()
+        return True
+    t = threading.Thread(target=lambda: (tb.stop(), tb.wait()), daemon=True)
+    t.start()
+    t.join(timeout)
+    return not t.is_alive()
+
+
 def restart_argv(argv, sdr, pid):
     """The command line to restart on SDR `sdr` (switch_sdr): argv without the
     options that pin the old SDR, its gain or its stations (the receivers come back
@@ -12403,6 +12448,10 @@ def main():
                 if not isinstance(e, SdrNotFound) and re.search(r'rsp|sdrplay|rtl|uhd|soapy|device', str(e), re.I)
                 else '')
         QtWidgets.QMessageBox.critical(None, APP_NAME, f'{APP_NAME} could not start:\n\n{e}{hint}')
+        if not SDR.closes_cleanly:     # (it may be open: never close it in-process)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
         sys.exit(1)
     win.log(f'SDR: {sdr_report}')
     if cal_report:
@@ -12445,11 +12494,21 @@ def main():
                            + ', '.join(p.title for p in win.panels))
     else:
         win.notifier.event('startstop', 'FM-Modmon-ms started: ' + ', '.join(p.title for p in win.panels))
-    app.aboutToQuit.connect(lambda: (win.log('monitor stopped' + (' to restart' if win.switch_to else '')),
-                                     web and web.close_audio(), tb.stop_all_iboc(), tb.stop(), tb.wait(),
-                                     clear_cache(),
-                                     None if win.switch_to else   # (it's back in half a minute)
-                                     win.notifier.send_now('startstop', 'FM-Modmon-ms stopped')))
+    def stopping():
+        win.log('monitor stopped' + (' to restart' if win.switch_to else ''))
+        win.hide()     # (the last notifications can take some seconds to go)
+        if web:
+            web.close_audio()
+        tb.stop_all_iboc()
+        if not stop_flowgraph(tb, None if SDR.closes_cleanly else STOP_TIMEOUT_S):
+            print(f'the flowgraph did not stop in {STOP_TIMEOUT_S:g} s; ending anyway', flush=True)
+        clear_cache()
+        if win.switch_to:   # (it's back in half a minute): only what is waiting to go
+            win.notifier.flush()
+        else:
+            win.notifier.send_now('startstop', 'FM-Modmon-ms stopped')
+
+    app.aboutToQuit.connect(stopping)
     code = app.exec_()
     if win.switch_to:
         subprocess.Popen([sys.executable, os.path.abspath(__file__)]

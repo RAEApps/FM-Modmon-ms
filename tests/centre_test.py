@@ -1,15 +1,13 @@
 """Where the SDR centres for a set of stations: off the RSP1A's DC offset, off
 every other station's IQ image, and no station past the IF filter's usable edge."""
-import importlib.util
 import itertools
 import os
 import random
 import sys
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 
 bad = 0
 

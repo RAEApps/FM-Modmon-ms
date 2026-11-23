@@ -3,7 +3,6 @@ new, failed, unusable), a simulated radio the monitor has no profile for is
 profiled (its fastest clean rate, its filter's flat part, a starting gain, whether
 it closes cleanly) into a usable profile, and learned profiles are saved, chosen,
 forgotten and redone. No SDR needed. Exits non-zero on a failure."""
-import importlib.util
 import json
 import os
 import sys
@@ -14,9 +13,8 @@ import numpy as np
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 
 bad = []
 

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 #
-# SPDX-License-Identifier: GPL-3.0
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # GNU Radio Python Flow Graph
 # Title: WBFM Receiver 100.3 MHz (Simulation)

@@ -1,16 +1,14 @@
 """Band scan and gain calibration against a simulated RSP1A whose ADC clips:
 a strong station must not hide the others in its scan window, and calibration
 must keep the ADC peaks at CAL_PEAK_DBFS. Exits non-zero on a failure."""
-import importlib.util
 import os
 import sys
 
 import numpy as np
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 
 bad = []
 

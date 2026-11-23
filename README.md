@@ -130,8 +130,8 @@ station and day, local time): the minute's peak modulation and AM as their maxim
 readings (RF, S/N, carrier offset, pilot, RDS, MPX power, loudness, correlation) as their
 mean, and the alarms raised in that minute. The chip's menu opens the folder.
 
-Event logs and records are kept until you set, in *Settings*, how many days to keep them; older
-ones are then deleted at start and once a day (0, the default, keeps them all).
+Event logs and records are kept until you set, in *Settings*, how many days to keep them (today
+counts as one); older ones are then deleted at start and once a day (0, the default, keeps them all).
 
 > The monitor is a measurement aid, not a type-approved modulation monitor. Carrier
 > offset includes the SDR's own tuning error, and levels depend on gain calibration.
@@ -349,7 +349,8 @@ proxy, or reach it over a VPN. Don't expose it directly to the internet.
 Each receiver serves its error-free RDS groups over TCP (by default ports 7711–7714 for
 receivers 1–4; each receiver's port can be changed or the feed turned off in its settings) as
 hex text, one group per line – the format of an Inovonics INOmini 633 or RDS Spy – for other
-RDS software.
+RDS software. While no group has gone out for a second, an all-errored line (`---- ---- ---- ----`) is sent
+each second: the receiver is running but decodes no RDS, which a client can tell from a silent monitor.
 
 ## Tests
 

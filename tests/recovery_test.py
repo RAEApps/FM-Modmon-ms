@@ -3,7 +3,6 @@ _recover / _watch_sdr / _sdr_recovered on a stub window with a fake flowgraph wh
 SDR fails to open N times), the restart for an SDR that can't be closed in-process
 (the B210), the restarted process waiting for it (detect_sdr --recovering),
 restart_argv and _retry. No SDR is opened: the device and the clock are fakes."""
-import importlib.util
 import os
 import re
 import sys
@@ -12,9 +11,8 @@ import types
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 
 bad = 0
 real_time = rm.time
@@ -184,8 +182,8 @@ finally:
     rm.QtWidgets = real_qtw
 check('no reopening started', (w._recovery, tb.attaches, tb.detaches), (None, 0, 0))
 check('logged', w.logged, ['SDR lost: no samples from the B210 for 7 s; restarting FM-Modmon-ms to reopen it'])
-check('notified at once (the process ends), not queued', (w.sent_now, w.events),
-      ([('sdr', 'SDR lost: no samples from the B210 for 7 s; restarting FM-Modmon-ms to reopen it')], []))
+check('notified by the queue (flushed as the process ends), not sent on the GUI thread', (w.sent_now, w.events),
+      ([], [('sdr', 'SDR lost: no samples from the B210 for 7 s; restarting FM-Modmon-ms to reopen it')]))
 check('settings saved, app quit', (w.saved, len(quits)), (1, 1))
 check('restart on the same SDR, recovering', (w.switch_to, w.restart_extra), ('b210', ['--recovering']))
 # main() then starts: restart_argv(sys.argv[1:], win.switch_to, os.getpid()) + win.restart_extra
@@ -311,6 +309,17 @@ finally:
     rm._in_child, rm.SDR = real_child, real_sdr
 check('B210 start-up helpers have a timeout', calls,
       [('band_scan', rm.HELPER_TIMEOUT_S), ('calibrate_startup', rm.HELPER_TIMEOUT_S)])
+
+# At exit a B210 whose samples stalled can leave the flowgraph's wait() stuck: given up on.
+stuck = threading.Event()
+done = []
+stopping = types.SimpleNamespace(stop=lambda: done.append('stop'), wait=lambda: done.append('wait'))
+hung = types.SimpleNamespace(stop=lambda: None, wait=stuck.wait)
+check('stop_flowgraph: stops and waits', (rm.stop_flowgraph(stopping), done), (True, ['stop', 'wait']))
+t0 = real_time.monotonic()
+check('...with a timeout, a stuck wait() is given up on', rm.stop_flowgraph(hung, 0.3), False)
+check('...after that long', round(real_time.monotonic() - t0, 1), 0.3)
+stuck.set()
 
 print('\nall as expected' if not bad else f'\n{bad} unexpected')
 sys.exit(1 if bad else 0)

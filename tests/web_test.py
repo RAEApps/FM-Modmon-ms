@@ -3,7 +3,6 @@ bad bodies, signing in and out, idle sessions, and control requests through
 MainWindow._web_commands / _web_command (on a stub window: no SDR, no flowgraph).
 Localhost only, on an ephemeral port."""
 import http.client
-import importlib.util
 import json
 import os
 import sys
@@ -13,9 +12,8 @@ import types
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 from PyQt5 import QtWidgets
 
 app = QtWidgets.QApplication([])   # the favicon is drawn with Qt

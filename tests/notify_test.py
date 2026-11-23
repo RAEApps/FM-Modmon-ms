@@ -5,7 +5,6 @@ password from FM_MODMON_SMTP_PASSWORD (Credential Manager is never read)."""
 import base64
 import email
 import email.policy
-import importlib.util
 import json
 import os
 import queue
@@ -19,9 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 
 os.environ['FM_MODMON_SMTP_PASSWORD'] = 'env-secret'
 rm.credential_read = lambda target: None   # never the real Credential Manager entry
@@ -257,6 +255,26 @@ n.event('clear', 'later event')
 wait_for(lambda: hook.posts, rm.NOTIFY_BATCH_S + 3)
 check('a later event: its own message', [e['text'] for e in hook.posts[0][2]['events']] if hook.posts else None,
       ['later event'])
+
+print('--- at exit, events waiting in the batch go out, not lost')
+time.sleep(rm.NOTIFY_BATCH_S)
+hook.posts.clear()
+n.event('raise', 'waiting 1')
+time.sleep(0.1)                  # (taken into the batch being gathered)
+n.event('raise', 'waiting 2')    # (still queued)
+n.send_now('startstop', 'stopped')
+check('send_now: the waiting events and its own, at once',
+      [e['text'] for e in hook.posts[0][2]['events']] if hook.posts else None, ['waiting 1', 'waiting 2', 'stopped'])
+time.sleep(rm.NOTIFY_BATCH_S + 0.4)
+check('...and not sent again', len(hook.posts), 1)
+hook.posts.clear()
+n.event('sdr', 'SDR lost')
+time.sleep(0.1)
+n.flush()
+check('flush (restarting): only what waits', [e['text'] for e in hook.posts[0][2]['events']] if hook.posts else None,
+      ['SDR lost'])
+time.sleep(rm.NOTIFY_BATCH_S + 0.4)
+check('...once', len(hook.posts), 1)
 
 print('--- a failing endpoint is retried after NOTIFY_RETRY_S')
 hook.posts.clear()

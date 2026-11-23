@@ -2,7 +2,6 @@
 Events, Stomp and HTTP transports, trigger-time, links, text, bad slides,
 download limits, failover and SRV ordering. No network or SDR needed."""
 import datetime
-import importlib.util
 import json
 import os
 import socket
@@ -14,9 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 sys.stdout.reconfigure(encoding='utf-8')
-spec = importlib.util.spec_from_file_location('fm_modmon', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'fm-modmon-ms.py'))
-rm = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rm)
+from loadapp import load_app  # noqa: E402
+rm = load_app()
 
 SERVICE = 'fm/ce1/c479/09580'
 PNG = b'\x89PNG\r\n\x1a\n' + b'\0' * 64
